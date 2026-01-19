@@ -1,0 +1,11 @@
+# Core dependencies
+numpy>=1.20.0
+pyrender>=0.1.45
+trimesh>=3.9.0
+opencv-python>=4.5.0
+scipy>=1.7.0
+
+# Optional dependencies
+# Uncomment if needed:
+# pyyaml>=5.4.0        # For YAML config files
+# matplotlib>=3.3.0    # For depth colormaps
