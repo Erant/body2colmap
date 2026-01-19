@@ -9,7 +9,7 @@ Cameras look at a target point (typically mesh centroid).
 """
 
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from numpy.typing import NDArray
 
 from .camera import Camera
