@@ -302,12 +302,113 @@ class Renderer:
         if self.scene.skeleton_joints is None:
             raise ValueError("Scene has no skeleton data")
 
-        # TODO: Implement skeleton rendering
-        # 1. Create pyrender scene
-        # 2. Add sphere at each joint position
-        # 3. Add cylinder for each bone (if bone connectivity available)
-        # 4. Render with camera
-        raise NotImplementedError("Skeleton rendering not yet implemented")
+        try:
+            import pyrender
+            import trimesh
+            from . import skeleton as skel_module
+        except ImportError as e:
+            raise ImportError(f"Required dependencies not available: {e}")
+
+        # Create pyrender scene
+        pr_scene = pyrender.Scene(
+            bg_color=[0, 0, 0, 0],  # Transparent background
+            ambient_light=[0.8, 0.8, 0.8]  # Bright ambient for skeleton
+        )
+
+        # Get bone connectivity
+        bones = skel_module.get_skeleton_bones(self.scene.skeleton_format)
+
+        # Add joints as spheres
+        for joint_pos in self.scene.skeleton_joints:
+            sphere = trimesh.creation.icosphere(subdivisions=2, radius=joint_radius)
+            sphere.vertices += joint_pos
+            sphere.visual.vertex_colors = np.array([
+                int(joint_color[0] * 255),
+                int(joint_color[1] * 255),
+                int(joint_color[2] * 255),
+                255
+            ], dtype=np.uint8)
+
+            mesh = pyrender.Mesh.from_trimesh(sphere, smooth=False)
+            pr_scene.add(mesh)
+
+        # Add bones as cylinders
+        for start_idx, end_idx in bones:
+            if start_idx >= len(self.scene.skeleton_joints) or end_idx >= len(self.scene.skeleton_joints):
+                continue  # Skip invalid bone indices
+
+            start_pos = self.scene.skeleton_joints[start_idx]
+            end_pos = self.scene.skeleton_joints[end_idx]
+
+            # Create cylinder connecting start to end
+            direction = end_pos - start_pos
+            length = np.linalg.norm(direction)
+
+            if length < 1e-6:
+                continue  # Skip zero-length bones
+
+            # Create cylinder along Z axis
+            cylinder = trimesh.creation.cylinder(
+                radius=bone_radius,
+                height=length,
+                sections=8
+            )
+
+            # Rotate and translate to connect joints
+            # Cylinder default: along Z axis, centered at origin
+            # We need: from start_pos to end_pos
+
+            # Compute rotation to align Z axis with bone direction
+            z_axis = np.array([0, 0, 1], dtype=np.float32)
+            bone_dir = direction / length
+
+            # Rotation axis: cross product
+            rot_axis = np.cross(z_axis, bone_dir)
+            rot_axis_len = np.linalg.norm(rot_axis)
+
+            if rot_axis_len > 1e-6:
+                rot_axis = rot_axis / rot_axis_len
+                # Rotation angle
+                cos_angle = np.dot(z_axis, bone_dir)
+                angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+
+                # Build rotation matrix
+                rot_matrix = trimesh.transformations.rotation_matrix(angle, rot_axis)
+            else:
+                # Parallel or anti-parallel
+                if np.dot(z_axis, bone_dir) > 0:
+                    rot_matrix = np.eye(4)
+                else:
+                    # 180 degree rotation
+                    rot_matrix = trimesh.transformations.rotation_matrix(np.pi, [1, 0, 0])
+
+            # Translate to center between joints
+            center = (start_pos + end_pos) / 2
+            rot_matrix[:3, 3] = center
+
+            cylinder.apply_transform(rot_matrix)
+            cylinder.visual.vertex_colors = np.array([
+                int(bone_color[0] * 255),
+                int(bone_color[1] * 255),
+                int(bone_color[2] * 255),
+                255
+            ], dtype=np.uint8)
+
+            mesh = pyrender.Mesh.from_trimesh(cylinder, smooth=False)
+            pr_scene.add(mesh)
+
+        # Add camera
+        pr_camera = pyrender.PerspectiveCamera(
+            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
+            aspectRatio=self.width / self.height
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        # Render
+        renderer = self._get_pyrender_renderer()
+        color, depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
+
+        return color
 
     def render_composite(
         self,
@@ -335,11 +436,51 @@ class Renderer:
 
             Alpha channel comes from base layer only (mesh or depth).
         """
-        # TODO: Implement composite rendering
-        # 1. Render base layer (mesh or depth)
-        # 2. If skeleton requested, render skeleton
-        # 3. Composite skeleton over base (alpha blending)
-        raise NotImplementedError("Composite rendering not yet implemented")
+        # Render base layer
+        base_image = None
+
+        if "mesh" in modes:
+            mesh_opts = modes["mesh"] if isinstance(modes["mesh"], dict) else {}
+            base_image = self.render_mesh(
+                camera,
+                mesh_color=mesh_opts.get("color"),
+                bg_color=mesh_opts.get("bg_color", (1.0, 1.0, 1.0))
+            )
+        elif "depth" in modes:
+            depth_opts = modes["depth"] if isinstance(modes["depth"], dict) else {}
+            base_image = self.render_depth(
+                camera,
+                normalize=depth_opts.get("normalize", True),
+                colormap=depth_opts.get("colormap")
+            )
+
+        if base_image is None:
+            raise ValueError("Must specify 'mesh' or 'depth' as base layer")
+
+        # Overlay skeleton if requested
+        if "skeleton" in modes and self.scene.skeleton_joints is not None:
+            skel_opts = modes["skeleton"] if isinstance(modes["skeleton"], dict) else {}
+
+            # Render skeleton
+            skel_image = self.render_skeleton(
+                camera,
+                joint_radius=skel_opts.get("joint_radius", 0.015),
+                bone_radius=skel_opts.get("bone_radius", 0.008),
+                joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
+                bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0))
+            )
+
+            # Composite skeleton over base using alpha blending
+            # Skeleton alpha determines blending
+            skel_alpha = skel_image[:, :, 3:4] / 255.0
+            base_image[:, :, :3] = (
+                skel_image[:, :, :3] * skel_alpha +
+                base_image[:, :, :3] * (1 - skel_alpha)
+            ).astype(np.uint8)
+
+            # Keep base layer's alpha (skeleton doesn't affect masking)
+
+        return base_image
 
     def __del__(self):
         """Clean up renderer resources."""
