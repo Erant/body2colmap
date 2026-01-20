@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from body2colmap.path import CircularOrbitPath, SinusoidalOrbitPath, HelicalOrbitPath
+from body2colmap.path import OrbitPath
 from body2colmap.camera import Camera
 from core.sam3d_adapter import sam3d_output_to_scene
 
@@ -95,37 +95,46 @@ class Body2COLMAP_CircularPath:
         # Get orbit center from mesh bounding box
         orbit_center = scene.get_bbox_center()
 
-        # Determine focal length
+        # Auto-compute radius if needed
+        if radius <= 0.0:
+            radius = OrbitPath.auto_compute_radius(
+                scene_bounds=scene.get_bounds(),
+                fill_ratio=fill_ratio,
+                fov_deg=47.0
+            )
+
+        # Create camera template with specified intrinsics
         if focal_length <= 0:
             # Auto: ~47° horizontal FOV
-            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
+            camera_template = Camera.from_fov(
+                fov_deg=47.0,
+                image_size=(width, height),
+                is_horizontal_fov=True
+            )
+        else:
+            camera_template = Camera(
+                focal_length=(focal_length, focal_length),
+                image_size=(width, height)
+            )
 
-        # Create circular path generator
-        path_gen = CircularOrbitPath(
-            center=orbit_center,
-            radius=float(radius) if radius > 0 else None,
-            elevation_deg=float(elevation_deg),
-            start_azimuth_deg=float(start_azimuth_deg),
+        # Create OrbitPath and generate cameras
+        path_gen = OrbitPath(
+            target=orbit_center,
+            radius=radius
         )
 
-        # Generate cameras
-        cameras = path_gen.generate_cameras(
-            n_frames=int(n_frames),
-            width=int(width),
-            height=int(height),
-            focal_length=float(focal_length),
-            scene=scene if radius == 0.0 else None,
-            fill_ratio=float(fill_ratio),
+        cameras = path_gen.circular(
+            n_frames=n_frames,
+            elevation_deg=elevation_deg,
+            start_azimuth_deg=start_azimuth_deg,
+            camera_template=camera_template
         )
-
-        # Compute actual radius from first camera
-        actual_radius = np.linalg.norm(cameras[0].position - orbit_center)
 
         # Return B2C_PATH dict
         return ({
             "cameras": cameras,
             "orbit_center": orbit_center,
-            "orbit_radius": float(actual_radius),
+            "orbit_radius": float(radius),
             "pattern": "circular",
             "n_frames": int(n_frames),
         },)
@@ -205,36 +214,45 @@ class Body2COLMAP_SinusoidalPath:
         # Get orbit center
         orbit_center = scene.get_bbox_center()
 
-        # Determine focal length
+        # Auto-compute radius if needed
+        if radius <= 0.0:
+            radius = OrbitPath.auto_compute_radius(
+                scene_bounds=scene.get_bounds(),
+                fill_ratio=fill_ratio,
+                fov_deg=47.0
+            )
+
+        # Create camera template
         if focal_length <= 0:
-            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
+            camera_template = Camera.from_fov(
+                fov_deg=47.0,
+                image_size=(width, height),
+                is_horizontal_fov=True
+            )
+        else:
+            camera_template = Camera(
+                focal_length=(focal_length, focal_length),
+                image_size=(width, height)
+            )
 
-        # Create sinusoidal path generator
-        path_gen = SinusoidalOrbitPath(
-            center=orbit_center,
-            radius=float(radius) if radius > 0 else None,
-            amplitude_deg=float(amplitude_deg),
-            n_cycles=int(n_cycles),
-            start_azimuth_deg=float(start_azimuth_deg),
+        # Create OrbitPath and generate cameras
+        path_gen = OrbitPath(
+            target=orbit_center,
+            radius=radius
         )
 
-        # Generate cameras
-        cameras = path_gen.generate_cameras(
-            n_frames=int(n_frames),
-            width=int(width),
-            height=int(height),
-            focal_length=float(focal_length),
-            scene=scene if radius == 0.0 else None,
-            fill_ratio=float(fill_ratio),
+        cameras = path_gen.sinusoidal(
+            n_frames=n_frames,
+            amplitude_deg=amplitude_deg,
+            n_cycles=n_cycles,
+            start_azimuth_deg=start_azimuth_deg,
+            camera_template=camera_template
         )
-
-        # Compute actual radius from first camera
-        actual_radius = np.linalg.norm(cameras[0].position - orbit_center)
 
         return ({
             "cameras": cameras,
             "orbit_center": orbit_center,
-            "orbit_radius": float(actual_radius),
+            "orbit_radius": float(radius),
             "pattern": "sinusoidal",
             "n_frames": int(n_frames),
         },)
@@ -327,38 +345,47 @@ class Body2COLMAP_HelicalPath:
         # Get orbit center
         orbit_center = scene.get_bbox_center()
 
-        # Determine focal length
+        # Auto-compute radius if needed
+        if radius <= 0.0:
+            radius = OrbitPath.auto_compute_radius(
+                scene_bounds=scene.get_bounds(),
+                fill_ratio=fill_ratio,
+                fov_deg=47.0
+            )
+
+        # Create camera template
         if focal_length <= 0:
-            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
+            camera_template = Camera.from_fov(
+                fov_deg=47.0,
+                image_size=(width, height),
+                is_horizontal_fov=True
+            )
+        else:
+            camera_template = Camera(
+                focal_length=(focal_length, focal_length),
+                image_size=(width, height)
+            )
 
-        # Create helical path generator
-        path_gen = HelicalOrbitPath(
-            center=orbit_center,
-            radius=float(radius) if radius > 0 else None,
-            n_loops=int(n_loops),
-            amplitude_deg=float(amplitude_deg),
-            lead_in_deg=float(lead_in_deg),
-            lead_out_deg=float(lead_out_deg),
-            start_azimuth_deg=float(start_azimuth_deg),
+        # Create OrbitPath and generate cameras
+        path_gen = OrbitPath(
+            target=orbit_center,
+            radius=radius
         )
 
-        # Generate cameras
-        cameras = path_gen.generate_cameras(
-            n_frames=int(n_frames),
-            width=int(width),
-            height=int(height),
-            focal_length=float(focal_length),
-            scene=scene if radius == 0.0 else None,
-            fill_ratio=float(fill_ratio),
+        cameras = path_gen.helical(
+            n_frames=n_frames,
+            n_loops=n_loops,
+            amplitude_deg=amplitude_deg,
+            lead_in_deg=lead_in_deg,
+            lead_out_deg=lead_out_deg,
+            start_azimuth_deg=start_azimuth_deg,
+            camera_template=camera_template
         )
-
-        # Compute actual radius from first camera
-        actual_radius = np.linalg.norm(cameras[0].position - orbit_center)
 
         return ({
             "cameras": cameras,
             "orbit_center": orbit_center,
-            "orbit_radius": float(actual_radius),
+            "orbit_radius": float(radius),
             "pattern": "helical",
             "n_frames": int(n_frames),
         },)

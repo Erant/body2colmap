@@ -173,15 +173,22 @@ class Body2COLMAP_Render:
             for cam in cameras:
                 cam.width = width
                 cam.height = height
-                cam.focal_length = focal_length
+                cam.fx = focal_length
+                cam.fy = focal_length
+                # Update principal point to image center
+                cam.cx = width / 2.0
+                cam.cy = height / 2.0
         else:
             # Just update resolution
             for cam in cameras:
                 cam.width = width
                 cam.height = height
+                # Update principal point to image center
+                cam.cx = width / 2.0
+                cam.cy = height / 2.0
 
         # Get actual focal length
-        actual_focal_length = cameras[0].focal_length
+        actual_focal_length = cameras[0].fx
 
         # Prepare render colors
         mesh_color = (mesh_color_r, mesh_color_g, mesh_color_b)
