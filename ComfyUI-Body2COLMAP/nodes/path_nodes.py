@@ -4,6 +4,7 @@ import numpy as np
 from body2colmap.path import OrbitPath
 from body2colmap.camera import Camera
 from ..core.sam3d_adapter import sam3d_output_to_scene
+from ..core.path_utils import compute_smart_orbit_radius
 
 
 class Body2COLMAP_CircularPath:
@@ -91,27 +92,25 @@ class Body2COLMAP_CircularPath:
         # Get orbit center from mesh bounding box
         orbit_center = scene.get_bbox_center()
 
-        # Auto-compute radius if needed
+        # Determine focal length (needed for auto-framing)
+        if focal_length <= 0:
+            # Auto: ~47° horizontal FOV
+            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
+
+        # Auto-compute radius if needed using SMART algorithm from pipeline
         if radius <= 0.0:
-            radius = OrbitPath.auto_compute_radius(
-                scene_bounds=scene.get_bounds(),
-                fill_ratio=fill_ratio,
-                fov_deg=47.0
+            radius = compute_smart_orbit_radius(
+                scene=scene,
+                render_size=(width, height),
+                focal_length=focal_length,
+                fill_ratio=fill_ratio
             )
 
         # Create camera template with specified intrinsics
-        if focal_length <= 0:
-            # Auto: ~47° horizontal FOV
-            camera_template = Camera.from_fov(
-                fov_deg=47.0,
-                image_size=(width, height),
-                is_horizontal_fov=True
-            )
-        else:
-            camera_template = Camera(
-                focal_length=(focal_length, focal_length),
-                image_size=(width, height)
-            )
+        camera_template = Camera(
+            focal_length=(focal_length, focal_length),
+            image_size=(width, height)
+        )
 
         # Create OrbitPath and generate cameras
         path_gen = OrbitPath(
@@ -210,26 +209,24 @@ class Body2COLMAP_SinusoidalPath:
         # Get orbit center
         orbit_center = scene.get_bbox_center()
 
-        # Auto-compute radius if needed
+        # Determine focal length (needed for auto-framing)
+        if focal_length <= 0:
+            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
+
+        # Auto-compute radius if needed using SMART algorithm from pipeline
         if radius <= 0.0:
-            radius = OrbitPath.auto_compute_radius(
-                scene_bounds=scene.get_bounds(),
-                fill_ratio=fill_ratio,
-                fov_deg=47.0
+            radius = compute_smart_orbit_radius(
+                scene=scene,
+                render_size=(width, height),
+                focal_length=focal_length,
+                fill_ratio=fill_ratio
             )
 
         # Create camera template
-        if focal_length <= 0:
-            camera_template = Camera.from_fov(
-                fov_deg=47.0,
-                image_size=(width, height),
-                is_horizontal_fov=True
-            )
-        else:
-            camera_template = Camera(
-                focal_length=(focal_length, focal_length),
-                image_size=(width, height)
-            )
+        camera_template = Camera(
+            focal_length=(focal_length, focal_length),
+            image_size=(width, height)
+        )
 
         # Create OrbitPath and generate cameras
         path_gen = OrbitPath(
@@ -341,26 +338,24 @@ class Body2COLMAP_HelicalPath:
         # Get orbit center
         orbit_center = scene.get_bbox_center()
 
-        # Auto-compute radius if needed
+        # Determine focal length (needed for auto-framing)
+        if focal_length <= 0:
+            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
+
+        # Auto-compute radius if needed using SMART algorithm from pipeline
         if radius <= 0.0:
-            radius = OrbitPath.auto_compute_radius(
-                scene_bounds=scene.get_bounds(),
-                fill_ratio=fill_ratio,
-                fov_deg=47.0
+            radius = compute_smart_orbit_radius(
+                scene=scene,
+                render_size=(width, height),
+                focal_length=focal_length,
+                fill_ratio=fill_ratio
             )
 
         # Create camera template
-        if focal_length <= 0:
-            camera_template = Camera.from_fov(
-                fov_deg=47.0,
-                image_size=(width, height),
-                is_horizontal_fov=True
-            )
-        else:
-            camera_template = Camera(
-                focal_length=(focal_length, focal_length),
-                image_size=(width, height)
-            )
+        camera_template = Camera(
+            focal_length=(focal_length, focal_length),
+            image_size=(width, height)
+        )
 
         # Create OrbitPath and generate cameras
         path_gen = OrbitPath(

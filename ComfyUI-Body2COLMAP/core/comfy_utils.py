@@ -47,6 +47,11 @@ def rendered_to_comfy(images: List[NDArray]) -> torch.Tensor:
 
     Returns:
         Tensor of shape [B, H, W, 3] in [0, 1] float32 (RGB)
+
+    Note:
+        Alpha channel is currently dropped because ComfyUI's IMAGE type expects RGB.
+        The renderer produces RGBA where alpha represents mesh coverage/opacity.
+        TODO: Consider adding separate MASK output type or compositing against bg_color.
     """
     if not images:
         raise ValueError("Empty image list")
@@ -54,7 +59,8 @@ def rendered_to_comfy(images: List[NDArray]) -> torch.Tensor:
     # Stack into batch
     batch = np.stack(images, axis=0)  # [B, H, W, 4]
 
-    # Drop alpha channel (ComfyUI IMAGE is RGB)
+    # Drop alpha channel (ComfyUI IMAGE is RGB only)
+    # TODO: Should we composite against background color using alpha instead?
     batch = batch[..., :3]  # [B, H, W, 3]
 
     # Convert to float [0, 1]
