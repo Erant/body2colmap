@@ -32,16 +32,16 @@ class Body2COLMAP_Render:
                 "path_config": ("B2C_PATH_CONFIG",),
                 "width": ("INT", {
                     "default": 512,
-                    "min": 64,
+                    "min": 1,
                     "max": 4096,
-                    "step": 64,
+                    "step": 1,
                     "tooltip": "Image width in pixels"
                 }),
                 "height": ("INT", {
                     "default": 512,
-                    "min": 64,
+                    "min": 1,
                     "max": 4096,
-                    "step": 64,
+                    "step": 1,
                     "tooltip": "Image height in pixels"
                 }),
                 "render_mode": ([
