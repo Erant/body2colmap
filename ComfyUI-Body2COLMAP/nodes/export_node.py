@@ -27,7 +27,7 @@ class Body2COLMAP_ExportCOLMAP:
                 }),
                 "image_name": ("STRING", {
                     "default": "frame",
-                    "tooltip": "Base name for images (follows ComfyUI convention: <name>_%05d.png)"
+                    "tooltip": "Base name for images (follows ComfyUI convention: <name>_%05d_.png)"
                 }),
             },
             "optional": {
@@ -50,7 +50,7 @@ class Body2COLMAP_ExportCOLMAP:
         Creates:
             output_directory/
             ├── images/           (if images provided)
-            │   ├── frame_00001.png
+            │   ├── frame_00001_.png
             │   └── ...
             └── sparse/0/
                 ├── cameras.txt   (camera intrinsics)
@@ -69,8 +69,8 @@ class Body2COLMAP_ExportCOLMAP:
         sparse_path.mkdir(parents=True, exist_ok=True)
 
         # Generate image filenames using ComfyUI convention
-        # Format: <image_name>_%05d.png with 1-based indexing
-        image_names = [f"{image_name}_{i+1:05d}.png" for i in range(len(cameras))]
+        # Format: <image_name>_%05d_.png with 1-based indexing
+        image_names = [f"{image_name}_{i+1:05d}_.png" for i in range(len(cameras))]
 
         # Save images if provided
         if images is not None:
