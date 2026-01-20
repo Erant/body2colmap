@@ -1,0 +1,71 @@
+# Example Body2COLMAP Configuration
+#
+# This example configuration renders mesh, depth, and skeleton views
+# with a helical orbit pattern suitable for 3D Gaussian Splatting.
+
+# Input SAM-3D-Body .npz file
+input_file: "~/tmp/estimate.npz"
+
+# Rendering configuration
+render:
+  # HD resolution
+  resolution: [1024, 1024]
+
+  # Pleasant blue-gray mesh color
+  mesh_color: [0.65, 0.74, 0.86]
+
+  # White background
+  bg_color: [1.0, 1.0, 1.0]
+
+  # Render multiple views: mesh, depth, skeleton overlay, and composite
+  modes: ["mesh", "depth", "mesh+skeleton", "depth+skeleton"]
+
+# Camera configuration
+camera:
+  # Auto-compute focal length for natural field of view
+  focal_length: null
+
+  # Automatically frame mesh in view
+  auto_frame: true
+
+  # Fill 80% of frame with mesh
+  fill_ratio: 0.8
+
+# Orbit path configuration
+path:
+  # Helical pattern provides good coverage for 3DGS
+  pattern: "helical"
+
+  # 120 frames = good coverage for training
+  n_frames: 120
+
+  # Auto-compute orbit radius based on mesh size
+  radius: null
+
+  # Helical parameters for smooth spiral
+  helical_loops: 3
+  helical_amplitude_deg: 30.0
+  helical_lead_in_deg: 45.0
+  helical_lead_out_deg: 45.0
+
+# Skeleton rendering (OpenPose Body25+Hands format)
+skeleton:
+  enabled: true
+  format: "openpose_body25_hands"
+  joint_radius: 0.02
+  bone_radius: 0.012
+
+# Export configuration
+export:
+  # Output directory
+  output_dir: "./output"
+
+  # PNG format with 4-digit frame numbers
+  image_format: "png"
+  filename_pattern: "frame_{:04d}.png"
+
+  # Export COLMAP sparse reconstruction
+  colmap: true
+
+  # Sample 50K points from mesh surface
+  pointcloud_samples: 50000

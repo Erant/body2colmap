@@ -26,8 +26,22 @@ def main(argv: Optional[list] = None) -> int:
     parser = create_argument_parser()
     args = parser.parse_args(argv)
 
+    # Handle --save-config
+    if args.save_config:
+        template = Config.generate_default_config_template()
+        with open(args.save_config, 'w') as f:
+            f.write(template)
+        print(f"Default configuration saved to: {args.save_config}")
+        print(f"Edit this file and use with: body2colmap --config {args.save_config}")
+        return 0
+
     # Create config
-    config = Config.from_args(args)
+    try:
+        config = Config.from_args(args)
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        print(f"\nUse --help for usage information or --save-config to generate a template.", file=sys.stderr)
+        return 1
 
     # Print banner
     if args.verbose:
@@ -88,17 +102,55 @@ def main(argv: Optional[list] = None) -> int:
         # Render
         if args.verbose:
             print("\n[3/4] Rendering frames...")
-            print(f"  Mode: {config.render.modes[0]}")
+            print(f"  Modes: {', '.join(config.render.modes)}")
 
-        rendered = pipeline.render_all(
-            modes=config.render.modes,
-            mesh_color=config.render.mesh_color,
-            bg_color=config.render.bg_color
-        )
+        # Parse render modes and handle composites
+        rendered = {}
+        for mode_str in config.render.modes:
+            if '+' in mode_str:
+                # Composite mode (e.g., "mesh+skeleton" or "depth+skeleton")
+                parts = mode_str.split('+')
+                base_mode = parts[0].strip()
+                overlay_modes = [p.strip() for p in parts[1:]]
 
-        if args.verbose:
-            for mode, images in rendered.items():
-                print(f"  Rendered {len(images)} {mode} frames")
+                # Build composite rendering configuration
+                composite_modes = {base_mode: {}}
+
+                if base_mode == "mesh":
+                    composite_modes[base_mode]["color"] = config.render.mesh_color
+                    composite_modes[base_mode]["bg_color"] = config.render.bg_color
+
+                # Add overlays
+                for overlay in overlay_modes:
+                    if overlay == "skeleton":
+                        composite_modes["skeleton"] = {
+                            "joint_radius": config.skeleton.joint_radius,
+                            "bone_radius": config.skeleton.bone_radius,
+                            "use_openpose_colors": True
+                        }
+
+                # Render composite for all frames
+                mode_images = []
+                for camera in pipeline.cameras:
+                    img = pipeline.renderer.render_composite(camera, composite_modes)
+                    mode_images.append(img)
+
+                rendered[mode_str] = mode_images
+
+                if args.verbose:
+                    print(f"  Rendered {len(mode_images)} {mode_str} frames")
+            else:
+                # Single mode rendering
+                mode_rendered = pipeline.render_all(
+                    modes=[mode_str],
+                    mesh_color=config.render.mesh_color,
+                    bg_color=config.render.bg_color
+                )
+                rendered.update(mode_rendered)
+
+                if args.verbose:
+                    for mode, images in mode_rendered.items():
+                        print(f"  Rendered {len(images)} {mode} frames")
 
         # Export
         if args.verbose:
