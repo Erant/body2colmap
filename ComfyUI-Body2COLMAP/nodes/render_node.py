@@ -190,66 +190,60 @@ class Body2COLMAP_Render:
         mesh_color = (mesh_color_r, mesh_color_g, mesh_color_b)
         bg_color = (bg_color_r, bg_color_g, bg_color_b)
 
-        # Create renderer
-        renderer = Renderer(width=width, height=height)
+        # Create renderer - requires scene and render_size tuple
+        renderer = Renderer(scene=scene, render_size=(width, height))
 
         # Render all frames
         rendered_images = []
 
-        try:
-            for i, camera in enumerate(cameras):
-                # Determine render mode
-                if render_mode == "mesh":
-                    img = renderer.render_mesh(
-                        scene=scene,
-                        camera=camera,
-                        mesh_color=mesh_color,
-                        bg_color=bg_color,
-                    )
-                elif render_mode == "depth":
-                    img = renderer.render_depth(
-                        scene=scene,
-                        camera=camera,
-                        colormap=depth_colormap,
-                        bg_color=bg_color,
-                    )
-                elif render_mode == "skeleton":
-                    img = renderer.render_skeleton(
-                        scene=scene,
-                        camera=camera,
-                        skeleton_format=skeleton_format,
-                        joint_radius=joint_radius,
-                        bone_radius=bone_radius,
-                        bg_color=bg_color,
-                    )
-                elif render_mode == "mesh+skeleton":
-                    img = renderer.render_mesh_with_skeleton(
-                        scene=scene,
-                        camera=camera,
-                        mesh_color=mesh_color,
-                        skeleton_format=skeleton_format,
-                        joint_radius=joint_radius,
-                        bone_radius=bone_radius,
-                        bg_color=bg_color,
-                    )
-                elif render_mode == "depth+skeleton":
-                    img = renderer.render_depth_with_skeleton(
-                        scene=scene,
-                        camera=camera,
-                        depth_colormap=depth_colormap,
-                        skeleton_format=skeleton_format,
-                        joint_radius=joint_radius,
-                        bone_radius=bone_radius,
-                        bg_color=bg_color,
-                    )
-                else:
-                    raise ValueError(f"Unknown render mode: {render_mode}")
+        for i, camera in enumerate(cameras):
+            # Determine render mode
+            if render_mode == "mesh":
+                img = renderer.render_mesh(
+                    camera=camera,
+                    mesh_color=mesh_color,
+                    bg_color=bg_color,
+                )
+            elif render_mode == "depth":
+                img = renderer.render_depth(
+                    camera=camera,
+                    colormap=depth_colormap,
+                )
+            elif render_mode == "skeleton":
+                img = renderer.render_skeleton(
+                    camera=camera,
+                    target_format=skeleton_format,
+                    joint_radius=joint_radius,
+                    bone_radius=bone_radius,
+                )
+            elif render_mode == "mesh+skeleton":
+                img = renderer.render_composite(
+                    camera=camera,
+                    modes={
+                        "mesh": {"color": mesh_color, "bg_color": bg_color},
+                        "skeleton": {
+                            "target_format": skeleton_format,
+                            "joint_radius": joint_radius,
+                            "bone_radius": bone_radius
+                        }
+                    }
+                )
+            elif render_mode == "depth+skeleton":
+                img = renderer.render_composite(
+                    camera=camera,
+                    modes={
+                        "depth": {"colormap": depth_colormap},
+                        "skeleton": {
+                            "target_format": skeleton_format,
+                            "joint_radius": joint_radius,
+                            "bone_radius": bone_radius
+                        }
+                    }
+                )
+            else:
+                raise ValueError(f"Unknown render mode: {render_mode}")
 
-                rendered_images.append(img)
-
-        finally:
-            # Clean up renderer
-            renderer.close()
+            rendered_images.append(img)
 
         # Convert to ComfyUI IMAGE format
         images_tensor = rendered_to_comfy(rendered_images)
