@@ -16,6 +16,20 @@ from typing import List, Tuple, Optional, Dict
 from numpy.typing import NDArray
 
 
+# MHR70 color palette (RGB 0-1 range)
+# Colors from official SAM-3D-Body visualization
+MHR70_COLORS = {
+    "left": (0.0, 1.0, 0.0),           # Green [0, 255, 0]
+    "right": (1.0, 0.502, 0.0),        # Orange [255, 128, 0]
+    "center": (0.2, 0.6, 1.0),         # Cyan [51, 153, 255]
+    "left_index": (1.0, 0.6, 1.0),     # Pink [255, 153, 255]
+    "left_middle": (0.4, 0.698, 1.0),  # Light Blue [102, 178, 255]
+    "left_ring": (1.0, 0.2, 0.2),      # Red [255, 51, 51]
+    "right_index": (1.0, 0.6, 1.0),    # Pink [255, 153, 255]
+    "right_middle": (0.4, 0.698, 1.0), # Light Blue [102, 178, 255]
+    "right_ring": (1.0, 0.2, 0.2),     # Red [255, 51, 51]
+}
+
 # OpenPose color palette (RGB 0-1 range)
 # Colors for different body parts following OpenPose conventions
 OPENPOSE_COLORS = {
@@ -117,42 +131,127 @@ OPENPOSE_BODY25_HANDS_ALL_BONES = (
 )
 
 
-# MHR70 bone connectivity (SAM-3D-Body / SMPL-X based)
-# MHR70 follows SMPL-X topology with 70 joints:
-# - Body: ~25 joints (similar to SMPL)
-# - Hands: ~40 joints (20 per hand)
-# - Face: ~5 joints
+# MHR70 bone connectivity (from SAM-3D-Body official definitions)
+# https://github.com/facebookresearch/sam-3d-body/blob/main/sam_3d_body/metadata/mhr70.py
+# 70 joints total including body, hands, and face keypoints
 
-# Main body bones for MHR70 (estimated based on SMPL-X structure)
+# MHR70 joint indices (key body joints)
+MHR70_JOINTS = {
+    "nose": 0,
+    "left_eye": 1,
+    "right_eye": 2,
+    "left_ear": 3,
+    "right_ear": 4,
+    "left_shoulder": 5,
+    "right_shoulder": 6,
+    "left_elbow": 7,
+    "right_elbow": 8,
+    "left_hip": 9,
+    "right_hip": 10,
+    "left_knee": 11,
+    "right_knee": 12,
+    "left_ankle": 13,
+    "right_ankle": 14,
+    "left_big_toe": 15,
+    "left_small_toe": 16,
+    "left_heel": 17,
+    "right_big_toe": 18,
+    "right_small_toe": 19,
+    "right_heel": 20,
+    "right_wrist": 41,
+    "left_wrist": 62,
+    "neck": 69,
+}
+
+# MHR70 bone connectivity (from SAM-3D-Body official definitions)
+# https://github.com/facebookresearch/sam-3d-body/blob/main/sam_3d_body/metadata/mhr70.py
+# Total: 65 bones (11 legs + 7 torso + 7 head + 20 left hand + 20 right hand)
+
 MHR70_BODY_BONES = [
-    # Spine/torso
-    (0, 3),   # Pelvis → Spine1
-    (3, 6),   # Spine1 → Spine2
-    (6, 9),   # Spine2 → Spine3
-    (9, 12),  # Spine3 → Neck
-    (12, 15), # Neck → Head
+    # Legs (11 bones)
+    (13, 11),  # left_ankle → left_knee
+    (11, 9),   # left_knee → left_hip
+    (14, 12),  # right_ankle → right_knee
+    (12, 10),  # right_knee → right_hip
+    (9, 10),   # left_hip → right_hip
+    (13, 15),  # left_ankle → left_big_toe
+    (13, 16),  # left_ankle → left_small_toe
+    (13, 17),  # left_ankle → left_heel
+    (14, 18),  # right_ankle → right_big_toe
+    (14, 19),  # right_ankle → right_small_toe
+    (14, 20),  # right_ankle → right_heel
 
-    # Left arm
-    (9, 13),  # Spine3 → LShoulder
-    (13, 16), # LShoulder → LElbow
-    (16, 18), # LElbow → LWrist
+    # Torso (7 bones)
+    (5, 9),    # left_shoulder → left_hip
+    (6, 10),   # right_shoulder → right_hip
+    (5, 6),    # left_shoulder → right_shoulder
+    (5, 7),    # left_shoulder → left_elbow
+    (6, 8),    # right_shoulder → right_elbow
+    (7, 62),   # left_elbow → left_wrist
+    (8, 41),   # right_elbow → right_wrist
 
-    # Right arm
-    (9, 14),  # Spine3 → RShoulder
-    (14, 17), # RShoulder → RElbow
-    (17, 19), # RElbow → RWrist
+    # Head (7 bones)
+    (1, 2),    # left_eye → right_eye
+    (0, 1),    # nose → left_eye
+    (0, 2),    # nose → right_eye
+    (1, 3),    # left_eye → left_ear
+    (2, 4),    # right_eye → right_ear
+    (3, 5),    # left_ear → left_shoulder
+    (4, 6),    # right_ear → right_shoulder
 
-    # Left leg
-    (0, 1),   # Pelvis → LHip
-    (1, 4),   # LHip → LKnee
-    (4, 7),   # LKnee → LAnkle
-    (7, 10),  # LAnkle → LFoot
+    # Left hand (20 bones) - wrist index is 62
+    # Thumb
+    (62, 45),  # left_wrist → thumb_base
+    (45, 44),
+    (44, 43),
+    (43, 42),  # → thumb_tip
+    # Index finger
+    (62, 49),  # left_wrist → index_base
+    (49, 48),
+    (48, 47),
+    (47, 46),  # → index_tip
+    # Middle finger
+    (62, 53),  # left_wrist → middle_base
+    (53, 52),
+    (52, 51),
+    (51, 50),  # → middle_tip
+    # Ring finger
+    (62, 57),  # left_wrist → ring_base
+    (57, 56),
+    (56, 55),
+    (55, 54),  # → ring_tip
+    # Pinky finger
+    (62, 61),  # left_wrist → pinky_base
+    (61, 60),
+    (60, 59),
+    (59, 58),  # → pinky_tip
 
-    # Right leg
-    (0, 2),   # Pelvis → RHip
-    (2, 5),   # RHip → RKnee
-    (5, 8),   # RKnee → RAnkle
-    (8, 11),  # RAnkle → RFoot
+    # Right hand (20 bones) - wrist index is 41
+    # Thumb
+    (41, 24),  # right_wrist → thumb_base
+    (24, 23),
+    (23, 22),
+    (22, 21),  # → thumb_tip
+    # Index finger
+    (41, 28),  # right_wrist → index_base
+    (28, 27),
+    (27, 26),
+    (26, 25),  # → index_tip
+    # Middle finger
+    (41, 32),  # right_wrist → middle_base
+    (32, 31),
+    (31, 30),
+    (30, 29),  # → middle_tip
+    # Ring finger
+    (41, 36),  # right_wrist → ring_base
+    (36, 35),
+    (35, 34),
+    (34, 33),  # → ring_tip
+    # Pinky finger
+    (41, 40),  # right_wrist → pinky_base
+    (40, 39),
+    (39, 38),
+    (38, 37),  # → pinky_tip
 ]
 
 
@@ -236,6 +335,77 @@ def validate_skeleton_format(joints: NDArray[np.float32], format_name: str) -> b
     return len(joints) == expected
 
 
+def get_bone_colors_mhr70() -> Dict[Tuple[int, int], Tuple[float, float, float]]:
+    """
+    Get official MHR70 colors for each bone.
+
+    Returns a dictionary mapping bone (start_idx, end_idx) to RGB color (0-1 range).
+    Colors follow the official SAM-3D-Body visualization scheme.
+
+    Returns:
+        Dictionary mapping bones to colors
+    """
+    colors = {}
+
+    # Left leg bones (green)
+    for bone in [(13, 11), (11, 9), (13, 15), (13, 16), (13, 17)]:
+        colors[bone] = MHR70_COLORS["left"]
+
+    # Right leg bones (orange)
+    for bone in [(14, 12), (12, 10), (14, 18), (14, 19), (14, 20)]:
+        colors[bone] = MHR70_COLORS["right"]
+
+    # Center/torso bones (cyan)
+    for bone in [(9, 10), (5, 9), (6, 10), (5, 6)]:
+        colors[bone] = MHR70_COLORS["center"]
+
+    # Left arm bones (green)
+    for bone in [(5, 7), (7, 62)]:
+        colors[bone] = MHR70_COLORS["left"]
+
+    # Right arm bones (orange)
+    for bone in [(6, 8), (8, 41)]:
+        colors[bone] = MHR70_COLORS["right"]
+
+    # Head bones (cyan)
+    for bone in [(1, 2), (0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6)]:
+        colors[bone] = MHR70_COLORS["center"]
+
+    # Left hand bones (green with variations for fingers)
+    left_thumb = [(62, 45), (45, 44), (44, 43), (43, 42)]
+    left_index = [(62, 49), (49, 48), (48, 47), (47, 46)]
+    left_middle = [(62, 53), (53, 52), (52, 51), (51, 50)]
+    left_ring = [(62, 57), (57, 56), (56, 55), (55, 54)]
+    left_pinky = [(62, 61), (61, 60), (60, 59), (59, 58)]
+
+    for bone in left_thumb + left_pinky:
+        colors[bone] = MHR70_COLORS["left"]
+    for bone in left_index:
+        colors[bone] = MHR70_COLORS["left_index"]
+    for bone in left_middle:
+        colors[bone] = MHR70_COLORS["left_middle"]
+    for bone in left_ring:
+        colors[bone] = MHR70_COLORS["left_ring"]
+
+    # Right hand bones (orange with variations for fingers)
+    right_thumb = [(41, 24), (24, 23), (23, 22), (22, 21)]
+    right_index = [(41, 28), (28, 27), (27, 26), (26, 25)]
+    right_middle = [(41, 32), (32, 31), (31, 30), (30, 29)]
+    right_ring = [(41, 36), (36, 35), (35, 34), (34, 33)]
+    right_pinky = [(41, 40), (40, 39), (39, 38), (38, 37)]
+
+    for bone in right_thumb + right_pinky:
+        colors[bone] = MHR70_COLORS["right"]
+    for bone in right_index:
+        colors[bone] = MHR70_COLORS["right_index"]
+    for bone in right_middle:
+        colors[bone] = MHR70_COLORS["right_middle"]
+    for bone in right_ring:
+        colors[bone] = MHR70_COLORS["right_ring"]
+
+    return colors
+
+
 def get_bone_colors_openpose_style(format_name: str) -> Dict[Tuple[int, int], Tuple[float, float, float]]:
     """
     Get OpenPose-style colors for each bone.
@@ -249,34 +419,7 @@ def get_bone_colors_openpose_style(format_name: str) -> Dict[Tuple[int, int], Tu
         Dictionary mapping bones to colors
     """
     if format_name == "mhr70":
-        # Color each bone based on body part
-        colors = {}
-
-        # Head/neck bones
-        for bone in [(12, 15)]:  # Neck → Head
-            colors[bone] = OPENPOSE_COLORS["head"]
-
-        # Torso bones
-        for bone in [(0, 3), (3, 6), (6, 9), (9, 12)]:  # Spine chain
-            colors[bone] = OPENPOSE_COLORS["torso"]
-
-        # Right arm bones
-        for bone in [(9, 14), (14, 17), (17, 19)]:  # Spine3 → RShoulder → RElbow → RWrist
-            colors[bone] = OPENPOSE_COLORS["right_arm"]
-
-        # Left arm bones
-        for bone in [(9, 13), (13, 16), (16, 18)]:  # Spine3 → LShoulder → LElbow → LWrist
-            colors[bone] = OPENPOSE_COLORS["left_arm"]
-
-        # Right leg bones
-        for bone in [(0, 2), (2, 5), (5, 8), (8, 11)]:  # Pelvis → RHip → RKnee → RAnkle → RFoot
-            colors[bone] = OPENPOSE_COLORS["right_leg"]
-
-        # Left leg bones
-        for bone in [(0, 1), (1, 4), (4, 7), (7, 10)]:  # Pelvis → LHip → LKnee → LAnkle → LFoot
-            colors[bone] = OPENPOSE_COLORS["left_leg"]
-
-        return colors
+        return get_bone_colors_mhr70()
 
     else:
         # Default: single color for all bones
