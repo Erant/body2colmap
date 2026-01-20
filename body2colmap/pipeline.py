@@ -329,7 +329,8 @@ class OrbitPipeline:
     def export_colmap(
         self,
         output_dir: str,
-        n_pointcloud_samples: int = 50000
+        n_pointcloud_samples: int = 50000,
+        filename_pattern: str = "frame_{:04d}.png"
     ) -> Path:
         """
         Export COLMAP format files.
@@ -342,6 +343,7 @@ class OrbitPipeline:
         Args:
             output_dir: Directory to write files to
             n_pointcloud_samples: Number of points to sample from mesh
+            filename_pattern: Filename pattern for images (must match actual image files)
 
         Returns:
             Path to output directory
@@ -352,8 +354,11 @@ class OrbitPipeline:
         if self.cameras is None:
             raise RuntimeError("Cameras not set. Call set_orbit_params() first.")
 
-        # Generate image filenames (matches default rendering output)
-        image_names = ImageExporter.generate_filenames(len(self.cameras))
+        # Generate image filenames using the provided pattern
+        image_names = ImageExporter.generate_filenames(
+            n_frames=len(self.cameras),
+            pattern=filename_pattern
+        )
 
         # Create exporter
         exporter = ColmapExporter.from_scene_and_cameras(

@@ -157,7 +157,8 @@ def main(argv: Optional[list] = None) -> int:
         if config.export.colmap:
             colmap_dir = pipeline.export_colmap(
                 config.export.output_dir,
-                n_pointcloud_samples=config.export.pointcloud_samples
+                n_pointcloud_samples=config.export.pointcloud_samples,
+                filename_pattern=config.export.filename_pattern
             )
             if args.verbose:
                 print(f"  COLMAP files → {colmap_dir}")
