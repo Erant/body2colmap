@@ -30,35 +30,38 @@ MHR70_COLORS = {
     "right_ring": (1.0, 0.2, 0.2),     # Red [255, 51, 51]
 }
 
-# Official OpenPose Body25 color palette (from poseParametersRender.hpp)
+# OpenPose Body25 color palette (based on poseParametersRender.hpp with correction)
 # RGB values in 0-1 range
+# Note: Official OpenPose has index 8 as red (255,0,0) which duplicates index 1.
+# This creates two red bones (shoulder and thigh). We fix this by continuing
+# the rainbow gradient: index 8 should be cyan-green to bridge green→cyan.
 # Source: https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/include/openpose/pose/poseParametersRender.hpp
 OPENPOSE_BODY25_COLORS = [
-    (255/255, 0/255, 85/255),    # 0
-    (255/255, 0/255, 0/255),     # 1
-    (255/255, 85/255, 0/255),    # 2
-    (255/255, 170/255, 0/255),   # 3
-    (255/255, 255/255, 0/255),   # 4
-    (170/255, 255/255, 0/255),   # 5
-    (85/255, 255/255, 0/255),    # 6
-    (0/255, 255/255, 0/255),     # 7
-    (255/255, 0/255, 0/255),     # 8
-    (0/255, 255/255, 85/255),    # 9
-    (0/255, 255/255, 170/255),   # 10
-    (0/255, 255/255, 255/255),   # 11
-    (0/255, 170/255, 255/255),   # 12
-    (0/255, 85/255, 255/255),    # 13
-    (0/255, 0/255, 255/255),     # 14
-    (255/255, 0/255, 170/255),   # 15
-    (170/255, 0/255, 255/255),   # 16
-    (255/255, 0/255, 255/255),   # 17
-    (85/255, 0/255, 255/255),    # 18
-    (0/255, 0/255, 255/255),     # 19
-    (0/255, 0/255, 255/255),     # 20
-    (0/255, 255/255, 255/255),   # 21
-    (0/255, 255/255, 255/255),   # 22
-    (0/255, 255/255, 255/255),   # 23
-    (0/255, 255/255, 255/255),   # 24
+    (255/255, 0/255, 85/255),    # 0 - Pink-red
+    (255/255, 0/255, 0/255),     # 1 - Red
+    (255/255, 85/255, 0/255),    # 2 - Orange
+    (255/255, 170/255, 0/255),   # 3 - Orange-yellow
+    (255/255, 255/255, 0/255),   # 4 - Yellow
+    (170/255, 255/255, 0/255),   # 5 - Yellow-green
+    (85/255, 255/255, 0/255),    # 6 - Green-yellow
+    (0/255, 255/255, 0/255),     # 7 - Green
+    (0/255, 255/255, 85/255),    # 8 - Cyan-green (CORRECTED from red)
+    (0/255, 255/255, 85/255),    # 9 - Cyan-green
+    (0/255, 255/255, 170/255),   # 10 - Cyan
+    (0/255, 255/255, 255/255),   # 11 - Cyan
+    (0/255, 170/255, 255/255),   # 12 - Cyan-blue
+    (0/255, 85/255, 255/255),    # 13 - Blue
+    (0/255, 0/255, 255/255),     # 14 - Blue
+    (255/255, 0/255, 170/255),   # 15 - Magenta-pink
+    (170/255, 0/255, 255/255),   # 16 - Purple
+    (255/255, 0/255, 255/255),   # 17 - Magenta
+    (85/255, 0/255, 255/255),    # 18 - Purple-blue
+    (0/255, 0/255, 255/255),     # 19 - Blue
+    (0/255, 0/255, 255/255),     # 20 - Blue
+    (0/255, 255/255, 255/255),   # 21 - Cyan
+    (0/255, 255/255, 255/255),   # 22 - Cyan
+    (0/255, 255/255, 255/255),   # 23 - Cyan
+    (0/255, 255/255, 255/255),   # 24 - Cyan
 ]
 
 # OpenPose Body25 bone-to-color mapping
