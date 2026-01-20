@@ -279,7 +279,8 @@ class Renderer:
         bone_radius: float = 0.012,
         joint_color: Tuple[float, float, float] = (1.0, 0.0, 0.0),
         bone_color: Tuple[float, float, float] = None,
-        use_openpose_colors: bool = True
+        use_openpose_colors: bool = True,
+        render_bones: bool = True
     ) -> NDArray[np.uint8]:
         """
         Render 3D skeleton as spheres (joints) and cylinders (bones).
@@ -291,6 +292,7 @@ class Renderer:
             joint_color: RGB color (0-1) for joints
             bone_color: RGB color (0-1) for bones (if not using OpenPose colors)
             use_openpose_colors: If True, use OpenPose color scheme for bones
+            render_bones: If False, only render joints (no bone cylinders)
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8
@@ -318,18 +320,19 @@ class Renderer:
             ambient_light=[1.0, 1.0, 1.0]  # Full bright ambient for clear skeleton
         )
 
-        # Get bone connectivity
-        bones = skel_module.get_skeleton_bones(self.scene.skeleton_format)
-
-        # Get bone colors (OpenPose style or single color)
-        if use_openpose_colors:
-            bone_colors = skel_module.get_bone_colors_openpose_style(self.scene.skeleton_format)
-        else:
-            default_bone_color = bone_color if bone_color is not None else (0.0, 1.0, 0.0)
-            bone_colors = {bone: default_bone_color for bone in bones}
-
         # Add bones as cylinders FIRST (so joints render on top)
-        for start_idx, end_idx in bones:
+        if render_bones:
+            # Get bone connectivity
+            bones = skel_module.get_skeleton_bones(self.scene.skeleton_format)
+
+            # Get bone colors (OpenPose style or single color)
+            if use_openpose_colors:
+                bone_colors = skel_module.get_bone_colors_openpose_style(self.scene.skeleton_format)
+            else:
+                default_bone_color = bone_color if bone_color is not None else (0.0, 1.0, 0.0)
+                bone_colors = {bone: default_bone_color for bone in bones}
+
+            for start_idx, end_idx in bones:
             if start_idx >= len(self.scene.skeleton_joints) or end_idx >= len(self.scene.skeleton_joints):
                 continue  # Skip invalid bone indices
 
