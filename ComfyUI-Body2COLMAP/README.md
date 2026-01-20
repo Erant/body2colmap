@@ -25,21 +25,27 @@ This node pack seamlessly integrates with [ComfyUI-SAM3DBody](https://github.com
 
 ### Method 2: Manual Installation
 
+**Important**: The body2colmap package requires special installation steps due to a PyOpenGL version conflict. Follow these steps in order:
+
 ```bash
-# 1. Install body2colmap package
+# 1. Install body2colmap package using the install script
 cd /path/to/body2colmap
-pip install -e .
+python install.py
 
 # 2. Install node pack
 cd ComfyUI/custom_nodes/
 git clone https://github.com/your-repo/ComfyUI-Body2COLMAP.git
 cd ComfyUI-Body2COLMAP
 pip install -r requirements.txt
+
+# 3. Restart ComfyUI
 ```
+
+**Alternative**: If you prefer manual steps, see [body2colmap/INSTALL.md](https://github.com/Erant/body2colmap/blob/main/INSTALL.md) for detailed instructions.
 
 ### Prerequisites
 
-- **[body2colmap](https://github.com/Erant/body2colmap)**: Core rendering library (install with `pip install -e /path/to/body2colmap`)
+- **[body2colmap](https://github.com/Erant/body2colmap)**: Core rendering library (⚠️ use `python install.py` not `pip install -e .`)
 - **[ComfyUI-SAM3DBody](https://github.com/PozzettiAndrea/ComfyUI-SAM3DBody)**: Generates 3D mesh from single image
 
 ## 🚀 Quick Start

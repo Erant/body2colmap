@@ -1,0 +1,20 @@
+# Installation requirements for body2colmap
+# Install in this order to avoid PyOpenGL version conflicts
+
+# Core dependencies
+numpy>=1.20.0
+scipy>=1.7.0
+opencv-python>=4.5.0
+trimesh>=3.9.0
+
+# Rendering dependencies (install before pyrender)
+PyOpenGL>=3.1.10
+PyOpenGL-accelerate>=3.1.10
+pyglet>=1.4.10
+Pillow>=8.0.0
+imageio>=2.9.0
+networkx>=2.5
+freetype-py>=2.2.0
+
+# Note: pyrender must be installed with --no-deps to avoid PyOpenGL 3.1.0 conflict
+# After installing the above, run: pip install pyrender --no-deps

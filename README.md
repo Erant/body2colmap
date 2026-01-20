@@ -19,26 +19,31 @@ Body2COLMAP is a command-line tool and Python library that converts single-image
 
 ## Installation
 
+**Quick Install** (recommended):
+
 ```bash
 # Clone repository
 git clone https://github.com/yourusername/body2colmap.git
 cd body2colmap
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Install package
-pip install -e .
+# Run install script (handles PyOpenGL version conflicts)
+python install.py
 ```
+
+**Manual Install**: See [INSTALL.md](INSTALL.md) for detailed instructions.
 
 ### Requirements
 
 - Python 3.8+
-- numpy
-- pyrender
-- trimesh
-- opencv-python
-- scipy
+- numpy >= 1.20.0
+- PyOpenGL >= 3.1.10
+- pyrender >= 0.1.45
+- trimesh >= 3.9.0
+- opencv-python >= 4.5.0
+- scipy >= 1.7.0
+- Pillow, imageio, networkx, pyglet, freetype-py
+
+**Note**: Standard `pip install -e .` may fail due to PyOpenGL version conflicts with pyrender. Use `install.py` instead.
 
 ## Quick Start
 
