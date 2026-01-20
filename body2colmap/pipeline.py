@@ -148,8 +148,12 @@ class OrbitPipeline:
             width, height = self.render_size
             min_corner, max_corner = bounds
 
-            # Scene extents in X (horizontal) and Y (vertical) dimensions
-            scene_width = max_corner[0] - min_corner[0]  # X extent
+            # Scene extents - for width, use max of X and Z since camera orbits around
+            # and will see different projections at different angles
+            scene_width = max(
+                max_corner[0] - min_corner[0],  # X extent
+                max_corner[2] - min_corner[2]   # Z extent (depth)
+            )
             scene_height = max_corner[1] - min_corner[1]  # Y extent (up)
 
             # Compute FOVs in radians
