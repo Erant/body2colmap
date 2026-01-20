@@ -30,16 +30,70 @@ MHR70_COLORS = {
     "right_ring": (1.0, 0.2, 0.2),     # Red [255, 51, 51]
 }
 
-# OpenPose color palette (RGB 0-1 range)
-# Colors for different body parts following OpenPose conventions
-OPENPOSE_COLORS = {
-    "head": (1.0, 0.0, 0.85),      # Magenta
-    "torso": (0.7, 0.3, 1.0),       # Purple
-    "right_arm": (1.0, 0.0, 0.0),   # Red
-    "left_arm": (0.0, 1.0, 0.0),    # Green
-    "right_leg": (0.0, 0.0, 1.0),   # Blue
-    "left_leg": (1.0, 1.0, 0.0),    # Yellow
+# Official OpenPose Body25 color palette (from poseParametersRender.hpp)
+# RGB values in 0-1 range
+# Source: https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/include/openpose/pose/poseParametersRender.hpp
+OPENPOSE_BODY25_COLORS = [
+    (255/255, 0/255, 85/255),    # 0
+    (255/255, 0/255, 0/255),     # 1
+    (255/255, 85/255, 0/255),    # 2
+    (255/255, 170/255, 0/255),   # 3
+    (255/255, 255/255, 0/255),   # 4
+    (170/255, 255/255, 0/255),   # 5
+    (85/255, 255/255, 0/255),    # 6
+    (0/255, 255/255, 0/255),     # 7
+    (255/255, 0/255, 0/255),     # 8
+    (0/255, 255/255, 85/255),    # 9
+    (0/255, 255/255, 170/255),   # 10
+    (0/255, 255/255, 255/255),   # 11
+    (0/255, 170/255, 255/255),   # 12
+    (0/255, 85/255, 255/255),    # 13
+    (0/255, 0/255, 255/255),     # 14
+    (255/255, 0/255, 170/255),   # 15
+    (170/255, 0/255, 255/255),   # 16
+    (255/255, 0/255, 255/255),   # 17
+    (85/255, 0/255, 255/255),    # 18
+    (0/255, 0/255, 255/255),     # 19
+    (0/255, 0/255, 255/255),     # 20
+    (0/255, 255/255, 255/255),   # 21
+    (0/255, 255/255, 255/255),   # 22
+    (0/255, 255/255, 255/255),   # 23
+    (0/255, 255/255, 255/255),   # 24
+]
+
+# OpenPose Body25 bone-to-color mapping
+# Each bone (joint pair) is assigned a specific color index from the palette above
+# Format: (joint1, joint2): color_index
+OPENPOSE_BODY25_BONE_COLORS = {
+    (1, 8): 0,    # Neck → MidHip
+    (1, 2): 1,    # Neck → RShoulder
+    (1, 5): 2,    # Neck → LShoulder
+    (2, 3): 3,    # RShoulder → RElbow
+    (3, 4): 4,    # RElbow → RWrist
+    (5, 6): 5,    # LShoulder → LElbow
+    (6, 7): 6,    # LElbow → LWrist
+    (8, 9): 7,    # MidHip → RHip
+    (9, 10): 8,   # RHip → RKnee
+    (10, 11): 9,  # RKnee → RAnkle
+    (8, 12): 10,  # MidHip → LHip
+    (12, 13): 11, # LHip → LKnee
+    (13, 14): 12, # LKnee → LAnkle
+    (1, 0): 13,   # Neck → Nose
+    (0, 15): 14,  # Nose → REye
+    (15, 17): 15, # REye → REar
+    (0, 16): 16,  # Nose → LEye
+    (16, 18): 17, # LEye → LEar
+    (14, 19): 18, # LAnkle → LBigToe
+    (19, 20): 19, # LBigToe → LSmallToe
+    (14, 21): 20, # LAnkle → LHeel
+    (11, 22): 21, # RAnkle → RBigToe
+    (22, 23): 22, # RBigToe → RSmallToe
+    (11, 24): 23, # RAnkle → RHeel
 }
+
+# Hand colors (using bright colors for visibility)
+OPENPOSE_HAND_COLOR_RIGHT = (1.0, 0.0, 0.0)  # Red for right hand
+OPENPOSE_HAND_COLOR_LEFT = (0.0, 1.0, 0.0)   # Green for left hand
 
 
 # OpenPose Body25 + Hands skeleton (65 joints total)
@@ -516,49 +570,58 @@ def get_bone_colors_mhr70() -> Dict[Tuple[int, int], Tuple[float, float, float]]
 
 def get_bone_colors_openpose_body25_hands() -> Dict[Tuple[int, int], Tuple[float, float, float]]:
     """
-    Get OpenPose-style colors for Body25+Hands skeleton.
+    Get official OpenPose Body25+Hands colors for each bone.
 
     Returns a dictionary mapping bone (start_idx, end_idx) to RGB color (0-1 range).
-    Colors follow OpenPose visualization conventions.
+    Uses the official OpenPose Body25 color palette from poseParametersRender.hpp.
 
     Returns:
         Dictionary mapping bones to colors
     """
     colors = {}
 
-    # Head bones (magenta)
-    for bone in [(0, 15), (15, 17), (0, 16), (16, 18)]:  # Nose-eyes-ears
-        colors[bone] = OPENPOSE_COLORS["head"]
+    # Body bones (0-24): Use official Body25 colors
+    for bone, color_idx in OPENPOSE_BODY25_BONE_COLORS.items():
+        colors[bone] = OPENPOSE_BODY25_COLORS[color_idx]
 
-    # Torso bones (purple)
-    for bone in [(0, 1), (1, 8)]:  # Nose-Neck, Neck-MidHip
-        colors[bone] = OPENPOSE_COLORS["torso"]
-
-    # Right arm bones (red)
-    for bone in [(1, 2), (2, 3), (3, 4)]:  # Neck-RShoulder-RElbow-RWrist
-        colors[bone] = OPENPOSE_COLORS["right_arm"]
-
-    # Left arm bones (green)
-    for bone in [(1, 5), (5, 6), (6, 7)]:  # Neck-LShoulder-LElbow-LWrist
-        colors[bone] = OPENPOSE_COLORS["left_arm"]
-
-    # Right leg bones (blue)
-    for bone in [(8, 9), (9, 10), (10, 11), (11, 22), (22, 23), (11, 24)]:  # MidHip-RHip-RKnee-RAnkle-toes-heel
-        colors[bone] = OPENPOSE_COLORS["right_leg"]
-
-    # Left leg bones (yellow)
-    for bone in [(8, 12), (12, 13), (13, 14), (14, 19), (19, 20), (14, 21)]:  # MidHip-LHip-LKnee-LAnkle-toes-heel
-        colors[bone] = OPENPOSE_COLORS["left_leg"]
-
-    # Left hand bones (green, same as left arm)
+    # Left hand bones: Use green (consistent with left side)
     for bone in OPENPOSE_LEFT_HAND_BONES:
-        colors[bone] = OPENPOSE_COLORS["left_arm"]
+        colors[bone] = OPENPOSE_HAND_COLOR_LEFT
 
-    # Right hand bones (red, same as right arm)
+    # Right hand bones: Use red (consistent with right side)
     for bone in OPENPOSE_RIGHT_HAND_BONES:
-        colors[bone] = OPENPOSE_COLORS["right_arm"]
+        colors[bone] = OPENPOSE_HAND_COLOR_RIGHT
 
     return colors
+
+
+def get_joint_colors_from_bones(
+    bone_colors: Dict[Tuple[int, int], Tuple[float, float, float]],
+    num_joints: int
+) -> List[Tuple[float, float, float]]:
+    """
+    Compute joint colors based on connected bone colors.
+
+    For each joint, use the color of one of its connected bones.
+    If multiple bones connect to a joint, use the first one found.
+
+    Args:
+        bone_colors: Dictionary mapping (start_idx, end_idx) to RGB color
+        num_joints: Total number of joints in skeleton
+
+    Returns:
+        List of RGB colors (0-1 range), one per joint
+    """
+    joint_colors = [(1.0, 1.0, 1.0)] * num_joints  # Default white
+
+    for (start_idx, end_idx), color in bone_colors.items():
+        # Assign this bone's color to both joints if not already assigned
+        if joint_colors[start_idx] == (1.0, 1.0, 1.0):
+            joint_colors[start_idx] = color
+        if joint_colors[end_idx] == (1.0, 1.0, 1.0):
+            joint_colors[end_idx] = color
+
+    return joint_colors
 
 
 def get_bone_colors_openpose_style(format_name: str) -> Dict[Tuple[int, int], Tuple[float, float, float]]:

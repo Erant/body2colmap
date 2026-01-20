@@ -334,17 +334,18 @@ class Renderer:
             ambient_light=[1.0, 1.0, 1.0]  # Full bright ambient for clear skeleton
         )
 
+        # Get bone connectivity and colors (needed for both bones and joints)
+        bones = skel_module.get_skeleton_bones(skeleton_format)
+
+        # Get bone colors (OpenPose style or single color)
+        if use_openpose_colors:
+            bone_colors = skel_module.get_bone_colors_openpose_style(skeleton_format)
+        else:
+            default_bone_color = bone_color if bone_color is not None else (0.0, 1.0, 0.0)
+            bone_colors = {bone: default_bone_color for bone in bones}
+
         # Add bones as cylinders FIRST (so joints render on top)
         if render_bones:
-            # Get bone connectivity
-            bones = skel_module.get_skeleton_bones(skeleton_format)
-
-            # Get bone colors (OpenPose style or single color)
-            if use_openpose_colors:
-                bone_colors = skel_module.get_bone_colors_openpose_style(skeleton_format)
-            else:
-                default_bone_color = bone_color if bone_color is not None else (0.0, 1.0, 0.0)
-                bone_colors = {bone: default_bone_color for bone in bones}
 
             for start_idx, end_idx in bones:
                 if start_idx >= len(skeleton_joints) or end_idx >= len(skeleton_joints):
@@ -413,14 +414,24 @@ class Renderer:
                 mesh = pyrender.Mesh.from_trimesh(cylinder, smooth=False)
                 pr_scene.add(mesh)
 
+        # Compute per-joint colors from bone colors
+        if use_openpose_colors:
+            joint_colors_list = skel_module.get_joint_colors_from_bones(bone_colors, len(skeleton_joints))
+        else:
+            # Use single color for all joints
+            joint_colors_list = [joint_color] * len(skeleton_joints)
+
         # Add joints as spheres LAST (render on top of bones)
-        for joint_pos in skeleton_joints:
+        for joint_idx, joint_pos in enumerate(skeleton_joints):
             sphere = trimesh.creation.icosphere(subdivisions=2, radius=joint_radius)
             sphere.vertices += joint_pos
+
+            # Use per-joint color
+            this_joint_color = joint_colors_list[joint_idx]
             sphere.visual.vertex_colors = np.array([
-                int(joint_color[0] * 255),
-                int(joint_color[1] * 255),
-                int(joint_color[2] * 255),
+                int(this_joint_color[0] * 255),
+                int(this_joint_color[1] * 255),
+                int(this_joint_color[2] * 255),
                 255
             ], dtype=np.uint8)
 
