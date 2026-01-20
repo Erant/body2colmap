@@ -265,6 +265,40 @@ class OrbitPipeline:
 
         return results
 
+    def render_composite_all(
+        self,
+        composite_modes: Dict[str, Dict[str, Any]]
+    ) -> List[NDArray[np.uint8]]:
+        """
+        Render all frames with composite modes (e.g., mesh+skeleton).
+
+        Args:
+            composite_modes: Dictionary specifying modes and their options
+                Example: {
+                    "mesh": {"color": (0.65, 0.74, 0.86), "bg_color": (1, 1, 1)},
+                    "skeleton": {"joint_radius": 0.02, "use_openpose_colors": True}
+                }
+
+        Returns:
+            List of composite rendered images (one per camera)
+
+        Raises:
+            RuntimeError: If cameras haven't been set (call set_orbit_params first)
+        """
+        if self.cameras is None:
+            raise RuntimeError("Cameras not set. Call set_orbit_params() first.")
+
+        # Create renderer if needed
+        if self._renderer is None:
+            self._renderer = Renderer(self.scene, self.render_size)
+
+        images = []
+        for camera in self.cameras:
+            image = self._renderer.render_composite(camera, composite_modes)
+            images.append(image)
+
+        return images
+
     def export_colmap(
         self,
         output_dir: str,

@@ -126,15 +126,12 @@ def main(argv: Optional[list] = None) -> int:
                         composite_modes["skeleton"] = {
                             "joint_radius": config.skeleton.joint_radius,
                             "bone_radius": config.skeleton.bone_radius,
-                            "use_openpose_colors": True
+                            "use_openpose_colors": True,
+                            "target_format": config.skeleton.format
                         }
 
                 # Render composite for all frames
-                mode_images = []
-                for camera in pipeline.cameras:
-                    img = pipeline.renderer.render_composite(camera, composite_modes)
-                    mode_images.append(img)
-
+                mode_images = pipeline.render_composite_all(composite_modes)
                 rendered[mode_str] = mode_images
 
                 if args.verbose:
