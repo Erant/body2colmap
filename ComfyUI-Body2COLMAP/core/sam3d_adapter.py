@@ -18,6 +18,7 @@ def sam3d_output_to_scene(mesh_data: dict, include_skeleton: bool = True) -> Sce
         mesh_data: SAM3D_OUTPUT dict from ComfyUI-SAM3DBody containing:
             - vertices: (N, 3) mesh vertices
             - faces: (F, 3) face indices
+            - camera: (3,) camera translation vector
             - joints: (127, 3) MHR joint positions (optional)
         include_skeleton: Whether to include skeleton from joints
 
@@ -27,10 +28,11 @@ def sam3d_output_to_scene(mesh_data: dict, include_skeleton: bool = True) -> Sce
     # Extract and convert tensors to numpy
     vertices = _to_numpy(mesh_data["vertices"])
     faces = _to_numpy(mesh_data["faces"])
+    cam_t = _to_numpy(mesh_data["camera"])
 
     # Convert from SAM3D/MHR coordinates to world coordinates
     # MHR: Y-down, Z-forward → World: Y-up, Z-backward
-    vertices_world = sam3d_to_world(vertices)
+    vertices_world = sam3d_to_world(vertices, cam_t)
 
     # Create trimesh
     mesh = trimesh.Trimesh(vertices=vertices_world, faces=faces)
@@ -43,8 +45,8 @@ def sam3d_output_to_scene(mesh_data: dict, include_skeleton: bool = True) -> Sce
         # SAM3D uses 127 MHR joints, convert to MHR70 (70 joints)
         skeleton = _convert_mhr127_to_mhr70(joints)
 
-        # Convert to world coordinates
-        skeleton = sam3d_to_world(skeleton)
+        # Convert to world coordinates (use same camera translation)
+        skeleton = sam3d_to_world(skeleton, cam_t)
 
     return Scene(mesh=mesh, skeleton=skeleton)
 
