@@ -190,6 +190,10 @@ class Body2COLMAP_Render:
         mesh_color = (mesh_color_r, mesh_color_g, mesh_color_b)
         bg_color = (bg_color_r, bg_color_g, bg_color_b)
 
+        # Map "grayscale" to None (no colormap = grayscale depth)
+        # Other values are valid matplotlib colormap names
+        depth_cmap = None if depth_colormap == "grayscale" else depth_colormap
+
         # Create renderer - requires scene and render_size tuple
         renderer = Renderer(scene=scene, render_size=(width, height))
 
@@ -207,7 +211,7 @@ class Body2COLMAP_Render:
             elif render_mode == "depth":
                 img = renderer.render_depth(
                     camera=camera,
-                    colormap=depth_colormap,
+                    colormap=depth_cmap,
                 )
             elif render_mode == "skeleton":
                 img = renderer.render_skeleton(
@@ -232,7 +236,7 @@ class Body2COLMAP_Render:
                 img = renderer.render_composite(
                     camera=camera,
                     modes={
-                        "depth": {"colormap": depth_colormap},
+                        "depth": {"colormap": depth_cmap},
                         "skeleton": {
                             "target_format": skeleton_format,
                             "joint_radius": joint_radius,
