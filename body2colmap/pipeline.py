@@ -142,7 +142,17 @@ class OrbitPipeline:
         if radius is None:
             bounds = self.scene.get_bounds()
             fill_ratio = kwargs.pop('fill_ratio', 0.8)
-            fov_deg = 2 * np.degrees(np.arctan(self.render_size[0] / (2 * self.focal_length)))
+
+            # Compute FOV for the narrower dimension (limiting factor for framing)
+            # For portrait (720x1280): width is narrower, use horizontal FOV
+            # For landscape (1280x720): height is narrower, use vertical FOV
+            width, height = self.render_size
+            horizontal_fov = 2 * np.degrees(np.arctan(width / (2 * self.focal_length)))
+            vertical_fov = 2 * np.degrees(np.arctan(height / (2 * self.focal_length)))
+
+            # Use the smaller FOV (narrower dimension determines framing)
+            fov_deg = min(horizontal_fov, vertical_fov)
+
             radius = OrbitPath.auto_compute_radius(bounds, fill_ratio, fov_deg)
 
         # Create orbit path generator
