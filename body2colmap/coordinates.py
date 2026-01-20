@@ -57,9 +57,6 @@ def sam3d_to_world(
     SAM-3D-Body outputs vertices centered at origin (roughly at pelvis).
     The cam_t vector positions the mesh in front of a camera at origin.
 
-    For our world system, we simply position the mesh at cam_t.
-    This makes the mesh stationary in world space, and cameras will orbit it.
-
     Args:
         vertices: Mesh vertices in SAM-3D-Body coords, shape (N, 3)
         cam_t: Camera translation vector from SAM-3D-Body, shape (3,)
@@ -68,18 +65,34 @@ def sam3d_to_world(
         Vertices in world coordinates, shape (N, 3)
 
     Note:
-        SAM-3D-Body coordinate system:
-        - Origin at body pelvis
-        - Y-up, Z-toward-camera, X-left (from body's perspective)
+        SAM-3D-Body coordinate system has the body oriented such that when
+        cam_t positions it in front of a camera at the origin, the coordinate
+        frame needs to be flipped to match OpenGL rendering conventions.
 
-        World coordinate system (same as SAM-3D-Body, just positioned):
-        - Origin at cam_t location
-        - Same axes as SAM-3D-Body
+        We apply a 180° rotation around X axis to convert:
+        - SAM-3D-Body: body facing one direction, Y-up
+        - World/Renderer: body facing camera, Y-up
 
-        No rotation needed because SAM-3D-Body already uses Y-up convention
-        compatible with our renderer coordinate system.
+        This rotation:
+        - Keeps X axis (left-right) unchanged
+        - Flips Y axis (makes body right-side up for rendering)
+        - Flips Z axis (makes body face toward -Z, where camera looks from +Z)
     """
-    return vertices + cam_t
+    # First, position the mesh
+    positioned_vertices = vertices + cam_t
+
+    # Apply 180° rotation around X axis
+    # This is the critical transform that was hidden in the old implementation
+    R_x_180 = np.array([
+        [1.0,  0.0,  0.0],
+        [0.0, -1.0,  0.0],
+        [0.0,  0.0, -1.0]
+    ], dtype=np.float32)
+
+    # Apply rotation: vertices @ R.T (right-multiply by transpose)
+    world_vertices = positioned_vertices @ R_x_180.T
+
+    return world_vertices
 
 
 def world_to_colmap_camera(
