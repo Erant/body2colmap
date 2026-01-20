@@ -39,7 +39,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Body2COLMAP_CircularPath": "🌐 Circular Path",
     "Body2COLMAP_SinusoidalPath": "🌊 Sinusoidal Path",
-    "Body2COLMAP_HelicalPath": "🌀 Helical Path (3DGS)",
+    "Body2COLMAP_HelicalPath": "🌀 Helical Path",
     "Body2COLMAP_Render": "🎬 Render Multi-View",
     "Body2COLMAP_ExportCOLMAP": "📦 Export COLMAP",
 }
