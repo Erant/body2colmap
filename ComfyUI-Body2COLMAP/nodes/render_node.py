@@ -1,11 +1,9 @@
 """Render node for Body2COLMAP - generates multi-view images."""
 
-import numpy as np
-from typing import Tuple
 from body2colmap.renderer import Renderer
-from body2colmap.scene import Scene
 from body2colmap.path import OrbitPath
 from body2colmap.camera import Camera
+from body2colmap.utils import compute_default_focal_length
 from ..core.sam3d_adapter import sam3d_output_to_scene
 from ..core.comfy_utils import rendered_to_comfy
 from ..core.path_utils import compute_smart_orbit_radius
@@ -168,8 +166,7 @@ class Body2COLMAP_Render:
 
         # Determine focal length
         if focal_length <= 0:
-            # Auto: ~47° horizontal FOV
-            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
+            focal_length = compute_default_focal_length(width)
 
         # Get orbit center and auto-compute radius if needed
         orbit_center = scene.get_bbox_center()

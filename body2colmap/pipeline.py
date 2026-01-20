@@ -20,6 +20,7 @@ from .camera import Camera
 from .path import OrbitPath
 from .renderer import Renderer
 from .exporter import ColmapExporter, ImageExporter
+from .utils import compute_default_focal_length, compute_auto_orbit_radius
 
 
 class OrbitPipeline:
@@ -60,9 +61,7 @@ class OrbitPipeline:
 
         # Compute focal length if not provided
         if focal_length is None:
-            # ~47° horizontal FOV
-            width = render_size[0]
-            self.focal_length = width / (2.0 * np.tan(np.radians(47.0 / 2.0)))
+            self.focal_length = compute_default_focal_length(render_size[0])
         else:
             self.focal_length = focal_length
 
@@ -140,36 +139,13 @@ class OrbitPipeline:
         """
         # Auto-compute radius if not provided
         if radius is None:
-            bounds = self.scene.get_bounds()
             fill_ratio = kwargs.pop('fill_ratio', 0.8)
-
-            # For proper framing, compute radius needed for each dimension separately
-            # then use the max to ensure the scene fits in both dimensions
-            width, height = self.render_size
-            min_corner, max_corner = bounds
-
-            # Scene extents - for width, use max of X and Z since camera orbits around
-            # and will see different projections at different angles
-            scene_width = max(
-                max_corner[0] - min_corner[0],  # X extent
-                max_corner[2] - min_corner[2]   # Z extent (depth)
+            radius = compute_auto_orbit_radius(
+                bounds=self.scene.get_bounds(),
+                render_size=self.render_size,
+                focal_length=self.focal_length,
+                fill_ratio=fill_ratio
             )
-            scene_height = max_corner[1] - min_corner[1]  # Y extent (up)
-
-            # Compute FOVs in radians
-            horizontal_fov_rad = 2 * np.arctan(width / (2 * self.focal_length))
-            vertical_fov_rad = 2 * np.arctan(height / (2 * self.focal_length))
-
-            # Radius needed to fit horizontal extent in horizontal FOV
-            desired_h_angle = horizontal_fov_rad * fill_ratio
-            radius_h = (scene_width / 2.0) / np.tan(desired_h_angle / 2.0)
-
-            # Radius needed to fit vertical extent in vertical FOV
-            desired_v_angle = vertical_fov_rad * fill_ratio
-            radius_v = (scene_height / 2.0) / np.tan(desired_v_angle / 2.0)
-
-            # Use the larger radius to ensure scene fits in both dimensions
-            radius = max(radius_h, radius_v)
 
         # Create orbit path generator
         # Use bbox center instead of centroid to avoid bias from vertex density

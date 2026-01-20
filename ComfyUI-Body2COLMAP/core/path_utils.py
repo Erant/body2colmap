@@ -1,8 +1,8 @@
-"""Path generation utilities wrapping body2colmap pipeline functionality."""
+"""Path generation utilities wrapping body2colmap library functionality."""
 
-import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple
 from body2colmap.scene import Scene
+from body2colmap.utils import compute_auto_orbit_radius
 
 
 def compute_smart_orbit_radius(
@@ -12,10 +12,10 @@ def compute_smart_orbit_radius(
     fill_ratio: float = 0.8
 ) -> float:
     """
-    Compute orbit radius using smart algorithm from body2colmap pipeline.
+    Compute orbit radius using smart algorithm from body2colmap library.
 
-    This is the CORRECT auto-framing that works for all aspect ratios including portrait.
-    Uses the algorithm from body2colmap/pipeline.py:141-172.
+    This is a thin wrapper around body2colmap.utils.compute_auto_orbit_radius
+    that accepts a Scene object for convenience.
 
     Args:
         scene: Scene to frame
@@ -26,29 +26,9 @@ def compute_smart_orbit_radius(
     Returns:
         Orbit radius in world units
     """
-    bounds = scene.get_bounds()
-    width, height = render_size
-    min_corner, max_corner = bounds
-
-    # Scene extents - for width, use max of X and Z since camera orbits around
-    # and will see different projections at different angles
-    scene_width = max(
-        max_corner[0] - min_corner[0],  # X extent
-        max_corner[2] - min_corner[2]   # Z extent (depth)
+    return compute_auto_orbit_radius(
+        bounds=scene.get_bounds(),
+        render_size=render_size,
+        focal_length=focal_length,
+        fill_ratio=fill_ratio
     )
-    scene_height = max_corner[1] - min_corner[1]  # Y extent (up)
-
-    # Compute FOVs in radians
-    horizontal_fov_rad = 2 * np.arctan(width / (2 * focal_length))
-    vertical_fov_rad = 2 * np.arctan(height / (2 * focal_length))
-
-    # Radius needed to fit horizontal extent in horizontal FOV
-    desired_h_angle = horizontal_fov_rad * fill_ratio
-    radius_h = (scene_width / 2.0) / np.tan(desired_h_angle / 2.0)
-
-    # Radius needed to fit vertical extent in vertical FOV
-    desired_v_angle = vertical_fov_rad * fill_ratio
-    radius_v = (scene_height / 2.0) / np.tan(desired_v_angle / 2.0)
-
-    # Use the larger radius to ensure scene fits in both dimensions
-    return max(radius_h, radius_v)
