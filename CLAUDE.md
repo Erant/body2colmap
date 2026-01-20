@@ -152,18 +152,111 @@ SAM-3D-Body .npz file
 
 ## Implementation Status
 
-- [ ] Phase 1: Core infrastructure (coordinates, camera)
-- [ ] Phase 2: Scene and path generation
-- [ ] Phase 3: Rendering
-- [ ] Phase 4: Export
-- [ ] Phase 5: Pipeline and CLI
-- [ ] Phase 6: Validation and testing
+- [x] Phase 1: Core infrastructure (coordinates, camera)
+- [x] Phase 2: Scene and path generation
+- [x] Phase 3: Rendering (mesh, depth, skeleton, composites)
+- [x] Phase 4: Export (COLMAP, images)
+- [x] Phase 5: Pipeline and CLI
+- [x] Phase 6: Validation and testing
 
-## Next Steps
+**Status**: ✅ FUNCTIONAL - Successfully generates 3DGS training data from SAM-3D-Body output
 
-1. Create package structure and skeleton files
-2. Implement `coordinates.py` with WorldCoordinates and conversion functions
-3. Implement `Camera` class with unit tests
-4. Continue with scene, path, renderer, exporter
-5. Build high-level pipeline and CLI
-6. Integration testing with real SAM-3D-Body output
+## Recent Fixes and Lessons Learned (2026-01-20)
+
+### Portrait Orientation Auto-Framing
+**Problem**: Figure appeared very small in portrait mode (720x1280) despite auto-framing.
+
+**Root Cause**: Auto-framing computed orbit radius using 3D bounding box diagonal, which for standing humans is dominated by height. This caused the camera to be placed too far away.
+
+**Solution**: Compute radius separately for horizontal and vertical dimensions:
+```python
+# Scene extents - for width, use max of X and Z since camera orbits
+scene_width = max(
+    max_corner[0] - min_corner[0],  # X extent
+    max_corner[2] - min_corner[2]   # Z extent (depth)
+)
+scene_height = max_corner[1] - min_corner[1]  # Y extent
+
+# Compute radius needed for each dimension, use max
+radius_h = (scene_width / 2.0) / np.tan(horizontal_fov_rad * fill_ratio / 2.0)
+radius_v = (scene_height / 2.0) / np.tan(vertical_fov_rad * fill_ratio / 2.0)
+radius = max(radius_h, radius_v)
+```
+
+**Key Insight**: For orbiting cameras, horizontal extent must consider BOTH X and Z dimensions since the camera sees different projections at different orbit angles.
+
+### Camera Look-At Target
+**Problem**: Camera pointed too high, especially for meshes with higher vertex density in head/upper body.
+
+**Root Cause**: Using `get_centroid()` (mean of all vertices) which is biased by vertex distribution.
+
+**Solution**: Added `get_bbox_center()` which returns geometric center of bounding box:
+```python
+def get_bbox_center(self) -> NDArray[np.float32]:
+    """Get center of axis-aligned bounding box (unaffected by vertex density)."""
+    min_corner, max_corner = self.get_bounds()
+    return (min_corner + max_corner) / 2.0
+```
+
+**Lesson**: For camera framing, use geometric center (bbox center), not vertex-weighted centroid.
+
+### COLMAP Filename Pattern Mismatch
+**Problem**: Custom `filename_pattern` used for saving images but not reflected in COLMAP `images.txt`.
+
+**Root Cause**: `export_colmap()` hardcoded default pattern while `export_images()` used custom pattern.
+
+**Solution**: Added `filename_pattern` parameter to `export_colmap()` and passed through from CLI config.
+
+**Lesson**: When multiple export functions reference the same files, ensure pattern is consistent across all.
+
+### Configuration Override Issues
+**Problem**: Config file values for `n_frames` ignored, always using 120 frames.
+
+**Root Cause**: CLI argument `--n-frames` had `default=120`, so argparse always provided a value even when user didn't specify it.
+
+**Solution**: Remove default from argument definition, check `if args.n_frames is not None:` before overriding config.
+
+**Lesson**: For CLI overrides of config file values, arguments should have NO default and use None-checking.
+
+## Critical Implementation Details
+
+### Skeleton Rendering
+- **Format**: MHR70 (70 joints) → OpenPose Body25+Hands (65 joints)
+- **Bone connectivity**: Official 65 bones from SAM-3D-Body repository
+- **Colors**: OpenPose Body25 rainbow gradient + per-finger hand colors
+  - Body: 25-color rainbow (pink-red → purple)
+  - Hands: Per-finger colors (thumb=pink, index=orange, middle=green, ring=cyan, pinky=purple)
+- **Gotcha**: OpenPose official colors have duplicate red at index 8 (was thigh) - changed to cyan-green for proper gradient
+
+### Auto-Framing Strategy
+For proper framing across all aspect ratios:
+1. Compute scene extents per dimension (not diagonal)
+2. For width: use `max(X_extent, Z_extent)` to account for orbit
+3. For height: use `Y_extent`
+4. Compute FOV for each dimension based on image dimensions
+5. Calculate radius needed for each dimension separately
+6. Use `max(radius_h, radius_v)` to ensure fit in both dimensions
+7. Look at bbox center (not centroid) for consistent framing
+
+### Configuration Management
+- **Format**: YAML for human readability
+- **Override precedence**: CLI args > config file > defaults
+- **Pattern**: Load config from YAML, then selectively override with CLI args that are `not None`
+- **Composite modes**: Support "mesh+skeleton" and "depth+skeleton" rendering
+
+## Known Limitations
+
+1. **Single mesh per scene**: Only supports one mesh at a time
+2. **Static scenes only**: No animation/deformation support
+3. **Fixed intrinsics**: All cameras share same intrinsics (typical for orbit rendering)
+4. **Skeleton format**: Only MHR70 input supported (though converts to multiple formats)
+
+## Future Enhancements
+
+- [ ] Support for multiple meshes in scene
+- [ ] Animation/temporal sequences
+- [ ] Custom camera path patterns (Lissajous curves, etc.)
+- [ ] Texture preservation from input image
+- [ ] Normal map rendering mode
+- [ ] Segmentation mask export
+- [ ] Batch processing of multiple inputs
