@@ -333,71 +333,71 @@ class Renderer:
                 bone_colors = {bone: default_bone_color for bone in bones}
 
             for start_idx, end_idx in bones:
-            if start_idx >= len(self.scene.skeleton_joints) or end_idx >= len(self.scene.skeleton_joints):
-                continue  # Skip invalid bone indices
+                if start_idx >= len(self.scene.skeleton_joints) or end_idx >= len(self.scene.skeleton_joints):
+                    continue  # Skip invalid bone indices
 
-            start_pos = self.scene.skeleton_joints[start_idx]
-            end_pos = self.scene.skeleton_joints[end_idx]
+                start_pos = self.scene.skeleton_joints[start_idx]
+                end_pos = self.scene.skeleton_joints[end_idx]
 
-            # Create cylinder connecting start to end
-            direction = end_pos - start_pos
-            length = np.linalg.norm(direction)
+                # Create cylinder connecting start to end
+                direction = end_pos - start_pos
+                length = np.linalg.norm(direction)
 
-            if length < 1e-6:
-                continue  # Skip zero-length bones
+                if length < 1e-6:
+                    continue  # Skip zero-length bones
 
-            # Create cylinder along Z axis
-            cylinder = trimesh.creation.cylinder(
-                radius=bone_radius,
-                height=length,
-                sections=8
-            )
+                # Create cylinder along Z axis
+                cylinder = trimesh.creation.cylinder(
+                    radius=bone_radius,
+                    height=length,
+                    sections=8
+                )
 
-            # Rotate and translate to connect joints
-            # Cylinder default: along Z axis, centered at origin
-            # We need: from start_pos to end_pos
+                # Rotate and translate to connect joints
+                # Cylinder default: along Z axis, centered at origin
+                # We need: from start_pos to end_pos
 
-            # Compute rotation to align Z axis with bone direction
-            z_axis = np.array([0, 0, 1], dtype=np.float32)
-            bone_dir = direction / length
+                # Compute rotation to align Z axis with bone direction
+                z_axis = np.array([0, 0, 1], dtype=np.float32)
+                bone_dir = direction / length
 
-            # Rotation axis: cross product
-            rot_axis = np.cross(z_axis, bone_dir)
-            rot_axis_len = np.linalg.norm(rot_axis)
+                # Rotation axis: cross product
+                rot_axis = np.cross(z_axis, bone_dir)
+                rot_axis_len = np.linalg.norm(rot_axis)
 
-            if rot_axis_len > 1e-6:
-                rot_axis = rot_axis / rot_axis_len
-                # Rotation angle
-                cos_angle = np.dot(z_axis, bone_dir)
-                angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+                if rot_axis_len > 1e-6:
+                    rot_axis = rot_axis / rot_axis_len
+                    # Rotation angle
+                    cos_angle = np.dot(z_axis, bone_dir)
+                    angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
 
-                # Build rotation matrix
-                rot_matrix = trimesh.transformations.rotation_matrix(angle, rot_axis)
-            else:
-                # Parallel or anti-parallel
-                if np.dot(z_axis, bone_dir) > 0:
-                    rot_matrix = np.eye(4)
+                    # Build rotation matrix
+                    rot_matrix = trimesh.transformations.rotation_matrix(angle, rot_axis)
                 else:
-                    # 180 degree rotation
-                    rot_matrix = trimesh.transformations.rotation_matrix(np.pi, [1, 0, 0])
+                    # Parallel or anti-parallel
+                    if np.dot(z_axis, bone_dir) > 0:
+                        rot_matrix = np.eye(4)
+                    else:
+                        # 180 degree rotation
+                        rot_matrix = trimesh.transformations.rotation_matrix(np.pi, [1, 0, 0])
 
-            # Translate to center between joints
-            center = (start_pos + end_pos) / 2
-            rot_matrix[:3, 3] = center
+                # Translate to center between joints
+                center = (start_pos + end_pos) / 2
+                rot_matrix[:3, 3] = center
 
-            cylinder.apply_transform(rot_matrix)
+                cylinder.apply_transform(rot_matrix)
 
-            # Get color for this bone
-            this_bone_color = bone_colors.get((start_idx, end_idx), (0.0, 1.0, 0.0))
-            cylinder.visual.vertex_colors = np.array([
-                int(this_bone_color[0] * 255),
-                int(this_bone_color[1] * 255),
-                int(this_bone_color[2] * 255),
-                255
-            ], dtype=np.uint8)
+                # Get color for this bone
+                this_bone_color = bone_colors.get((start_idx, end_idx), (0.0, 1.0, 0.0))
+                cylinder.visual.vertex_colors = np.array([
+                    int(this_bone_color[0] * 255),
+                    int(this_bone_color[1] * 255),
+                    int(this_bone_color[2] * 255),
+                    255
+                ], dtype=np.uint8)
 
-            mesh = pyrender.Mesh.from_trimesh(cylinder, smooth=False)
-            pr_scene.add(mesh)
+                mesh = pyrender.Mesh.from_trimesh(cylinder, smooth=False)
+                pr_scene.add(mesh)
 
         # Add joints as spheres LAST (render on top of bones)
         for joint_pos in self.scene.skeleton_joints:
