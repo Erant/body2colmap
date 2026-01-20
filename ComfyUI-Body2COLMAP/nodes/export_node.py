@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import cv2
+import numpy as np
 from body2colmap.exporter import ColmapExporter
 from ..core.comfy_utils import comfy_to_cv2
 
@@ -32,6 +33,7 @@ class Body2COLMAP_ExportCOLMAP:
             },
             "optional": {
                 "images": ("IMAGE",),
+                "masks": ("MASK",),
                 "pointcloud_samples": ("INT", {
                     "default": 10000,
                     "min": 1000,
@@ -43,14 +45,14 @@ class Body2COLMAP_ExportCOLMAP:
         }
 
     def export(self, render_data, output_directory, image_name,
-               images=None, pointcloud_samples=10000):
+               images=None, masks=None, pointcloud_samples=10000):
         """
         Export COLMAP format files.
 
         Creates:
             output_directory/
             ├── images/           (if images provided)
-            │   ├── frame_00001_.png
+            │   ├── frame_00001_.png (RGBA if masks provided, RGB otherwise)
             │   └── ...
             └── sparse/0/
                 ├── cameras.txt   (camera intrinsics)
@@ -77,12 +79,30 @@ class Body2COLMAP_ExportCOLMAP:
             images_path = output_path / "images"
             images_path.mkdir(parents=True, exist_ok=True)
 
-            # Convert ComfyUI images to CV2 format and save
+            # Convert ComfyUI images to CV2 format
             cv2_images = comfy_to_cv2(images)
 
-            for img, filename in zip(cv2_images, image_names):
-                img_path = images_path / filename
-                cv2.imwrite(str(img_path), img)
+            # If masks provided, combine with images as alpha channel
+            if masks is not None:
+                # Convert masks from ComfyUI format [B, H, W] float [0,1] to [B, H, W] uint8 [0,255]
+                # Note: ComfyUI MASK is inverted (1.0 = background), so we invert back for alpha channel
+                masks_np = masks.cpu().numpy()
+                alpha_channel = ((1.0 - masks_np) * 255).astype(np.uint8)  # Invert back for alpha
+
+                # Combine RGB with alpha
+                for i, (img, filename) in enumerate(zip(cv2_images, image_names)):
+                    # img is BGR from comfy_to_cv2, shape [H, W, 3]
+                    # Add alpha channel
+                    alpha = alpha_channel[i]  # [H, W]
+                    rgba = np.dstack([img, alpha])  # [H, W, 4] - BGRA
+
+                    img_path = images_path / filename
+                    cv2.imwrite(str(img_path), rgba)
+            else:
+                # Save RGB only
+                for img, filename in zip(cv2_images, image_names):
+                    img_path = images_path / filename
+                    cv2.imwrite(str(img_path), img)
 
         # Create COLMAP exporter using classmethod
         exporter = ColmapExporter.from_scene_and_cameras(
@@ -101,6 +121,7 @@ class Body2COLMAP_ExportCOLMAP:
         print(f"[Body2COLMAP] - points3D.txt: {pointcloud_samples} points")
 
         if images is not None:
-            print(f"[Body2COLMAP] - images/: {len(cv2_images)} image files")
+            format_str = "RGBA" if masks is not None else "RGB"
+            print(f"[Body2COLMAP] - images/: {len(cv2_images)} {format_str} image files")
 
         return (str(output_path.absolute()),)

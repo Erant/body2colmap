@@ -64,8 +64,14 @@ def rendered_to_comfy(images: List[NDArray]) -> Tuple[torch.Tensor, torch.Tensor
     rgb = rgb.astype(np.float32) / 255.0
     alpha = alpha.astype(np.float32) / 255.0
 
+    # Invert alpha for ComfyUI MASK convention
+    # ComfyUI: 1.0 = visible/keep, 0.0 = masked/hidden
+    # Renderer: alpha 1.0 = opaque content, 0.0 = transparent background
+    # We want mask to be 1.0 where there's NO content (background)
+    mask = 1.0 - alpha
+
     # Convert to torch tensors
-    return torch.from_numpy(rgb), torch.from_numpy(alpha)
+    return torch.from_numpy(rgb), torch.from_numpy(mask)
 
 
 def comfy_to_cv2(images: torch.Tensor) -> List[NDArray]:
