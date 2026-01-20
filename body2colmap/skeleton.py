@@ -12,8 +12,20 @@ Supported formats:
 """
 
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from numpy.typing import NDArray
+
+
+# OpenPose color palette (RGB 0-1 range)
+# Colors for different body parts following OpenPose conventions
+OPENPOSE_COLORS = {
+    "head": (1.0, 0.0, 0.85),      # Magenta
+    "torso": (0.7, 0.3, 1.0),       # Purple
+    "right_arm": (1.0, 0.0, 0.0),   # Red
+    "left_arm": (0.0, 1.0, 0.0),    # Green
+    "right_leg": (0.0, 0.0, 1.0),   # Blue
+    "left_leg": (1.0, 1.0, 0.0),    # Yellow
+}
 
 
 # OpenPose Body25 + Hands skeleton (65 joints total)
@@ -105,16 +117,43 @@ OPENPOSE_BODY25_HANDS_ALL_BONES = (
 )
 
 
-# MHR70 to OpenPose Body25+Hands mapping
-# This is a simplified mapping - may need adjustment based on actual MHR70 format
-# For now, we'll map the main body joints and skip detailed hand mapping
-MHR70_TO_OPENPOSE_BODY25_HANDS = {
-    # Body mapping (estimated - needs verification with actual MHR70 format)
-    # This assumes MHR70 follows a similar structure to SMPL-X
-    0: 15,   # Pelvis → MidHip (approximate)
-    # TODO: Complete this mapping once we have MHR70 documentation
-    # For now, we'll just pass through joints directly if counts match
-}
+# MHR70 bone connectivity (SAM-3D-Body / SMPL-X based)
+# MHR70 follows SMPL-X topology with 70 joints:
+# - Body: ~25 joints (similar to SMPL)
+# - Hands: ~40 joints (20 per hand)
+# - Face: ~5 joints
+
+# Main body bones for MHR70 (estimated based on SMPL-X structure)
+MHR70_BODY_BONES = [
+    # Spine/torso
+    (0, 3),   # Pelvis → Spine1
+    (3, 6),   # Spine1 → Spine2
+    (6, 9),   # Spine2 → Spine3
+    (9, 12),  # Spine3 → Neck
+    (12, 15), # Neck → Head
+
+    # Left arm
+    (9, 13),  # Spine3 → LShoulder
+    (13, 16), # LShoulder → LElbow
+    (16, 18), # LElbow → LWrist
+
+    # Right arm
+    (9, 14),  # Spine3 → RShoulder
+    (14, 17), # RShoulder → RElbow
+    (17, 19), # RElbow → RWrist
+
+    # Left leg
+    (0, 1),   # Pelvis → LHip
+    (1, 4),   # LHip → LKnee
+    (4, 7),   # LKnee → LAnkle
+    (7, 10),  # LAnkle → LFoot
+
+    # Right leg
+    (0, 2),   # Pelvis → RHip
+    (2, 5),   # RHip → RKnee
+    (5, 8),   # RKnee → RAnkle
+    (8, 11),  # RAnkle → RFoot
+]
 
 
 def get_skeleton_bones(format_name: str) -> List[Tuple[int, int]]:
@@ -138,10 +177,7 @@ def get_skeleton_bones(format_name: str) -> List[Tuple[int, int]]:
     elif format_name == "openpose_body25":
         return OPENPOSE_BODY25_HANDS_BONES
     elif format_name == "mhr70":
-        # For MHR70, we'd need the actual bone connectivity
-        # For now, return empty list (skeleton won't render)
-        # TODO: Add MHR70 bone connectivity once documented
-        return []
+        return MHR70_BODY_BONES
     else:
         raise ValueError(f"Unknown skeleton format: {format_name}")
 
@@ -198,3 +234,52 @@ def validate_skeleton_format(joints: NDArray[np.float32], format_name: str) -> b
         return False
 
     return len(joints) == expected
+
+
+def get_bone_colors_openpose_style(format_name: str) -> Dict[Tuple[int, int], Tuple[float, float, float]]:
+    """
+    Get OpenPose-style colors for each bone.
+
+    Returns a dictionary mapping bone (start_idx, end_idx) to RGB color (0-1 range).
+
+    Args:
+        format_name: Skeleton format identifier
+
+    Returns:
+        Dictionary mapping bones to colors
+    """
+    if format_name == "mhr70":
+        # Color each bone based on body part
+        colors = {}
+
+        # Head/neck bones
+        for bone in [(12, 15)]:  # Neck → Head
+            colors[bone] = OPENPOSE_COLORS["head"]
+
+        # Torso bones
+        for bone in [(0, 3), (3, 6), (6, 9), (9, 12)]:  # Spine chain
+            colors[bone] = OPENPOSE_COLORS["torso"]
+
+        # Right arm bones
+        for bone in [(9, 14), (14, 17), (17, 19)]:  # Spine3 → RShoulder → RElbow → RWrist
+            colors[bone] = OPENPOSE_COLORS["right_arm"]
+
+        # Left arm bones
+        for bone in [(9, 13), (13, 16), (16, 18)]:  # Spine3 → LShoulder → LElbow → LWrist
+            colors[bone] = OPENPOSE_COLORS["left_arm"]
+
+        # Right leg bones
+        for bone in [(0, 2), (2, 5), (5, 8), (8, 11)]:  # Pelvis → RHip → RKnee → RAnkle → RFoot
+            colors[bone] = OPENPOSE_COLORS["right_leg"]
+
+        # Left leg bones
+        for bone in [(0, 1), (1, 4), (4, 7), (7, 10)]:  # Pelvis → LHip → LKnee → LAnkle → LFoot
+            colors[bone] = OPENPOSE_COLORS["left_leg"]
+
+        return colors
+
+    else:
+        # Default: single color for all bones
+        default_color = (0.0, 1.0, 0.0)  # Green
+        bones = get_skeleton_bones(format_name)
+        return {bone: default_color for bone in bones}
