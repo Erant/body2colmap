@@ -3,10 +3,6 @@
 import numpy as np
 import torch
 import trimesh
-import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from body2colmap.scene import Scene
 from body2colmap.coordinates import sam3d_to_world
 

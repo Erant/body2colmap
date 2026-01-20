@@ -1,15 +1,11 @@
 """Render node for Body2COLMAP - generates multi-view images."""
 
-import sys
-import os
 import numpy as np
 from typing import Tuple
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from body2colmap.renderer import Renderer
 from body2colmap.scene import Scene
-from core.sam3d_adapter import sam3d_output_to_scene
-from core.comfy_utils import rendered_to_comfy
+from ..core.sam3d_adapter import sam3d_output_to_scene
+from ..core.comfy_utils import rendered_to_comfy
 
 
 class Body2COLMAP_Render:

@@ -45,3 +45,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+
+# Debug: confirm nodes are loaded
+print(f"[Body2COLMAP] Loaded {len(NODE_CLASS_MAPPINGS)} nodes:")
+for node_name in NODE_DISPLAY_NAME_MAPPINGS.values():
+    print(f"  - {node_name}")

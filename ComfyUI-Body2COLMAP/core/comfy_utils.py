@@ -24,9 +24,18 @@ def setup_headless_rendering():
         # Quick test to see if EGL works
         r = pyrender.OffscreenRenderer(64, 64)
         r.delete()
-    except Exception:
+        print("[Body2COLMAP] Using EGL for rendering")
+    except Exception as e:
         # Fall back to OSMesa (software rendering, slower but more compatible)
-        os.environ["PYOPENGL_PLATFORM"] = "osmesa"
+        try:
+            os.environ["PYOPENGL_PLATFORM"] = "osmesa"
+            import pyrender
+            r = pyrender.OffscreenRenderer(64, 64)
+            r.delete()
+            print("[Body2COLMAP] Using OSMesa for rendering")
+        except Exception as e2:
+            # If both fail, just continue - renderer will be created on first use
+            print(f"[Body2COLMAP] Warning: Could not initialize renderer ({e2})")
 
 
 def rendered_to_comfy(images: List[NDArray]) -> torch.Tensor:

@@ -3,11 +3,6 @@
 from typing import TypeAlias, TypedDict, List, Tuple
 import numpy as np
 from numpy.typing import NDArray
-
-# Import body2colmap types
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from body2colmap.camera import Camera
 from body2colmap.scene import Scene
 

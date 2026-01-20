@@ -1,13 +1,9 @@
 """Export node for Body2COLMAP - exports COLMAP sparse reconstruction format."""
 
-import sys
-import os
 from pathlib import Path
 import cv2
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from body2colmap.exporter import ColmapExporter
-from core.comfy_utils import comfy_to_cv2
+from ..core.comfy_utils import comfy_to_cv2
 
 
 class Body2COLMAP_ExportCOLMAP:

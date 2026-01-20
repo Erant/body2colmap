@@ -1,13 +1,9 @@
 """Camera path generator nodes for Body2COLMAP."""
 
-import sys
-import os
 import numpy as np
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from body2colmap.path import OrbitPath
 from body2colmap.camera import Camera
-from core.sam3d_adapter import sam3d_output_to_scene
+from ..core.sam3d_adapter import sam3d_output_to_scene
 
 
 class Body2COLMAP_CircularPath:
