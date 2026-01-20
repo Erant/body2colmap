@@ -91,9 +91,15 @@ OPENPOSE_BODY25_BONE_COLORS = {
     (11, 24): 23, # RAnkle → RHeel
 }
 
-# Hand colors (using bright colors for visibility)
-OPENPOSE_HAND_COLOR_RIGHT = (1.0, 0.0, 0.0)  # Red for right hand
-OPENPOSE_HAND_COLOR_LEFT = (0.0, 1.0, 0.0)   # Green for left hand
+# Hand finger colors (distinct colors for each finger for visibility)
+# Format: (R, G, B) in 0-1 range
+OPENPOSE_HAND_FINGER_COLORS = {
+    "thumb": (1.0, 0.0, 0.4),      # Pink/Red
+    "index": (1.0, 0.6, 0.0),      # Orange
+    "middle": (0.0, 1.0, 0.0),     # Green
+    "ring": (0.0, 0.6, 1.0),       # Cyan/Blue
+    "pinky": (0.6, 0.0, 1.0),      # Purple/Magenta
+}
 
 
 # OpenPose Body25 + Hands skeleton (65 joints total)
@@ -574,23 +580,63 @@ def get_bone_colors_openpose_body25_hands() -> Dict[Tuple[int, int], Tuple[float
 
     Returns a dictionary mapping bone (start_idx, end_idx) to RGB color (0-1 range).
     Uses the official OpenPose Body25 color palette from poseParametersRender.hpp.
+    Handles bidirectional bone lookup (checks both (A,B) and (B,A)).
 
     Returns:
         Dictionary mapping bones to colors
     """
     colors = {}
 
-    # Body bones (0-24): Use official Body25 colors
-    for bone, color_idx in OPENPOSE_BODY25_BONE_COLORS.items():
-        colors[bone] = OPENPOSE_BODY25_COLORS[color_idx]
+    # Helper function for bidirectional lookup
+    def get_body25_color(bone: Tuple[int, int]) -> Optional[Tuple[float, float, float]]:
+        """Try to find color for bone, checking both directions."""
+        if bone in OPENPOSE_BODY25_BONE_COLORS:
+            return OPENPOSE_BODY25_COLORS[OPENPOSE_BODY25_BONE_COLORS[bone]]
+        # Try reversed
+        reversed_bone = (bone[1], bone[0])
+        if reversed_bone in OPENPOSE_BODY25_BONE_COLORS:
+            return OPENPOSE_BODY25_COLORS[OPENPOSE_BODY25_BONE_COLORS[reversed_bone]]
+        return None
 
-    # Left hand bones: Use green (consistent with left side)
-    for bone in OPENPOSE_LEFT_HAND_BONES:
-        colors[bone] = OPENPOSE_HAND_COLOR_LEFT
+    # Body bones (0-24): Use official Body25 colors with bidirectional lookup
+    for bone in OPENPOSE_BODY25_HANDS_BONES:
+        color = get_body25_color(bone)
+        if color is not None:
+            colors[bone] = color
 
-    # Right hand bones: Use red (consistent with right side)
-    for bone in OPENPOSE_RIGHT_HAND_BONES:
-        colors[bone] = OPENPOSE_HAND_COLOR_RIGHT
+    # Right hand bones: Per-finger colors
+    # Thumb (4 bones): joints 45-48
+    for bone in [(4, 45), (45, 46), (46, 47), (47, 48)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["thumb"]
+    # Index (4 bones): joints 49-52
+    for bone in [(4, 49), (49, 50), (50, 51), (51, 52)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["index"]
+    # Middle (4 bones): joints 53-56
+    for bone in [(4, 53), (53, 54), (54, 55), (55, 56)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["middle"]
+    # Ring (4 bones): joints 57-60
+    for bone in [(4, 57), (57, 58), (58, 59), (59, 60)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["ring"]
+    # Pinky (4 bones): joints 61-64
+    for bone in [(4, 61), (61, 62), (62, 63), (63, 64)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["pinky"]
+
+    # Left hand bones: Per-finger colors
+    # Thumb (4 bones): joints 25-28
+    for bone in [(7, 25), (25, 26), (26, 27), (27, 28)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["thumb"]
+    # Index (4 bones): joints 29-32
+    for bone in [(7, 29), (29, 30), (30, 31), (31, 32)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["index"]
+    # Middle (4 bones): joints 33-36
+    for bone in [(7, 33), (33, 34), (34, 35), (35, 36)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["middle"]
+    # Ring (4 bones): joints 37-40
+    for bone in [(7, 37), (37, 38), (38, 39), (39, 40)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["ring"]
+    # Pinky (4 bones): joints 41-44
+    for bone in [(7, 41), (41, 42), (42, 43), (43, 44)]:
+        colors[bone] = OPENPOSE_HAND_FINGER_COLORS["pinky"]
 
     return colors
 
