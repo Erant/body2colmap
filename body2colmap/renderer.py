@@ -280,7 +280,8 @@ class Renderer:
         joint_color: Tuple[float, float, float] = (1.0, 0.0, 0.0),
         bone_color: Tuple[float, float, float] = None,
         use_openpose_colors: bool = True,
-        render_bones: bool = True
+        render_bones: bool = True,
+        target_format: str = "openpose_body25_hands"
     ) -> NDArray[np.uint8]:
         """
         Render 3D skeleton as spheres (joints) and cylinders (bones).
@@ -293,6 +294,7 @@ class Renderer:
             bone_color: RGB color (0-1) for bones (if not using OpenPose colors)
             use_openpose_colors: If True, use OpenPose color scheme for bones
             render_bones: If False, only render joints (no bone cylinders)
+            target_format: Skeleton format to render ("openpose_body25_hands", "mhr70", etc.)
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8
@@ -314,6 +316,18 @@ class Renderer:
         except ImportError as e:
             raise ImportError(f"Required dependencies not available: {e}")
 
+        # Convert skeleton format if needed
+        skeleton_joints = self.scene.skeleton_joints
+        skeleton_format = target_format
+
+        if self.scene.skeleton_format == "mhr70" and target_format == "openpose_body25_hands":
+            # Convert MHR70 → OpenPose Body25+Hands
+            skeleton_joints = skel_module.convert_mhr70_to_openpose_body25_hands(self.scene.skeleton_joints)
+        elif self.scene.skeleton_format != target_format:
+            raise ValueError(
+                f"Conversion from {self.scene.skeleton_format} to {target_format} not implemented"
+            )
+
         # Create pyrender scene
         pr_scene = pyrender.Scene(
             bg_color=[0, 0, 0, 0],  # Transparent background
@@ -323,21 +337,21 @@ class Renderer:
         # Add bones as cylinders FIRST (so joints render on top)
         if render_bones:
             # Get bone connectivity
-            bones = skel_module.get_skeleton_bones(self.scene.skeleton_format)
+            bones = skel_module.get_skeleton_bones(skeleton_format)
 
             # Get bone colors (OpenPose style or single color)
             if use_openpose_colors:
-                bone_colors = skel_module.get_bone_colors_openpose_style(self.scene.skeleton_format)
+                bone_colors = skel_module.get_bone_colors_openpose_style(skeleton_format)
             else:
                 default_bone_color = bone_color if bone_color is not None else (0.0, 1.0, 0.0)
                 bone_colors = {bone: default_bone_color for bone in bones}
 
             for start_idx, end_idx in bones:
-                if start_idx >= len(self.scene.skeleton_joints) or end_idx >= len(self.scene.skeleton_joints):
+                if start_idx >= len(skeleton_joints) or end_idx >= len(skeleton_joints):
                     continue  # Skip invalid bone indices
 
-                start_pos = self.scene.skeleton_joints[start_idx]
-                end_pos = self.scene.skeleton_joints[end_idx]
+                start_pos = skeleton_joints[start_idx]
+                end_pos = skeleton_joints[end_idx]
 
                 # Create cylinder connecting start to end
                 direction = end_pos - start_pos
@@ -400,7 +414,7 @@ class Renderer:
                 pr_scene.add(mesh)
 
         # Add joints as spheres LAST (render on top of bones)
-        for joint_pos in self.scene.skeleton_joints:
+        for joint_pos in skeleton_joints:
             sphere = trimesh.creation.icosphere(subdivisions=2, radius=joint_radius)
             sphere.vertices += joint_pos
             sphere.visual.vertex_colors = np.array([

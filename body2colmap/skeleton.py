@@ -255,6 +255,114 @@ MHR70_BODY_BONES = [
 ]
 
 
+# Mapping from OpenPose Body25+Hands (65 joints) to MHR70 (70 joints)
+# OpenPose index → MHR70 index
+MHR70_TO_OPENPOSE_BODY25_HANDS = {
+    # Body (25 joints: 0-24)
+    0: 0,    # Nose → nose
+    1: 69,   # Neck → neck
+    2: 6,    # RShoulder → right_shoulder
+    3: 8,    # RElbow → right_elbow
+    4: 41,   # RWrist → right_wrist
+    5: 5,    # LShoulder → left_shoulder
+    6: 7,    # LElbow → left_elbow
+    7: 62,   # LWrist → left_wrist
+    8: None, # MidHip → computed as average of left_hip (9) and right_hip (10)
+    9: 10,   # RHip → right_hip
+    10: 12,  # RKnee → right_knee
+    11: 14,  # RAnkle → right_ankle
+    12: 9,   # LHip → left_hip
+    13: 11,  # LKnee → left_knee
+    14: 13,  # LAnkle → left_ankle
+    15: 2,   # REye → right_eye
+    16: 1,   # LEye → left_eye
+    17: 4,   # REar → right_ear
+    18: 3,   # LEar → left_ear
+    19: 15,  # LBigToe → left_big_toe
+    20: 16,  # LSmallToe → left_small_toe
+    21: 17,  # LHeel → left_heel
+    22: 18,  # RBigToe → right_big_toe
+    23: 19,  # RSmallToe → right_small_toe
+    24: 20,  # RHeel → right_heel
+
+    # Left hand (20 joints: 25-44)
+    # MHR70: 42-45 (thumb base to tip), 46-49 (index), 50-53 (middle), 54-57 (ring), 58-61 (pinky)
+    # OpenPose: wrist-to-tip ordering (joint 0 = base/MCP, joint 3 = tip)
+    25: 45,  # LHand_Thumb0 (MCP) → left_thumb_base
+    26: 44,  # LHand_Thumb1
+    27: 43,  # LHand_Thumb2
+    28: 42,  # LHand_Thumb3 (tip) → left_thumb_tip
+    29: 49,  # LHand_Index0
+    30: 48,  # LHand_Index1
+    31: 47,  # LHand_Index2
+    32: 46,  # LHand_Index3 (tip)
+    33: 53,  # LHand_Middle0
+    34: 52,  # LHand_Middle1
+    35: 51,  # LHand_Middle2
+    36: 50,  # LHand_Middle3 (tip)
+    37: 57,  # LHand_Ring0
+    38: 56,  # LHand_Ring1
+    39: 55,  # LHand_Ring2
+    40: 54,  # LHand_Ring3 (tip)
+    41: 61,  # LHand_Pinky0
+    42: 60,  # LHand_Pinky1
+    43: 59,  # LHand_Pinky2
+    44: 58,  # LHand_Pinky3 (tip)
+
+    # Right hand (20 joints: 45-64)
+    # MHR70: 21-24 (thumb tip to base), 25-28 (index), 29-32 (middle), 33-36 (ring), 37-40 (pinky)
+    45: 24,  # RHand_Thumb0 (MCP) → right_thumb_base
+    46: 23,  # RHand_Thumb1
+    47: 22,  # RHand_Thumb2
+    48: 21,  # RHand_Thumb3 (tip) → right_thumb_tip
+    49: 28,  # RHand_Index0
+    50: 27,  # RHand_Index1
+    51: 26,  # RHand_Index2
+    52: 25,  # RHand_Index3 (tip)
+    53: 32,  # RHand_Middle0
+    54: 31,  # RHand_Middle1
+    55: 30,  # RHand_Middle2
+    56: 29,  # RHand_Middle3 (tip)
+    57: 36,  # RHand_Ring0
+    58: 35,  # RHand_Ring1
+    59: 34,  # RHand_Ring2
+    60: 33,  # RHand_Ring3 (tip)
+    61: 40,  # RHand_Pinky0
+    62: 39,  # RHand_Pinky1
+    63: 38,  # RHand_Pinky2
+    64: 37,  # RHand_Pinky3 (tip)
+}
+
+
+def convert_mhr70_to_openpose_body25_hands(mhr70_joints: NDArray[np.float32]) -> NDArray[np.float32]:
+    """
+    Convert MHR70 skeleton (70 joints) to OpenPose Body25+Hands format (65 joints).
+
+    Args:
+        mhr70_joints: MHR70 joint positions, shape (70, 3)
+
+    Returns:
+        OpenPose Body25+Hands joint positions, shape (65, 3)
+
+    Raises:
+        ValueError: If input doesn't have 70 joints
+    """
+    if len(mhr70_joints) != 70:
+        raise ValueError(f"Expected 70 MHR70 joints, got {len(mhr70_joints)}")
+
+    openpose_joints = np.zeros((65, 3), dtype=np.float32)
+
+    for openpose_idx, mhr70_idx in MHR70_TO_OPENPOSE_BODY25_HANDS.items():
+        if mhr70_idx is None:
+            # Special case: MidHip = average of left_hip and right_hip
+            if openpose_idx == 8:
+                openpose_joints[8] = (mhr70_joints[9] + mhr70_joints[10]) / 2.0
+        else:
+            openpose_joints[openpose_idx] = mhr70_joints[mhr70_idx]
+
+    return openpose_joints
+
+
 def get_skeleton_bones(format_name: str) -> List[Tuple[int, int]]:
     """
     Get bone connectivity for a skeleton format.
@@ -406,6 +514,53 @@ def get_bone_colors_mhr70() -> Dict[Tuple[int, int], Tuple[float, float, float]]
     return colors
 
 
+def get_bone_colors_openpose_body25_hands() -> Dict[Tuple[int, int], Tuple[float, float, float]]:
+    """
+    Get OpenPose-style colors for Body25+Hands skeleton.
+
+    Returns a dictionary mapping bone (start_idx, end_idx) to RGB color (0-1 range).
+    Colors follow OpenPose visualization conventions.
+
+    Returns:
+        Dictionary mapping bones to colors
+    """
+    colors = {}
+
+    # Head bones (magenta)
+    for bone in [(0, 15), (15, 17), (0, 16), (16, 18)]:  # Nose-eyes-ears
+        colors[bone] = OPENPOSE_COLORS["head"]
+
+    # Torso bones (purple)
+    for bone in [(0, 1), (1, 8)]:  # Nose-Neck, Neck-MidHip
+        colors[bone] = OPENPOSE_COLORS["torso"]
+
+    # Right arm bones (red)
+    for bone in [(1, 2), (2, 3), (3, 4)]:  # Neck-RShoulder-RElbow-RWrist
+        colors[bone] = OPENPOSE_COLORS["right_arm"]
+
+    # Left arm bones (green)
+    for bone in [(1, 5), (5, 6), (6, 7)]:  # Neck-LShoulder-LElbow-LWrist
+        colors[bone] = OPENPOSE_COLORS["left_arm"]
+
+    # Right leg bones (blue)
+    for bone in [(8, 9), (9, 10), (10, 11), (11, 22), (22, 23), (11, 24)]:  # MidHip-RHip-RKnee-RAnkle-toes-heel
+        colors[bone] = OPENPOSE_COLORS["right_leg"]
+
+    # Left leg bones (yellow)
+    for bone in [(8, 12), (12, 13), (13, 14), (14, 19), (19, 20), (14, 21)]:  # MidHip-LHip-LKnee-LAnkle-toes-heel
+        colors[bone] = OPENPOSE_COLORS["left_leg"]
+
+    # Left hand bones (green, same as left arm)
+    for bone in OPENPOSE_LEFT_HAND_BONES:
+        colors[bone] = OPENPOSE_COLORS["left_arm"]
+
+    # Right hand bones (red, same as right arm)
+    for bone in OPENPOSE_RIGHT_HAND_BONES:
+        colors[bone] = OPENPOSE_COLORS["right_arm"]
+
+    return colors
+
+
 def get_bone_colors_openpose_style(format_name: str) -> Dict[Tuple[int, int], Tuple[float, float, float]]:
     """
     Get OpenPose-style colors for each bone.
@@ -420,7 +575,8 @@ def get_bone_colors_openpose_style(format_name: str) -> Dict[Tuple[int, int], Tu
     """
     if format_name == "mhr70":
         return get_bone_colors_mhr70()
-
+    elif format_name == "openpose_body25_hands":
+        return get_bone_colors_openpose_body25_hands()
     else:
         # Default: single color for all bones
         default_color = (0.0, 1.0, 0.0)  # Green
