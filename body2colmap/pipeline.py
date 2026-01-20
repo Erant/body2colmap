@@ -143,17 +143,29 @@ class OrbitPipeline:
             bounds = self.scene.get_bounds()
             fill_ratio = kwargs.pop('fill_ratio', 0.8)
 
-            # Compute FOV for the narrower dimension (limiting factor for framing)
-            # For portrait (720x1280): width is narrower, use horizontal FOV
-            # For landscape (1280x720): height is narrower, use vertical FOV
+            # For proper framing, compute radius needed for each dimension separately
+            # then use the max to ensure the scene fits in both dimensions
             width, height = self.render_size
-            horizontal_fov = 2 * np.degrees(np.arctan(width / (2 * self.focal_length)))
-            vertical_fov = 2 * np.degrees(np.arctan(height / (2 * self.focal_length)))
+            min_corner, max_corner = bounds
 
-            # Use the smaller FOV (narrower dimension determines framing)
-            fov_deg = min(horizontal_fov, vertical_fov)
+            # Scene extents in X (horizontal) and Y (vertical) dimensions
+            scene_width = max_corner[0] - min_corner[0]  # X extent
+            scene_height = max_corner[1] - min_corner[1]  # Y extent (up)
 
-            radius = OrbitPath.auto_compute_radius(bounds, fill_ratio, fov_deg)
+            # Compute FOVs in radians
+            horizontal_fov_rad = 2 * np.arctan(width / (2 * self.focal_length))
+            vertical_fov_rad = 2 * np.arctan(height / (2 * self.focal_length))
+
+            # Radius needed to fit horizontal extent in horizontal FOV
+            desired_h_angle = horizontal_fov_rad * fill_ratio
+            radius_h = (scene_width / 2.0) / np.tan(desired_h_angle / 2.0)
+
+            # Radius needed to fit vertical extent in vertical FOV
+            desired_v_angle = vertical_fov_rad * fill_ratio
+            radius_v = (scene_height / 2.0) / np.tan(desired_v_angle / 2.0)
+
+            # Use the larger radius to ensure scene fits in both dimensions
+            radius = max(radius_h, radius_v)
 
         # Create orbit path generator
         target = self.scene.get_centroid()
