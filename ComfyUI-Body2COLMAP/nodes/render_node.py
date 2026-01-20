@@ -31,14 +31,14 @@ class Body2COLMAP_Render:
                 "mesh_data": ("SAM3D_OUTPUT",),
                 "path_config": ("B2C_PATH_CONFIG",),
                 "width": ("INT", {
-                    "default": 512,
+                    "default": 720,
                     "min": 1,
                     "max": 4096,
                     "step": 1,
                     "tooltip": "Image width in pixels"
                 }),
                 "height": ("INT", {
-                    "default": 512,
+                    "default": 1280,
                     "min": 1,
                     "max": 4096,
                     "step": 1,
@@ -51,7 +51,7 @@ class Body2COLMAP_Render:
                     "mesh+skeleton",
                     "depth+skeleton"
                 ], {
-                    "default": "mesh",
+                    "default": "depth+skeleton",
                     "tooltip": "What to render: mesh surface, depth map, skeleton, or composites"
                 }),
             },
@@ -122,14 +122,14 @@ class Body2COLMAP_Render:
                     "mhr70"
                 ], {"default": "openpose_body25_hands"}),
                 "joint_radius": ("FLOAT", {
-                    "default": 0.015,
+                    "default": 0.006,
                     "min": 0.001,
                     "max": 0.1,
                     "step": 0.001,
                     "tooltip": "Sphere radius for skeleton joints (meters)"
                 }),
                 "bone_radius": ("FLOAT", {
-                    "default": 0.008,
+                    "default": 0.003,
                     "min": 0.001,
                     "max": 0.05,
                     "step": 0.001,
@@ -152,7 +152,7 @@ class Body2COLMAP_Render:
                mesh_color_r=0.65, mesh_color_g=0.74, mesh_color_b=0.86,
                bg_color_r=1.0, bg_color_g=1.0, bg_color_b=1.0,
                skeleton_format="openpose_body25_hands",
-               joint_radius=0.015, bone_radius=0.008,
+               joint_radius=0.006, bone_radius=0.003,
                depth_colormap="grayscale"):
         """
         Render all camera positions and return batch of images + masks.

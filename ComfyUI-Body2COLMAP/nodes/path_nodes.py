@@ -14,7 +14,7 @@ class Body2COLMAP_CircularPath:
         return {
             "required": {
                 "n_frames": ("INT", {
-                    "default": 36,
+                    "default": 81,
                     "min": 4,
                     "max": 1000,
                     "step": 1,
@@ -72,7 +72,7 @@ class Body2COLMAP_SinusoidalPath:
         return {
             "required": {
                 "n_frames": ("INT", {
-                    "default": 60,
+                    "default": 81,
                     "min": 4,
                     "max": 1000,
                     "step": 1,
@@ -139,14 +139,14 @@ class Body2COLMAP_HelicalPath:
         return {
             "required": {
                 "n_frames": ("INT", {
-                    "default": 120,
+                    "default": 81,
                     "min": 4,
                     "max": 1000,
                     "step": 1,
                     "tooltip": "Total number of frames across all loops"
                 }),
                 "n_loops": ("INT", {
-                    "default": 3,
+                    "default": 2,
                     "min": 1,
                     "max": 10,
                     "step": 1,
@@ -162,14 +162,14 @@ class Body2COLMAP_HelicalPath:
             },
             "optional": {
                 "lead_in_deg": ("FLOAT", {
-                    "default": 45.0,
+                    "default": 30.0,
                     "min": 0.0,
                     "max": 180.0,
                     "step": 5.0,
                     "tooltip": "Degrees of rotation at bottom before ascending"
                 }),
                 "lead_out_deg": ("FLOAT", {
-                    "default": 45.0,
+                    "default": 90.0,
                     "min": 0.0,
                     "max": 180.0,
                     "step": 5.0,
@@ -192,7 +192,7 @@ class Body2COLMAP_HelicalPath:
         }
 
     def configure(self, n_frames, n_loops, amplitude_deg,
-                  lead_in_deg=45.0, lead_out_deg=45.0,
+                  lead_in_deg=30.0, lead_out_deg=90.0,
                   radius=0.0, start_azimuth_deg=0.0):
         """Return helical path configuration."""
         return ({

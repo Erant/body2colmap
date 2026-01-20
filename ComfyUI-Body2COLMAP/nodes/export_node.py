@@ -33,7 +33,7 @@ class Body2COLMAP_ExportCOLMAP:
             "optional": {
                 "images": ("IMAGE",),
                 "pointcloud_samples": ("INT", {
-                    "default": 50000,
+                    "default": 10000,
                     "min": 1000,
                     "max": 500000,
                     "step": 1000,
@@ -43,7 +43,7 @@ class Body2COLMAP_ExportCOLMAP:
         }
 
     def export(self, render_data, output_directory, image_name,
-               images=None, pointcloud_samples=50000):
+               images=None, pointcloud_samples=10000):
         """
         Export COLMAP format files.
 
