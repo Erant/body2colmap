@@ -131,6 +131,12 @@ class Config:
             except ValueError:
                 raise ValueError(f"Invalid resolution format: {args.resolution}. Use WxH (e.g., 512x512)")
 
+        # Individual width/height overrides (take precedence over --resolution)
+        if args.width is not None or args.height is not None:
+            width = args.width if args.width is not None else config.render.resolution[0]
+            height = args.height if args.height is not None else config.render.resolution[1]
+            config.render.resolution = (width, height)
+
         if args.render_modes:
             config.render.modes = [m.strip() for m in args.render_modes.split(',')]
 
@@ -157,7 +163,7 @@ class Config:
             config.path.pattern = args.orbit_pattern
         if args.orbit_radius is not None:
             config.path.radius = args.orbit_radius
-        if args.n_frames:
+        if args.n_frames is not None:
             config.path.n_frames = args.n_frames
         if args.elevation is not None:
             config.path.elevation_deg = args.elevation
@@ -484,6 +490,18 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Render resolution (e.g., 512x512, 1024x768)"
     )
     render_group.add_argument(
+        "--width",
+        type=int,
+        metavar="PIXELS",
+        help="Render width in pixels (alternative to --resolution)"
+    )
+    render_group.add_argument(
+        "--height",
+        type=int,
+        metavar="PIXELS",
+        help="Render height in pixels (alternative to --resolution)"
+    )
+    render_group.add_argument(
         "--render-modes",
         type=str,
         metavar="MODE[,MODE...]",
@@ -507,14 +525,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
     camera_group.add_argument(
         "--focal-length",
         type=float,
-        default=None,
         help="Focal length in pixels (default: auto for ~47° FOV)"
     )
     camera_group.add_argument(
         "--n-frames",
         type=int,
-        default=120,
-        help="Number of frames in orbit"
+        help="Number of frames in orbit (default: 120)"
     )
 
     # Path options
