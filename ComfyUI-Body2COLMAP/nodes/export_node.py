@@ -24,7 +24,7 @@ class Body2COLMAP_ExportCOLMAP:
                 "render_data": ("B2C_RENDER_DATA",),
                 "output_directory": ("STRING", {
                     "default": "output/colmap",
-                    "tooltip": "Directory for COLMAP files (creates sparse/0/ subdirectory)"
+                    "tooltip": "Directory for COLMAP files and images (flat structure)"
                 }),
                 "image_name": ("STRING", {
                     "default": "frame",
@@ -49,15 +49,14 @@ class Body2COLMAP_ExportCOLMAP:
         """
         Export COLMAP format files.
 
-        Creates:
+        Creates (flat structure matching body2colmap):
             output_directory/
-            ├── images/           (if images provided)
-            │   ├── frame_00001_.png (RGBA if masks provided, RGB otherwise)
-            │   └── ...
-            └── sparse/0/
-                ├── cameras.txt   (camera intrinsics)
-                ├── images.txt    (camera extrinsics per image)
-                └── points3D.txt  (initial point cloud)
+            ├── frame_00001_.png (RGBA if masks provided, RGB otherwise)
+            ├── frame_00002_.png
+            ├── ...
+            ├── cameras.txt   (camera intrinsics)
+            ├── images.txt    (camera extrinsics per image)
+            └── points3D.txt  (initial point cloud)
         """
         # Extract data
         cameras = render_data["cameras"]
@@ -65,10 +64,9 @@ class Body2COLMAP_ExportCOLMAP:
         width, height = render_data["resolution"]
         focal_length = render_data["focal_length"]
 
-        # Create output directories
+        # Create output directory
         output_path = Path(output_directory)
-        sparse_path = output_path / "sparse" / "0"
-        sparse_path.mkdir(parents=True, exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
 
         # Generate image filenames using ComfyUI convention
         # Format: <image_name>_%05d_.png with 1-based indexing
@@ -76,9 +74,6 @@ class Body2COLMAP_ExportCOLMAP:
 
         # Save images if provided
         if images is not None:
-            images_path = output_path / "images"
-            images_path.mkdir(parents=True, exist_ok=True)
-
             # Convert ComfyUI images to CV2 format
             cv2_images = comfy_to_cv2(images)
 
@@ -96,12 +91,12 @@ class Body2COLMAP_ExportCOLMAP:
                     alpha = alpha_channel[i]  # [H, W]
                     rgba = np.dstack([img, alpha])  # [H, W, 4] - BGRA
 
-                    img_path = images_path / filename
+                    img_path = output_path / filename
                     cv2.imwrite(str(img_path), rgba)
             else:
                 # Save RGB only
                 for img, filename in zip(cv2_images, image_names):
-                    img_path = images_path / filename
+                    img_path = output_path / filename
                     cv2.imwrite(str(img_path), img)
 
         # Create COLMAP exporter using classmethod
@@ -112,16 +107,16 @@ class Body2COLMAP_ExportCOLMAP:
             n_pointcloud_samples=pointcloud_samples
         )
 
-        # Export COLMAP files
-        exporter.export(output_dir=sparse_path)
+        # Export COLMAP files to same directory as images
+        exporter.export(output_dir=output_path)
 
-        print(f"[Body2COLMAP] Exported COLMAP files to: {sparse_path}")
+        print(f"[Body2COLMAP] Exported COLMAP files to: {output_path}")
         print(f"[Body2COLMAP] - cameras.txt: {len(cameras)} cameras")
         print(f"[Body2COLMAP] - images.txt: {len(cameras)} images")
         print(f"[Body2COLMAP] - points3D.txt: {pointcloud_samples} points")
 
         if images is not None:
             format_str = "RGBA" if masks is not None else "RGB"
-            print(f"[Body2COLMAP] - images/: {len(cv2_images)} {format_str} image files")
+            print(f"[Body2COLMAP] - {len(cv2_images)} {format_str} image files")
 
         return (str(output_path.absolute()),)
