@@ -189,7 +189,10 @@ class Scene:
 
     def get_centroid(self) -> NDArray[np.float32]:
         """
-        Get centroid of the mesh.
+        Get centroid of the mesh (mean of all vertices).
+
+        Note: This can be biased by vertex density. For camera framing,
+        consider using get_bbox_center() instead.
 
         Returns:
             Centroid position in world coordinates
@@ -198,6 +201,19 @@ class Scene:
             self._centroid = np.mean(self.vertices, axis=0)
 
         return self._centroid
+
+    def get_bbox_center(self) -> NDArray[np.float32]:
+        """
+        Get center of the axis-aligned bounding box.
+
+        This is the geometric center of the bounds, unaffected by vertex density.
+        Preferred for camera look-at targets.
+
+        Returns:
+            Bounding box center position in world coordinates
+        """
+        min_corner, max_corner = self.get_bounds()
+        return (min_corner + max_corner) / 2.0
 
     def get_bounding_sphere_radius(self) -> float:
         """

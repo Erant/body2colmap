@@ -172,7 +172,8 @@ class OrbitPipeline:
             radius = max(radius_h, radius_v)
 
         # Create orbit path generator
-        target = self.scene.get_centroid()
+        # Use bbox center instead of centroid to avoid bias from vertex density
+        target = self.scene.get_bbox_center()
         orbit = OrbitPath(target=target, radius=radius)
 
         # Create camera template with correct intrinsics
