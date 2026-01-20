@@ -1,0 +1,77 @@
+# Body2COLMAP Configuration File
+#
+# This file configures the multi-view rendering and COLMAP export pipeline.
+# Command-line arguments override values specified here.
+
+# Rendering configuration
+render:
+  # Output resolution [width, height] in pixels
+  resolution: [720, 1280]
+
+  # Mesh color [R, G, B] in range 0-1
+  mesh_color: [0.65, 0.74, 0.86]
+
+  # Background color [R, G, B] in range 0-1
+  bg_color: [1.0, 1.0, 1.0]
+
+  # Render modes: mesh, depth, skeleton, or combinations (mesh+skeleton, depth+skeleton)
+  modes: ["depth+skeleton"]
+
+# Camera configuration
+camera:
+  # Focal length in pixels (null = auto-compute for ~47° FOV)
+  focal_length: null
+
+  # Auto-frame the mesh to fit in view
+  auto_frame: true
+
+  # Fill ratio for auto-framing (0-1, how much of frame mesh should fill)
+  fill_ratio: 0.8
+
+  # Manual zoom override (null = use auto_frame)
+  zoom: null
+
+# Orbit path configuration
+path:
+  # Pattern type: circular, sinusoidal, helical
+  pattern: "helical"
+
+  # Number of frames to render
+  n_frames: 81
+
+  # Orbit radius in meters (null = auto-compute from mesh bounds)
+  radius: null
+
+  # Helical mode: loops and amplitude
+  helical_loops: 2
+  helical_amplitude_deg: 40.0
+  helical_lead_in_deg: 30.0
+  helical_lead_out_deg: 90.0
+
+# Skeleton rendering configuration
+skeleton:
+  # Enable skeleton rendering
+  enabled: true
+
+  # Skeleton format: openpose_body25_hands, mhr70
+  format: "openpose_body25_hands"
+
+  # Joint sphere radius in meters
+  joint_radius: 0.006
+
+  # Bone cylinder radius in meters
+  bone_radius: 0.003
+
+# Export configuration
+export:
+  # Image format: png, jpg
+  image_format: "png"
+
+  # Filename pattern (Python format string)
+  filename_pattern: "image_{:05d}_.png"
+
+  # Export COLMAP sparse reconstruction
+  colmap: true
+
+  # Number of points to sample from mesh surface for COLMAP points3D.txt
+  pointcloud_samples: 10000
