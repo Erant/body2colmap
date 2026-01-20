@@ -3,7 +3,7 @@
 import os
 import numpy as np
 import torch
-from typing import List
+from typing import List, Tuple
 from numpy.typing import NDArray
 
 
@@ -38,20 +38,17 @@ def setup_headless_rendering():
             print(f"[Body2COLMAP] Warning: Could not initialize renderer ({e2})")
 
 
-def rendered_to_comfy(images: List[NDArray]) -> torch.Tensor:
+def rendered_to_comfy(images: List[NDArray]) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Convert list of rendered RGBA images to ComfyUI IMAGE format.
+    Convert list of rendered RGBA images to ComfyUI IMAGE and MASK formats.
 
     Args:
         images: List of [H, W, 4] uint8 arrays in [0, 255] (RGBA)
 
     Returns:
-        Tensor of shape [B, H, W, 3] in [0, 1] float32 (RGB)
-
-    Note:
-        Alpha channel is currently dropped because ComfyUI's IMAGE type expects RGB.
-        The renderer produces RGBA where alpha represents mesh coverage/opacity.
-        TODO: Consider adding separate MASK output type or compositing against bg_color.
+        Tuple of:
+        - images: Tensor of shape [B, H, W, 3] in [0, 1] float32 (RGB)
+        - masks: Tensor of shape [B, H, W] in [0, 1] float32 (alpha channel)
     """
     if not images:
         raise ValueError("Empty image list")
@@ -59,15 +56,16 @@ def rendered_to_comfy(images: List[NDArray]) -> torch.Tensor:
     # Stack into batch
     batch = np.stack(images, axis=0)  # [B, H, W, 4]
 
-    # Drop alpha channel (ComfyUI IMAGE is RGB only)
-    # TODO: Should we composite against background color using alpha instead?
-    batch = batch[..., :3]  # [B, H, W, 3]
+    # Split RGB and Alpha
+    rgb = batch[..., :3]  # [B, H, W, 3]
+    alpha = batch[..., 3]  # [B, H, W]
 
     # Convert to float [0, 1]
-    batch = batch.astype(np.float32) / 255.0
+    rgb = rgb.astype(np.float32) / 255.0
+    alpha = alpha.astype(np.float32) / 255.0
 
-    # Convert to torch tensor
-    return torch.from_numpy(batch)
+    # Convert to torch tensors
+    return torch.from_numpy(rgb), torch.from_numpy(alpha)
 
 
 def comfy_to_cv2(images: torch.Tensor) -> List[NDArray]:

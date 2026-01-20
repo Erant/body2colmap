@@ -4,19 +4,23 @@ import numpy as np
 from typing import Tuple
 from body2colmap.renderer import Renderer
 from body2colmap.scene import Scene
+from body2colmap.path import OrbitPath
+from body2colmap.camera import Camera
 from ..core.sam3d_adapter import sam3d_output_to_scene
 from ..core.comfy_utils import rendered_to_comfy
+from ..core.path_utils import compute_smart_orbit_radius
 
 
 class Body2COLMAP_Render:
-    """Render multi-view images of mesh from camera path."""
+    """Render multi-view images of mesh from camera path configuration."""
 
     CATEGORY = "Body2COLMAP"
     FUNCTION = "render"
-    RETURN_TYPES = ("IMAGE", "B2C_RENDER_DATA")
-    RETURN_NAMES = ("images", "render_data")
+    RETURN_TYPES = ("IMAGE", "MASK", "B2C_RENDER_DATA")
+    RETURN_NAMES = ("images", "masks", "render_data")
     OUTPUT_TOOLTIPS = (
-        "Batch of rendered images (connect to SaveImage or PreviewImage)",
+        "Batch of rendered RGB images (connect to SaveImage or PreviewImage)",
+        "Batch of alpha masks for each image",
         "Render metadata for COLMAP export (connect to ExportCOLMAP)"
     )
 
@@ -25,7 +29,7 @@ class Body2COLMAP_Render:
         return {
             "required": {
                 "mesh_data": ("SAM3D_OUTPUT",),
-                "camera_path": ("B2C_PATH",),
+                "path_config": ("B2C_PATH_CONFIG",),
                 "width": ("INT", {
                     "default": 512,
                     "min": 64,
@@ -52,6 +56,22 @@ class Body2COLMAP_Render:
                 }),
             },
             "optional": {
+                # Camera parameters
+                "focal_length": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 10000.0,
+                    "step": 1.0,
+                    "tooltip": "Focal length in pixels (0=auto for ~47° FOV)"
+                }),
+                "fill_ratio": ("FLOAT", {
+                    "default": 0.8,
+                    "min": 0.1,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": "How much of viewport should contain mesh (for auto-radius)"
+                }),
+
                 # Mesh rendering options
                 "mesh_color_r": ("FLOAT", {
                     "default": 0.65,
@@ -100,10 +120,7 @@ class Body2COLMAP_Render:
                 "skeleton_format": ([
                     "openpose_body25_hands",
                     "mhr70"
-                ], {
-                    "default": "openpose_body25_hands",
-                    "tooltip": "Skeleton format for rendering"
-                }),
+                ], {"default": "openpose_body25_hands"}),
                 "joint_radius": ("FLOAT", {
                     "default": 0.015,
                     "min": 0.001,
@@ -126,72 +143,90 @@ class Body2COLMAP_Render:
                     "plasma",
                     "inferno",
                     "magma"
-                ], {
-                    "default": "grayscale",
-                    "tooltip": "Colormap for depth visualization"
-                }),
-
-                # Camera options
-                "focal_length": ("FLOAT", {
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 10000.0,
-                    "step": 1.0,
-                    "tooltip": "Focal length in pixels (0=auto for ~47° FOV)"
-                }),
+                ], {"default": "grayscale"}),
             }
         }
 
-    def render(self, mesh_data, camera_path, width, height, render_mode,
+    def render(self, mesh_data, path_config, width, height, render_mode,
+               focal_length=0.0, fill_ratio=0.8,
                mesh_color_r=0.65, mesh_color_g=0.74, mesh_color_b=0.86,
                bg_color_r=1.0, bg_color_g=1.0, bg_color_b=1.0,
                skeleton_format="openpose_body25_hands",
                joint_radius=0.015, bone_radius=0.008,
-               depth_colormap="grayscale",
-               focal_length=0.0):
+               depth_colormap="grayscale"):
         """
-        Render all camera positions and return batch of images.
+        Render all camera positions and return batch of images + masks.
 
         Returns:
             images: Tensor of shape [N, H, W, 3] in [0,1] range (ComfyUI IMAGE format)
+            masks: Tensor of shape [N, H, W] in [0,1] range (alpha channel)
             render_data: Dict containing cameras and scene for COLMAP export
         """
         # Convert SAM3D output to Scene (with skeleton for skeleton modes)
         include_skeleton = "skeleton" in render_mode
         scene = sam3d_output_to_scene(mesh_data, include_skeleton=include_skeleton)
 
-        # Extract cameras from path
-        cameras = camera_path["cameras"]
+        # Determine focal length
+        if focal_length <= 0:
+            # Auto: ~47° horizontal FOV
+            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
 
-        # Update camera intrinsics if needed
-        if focal_length > 0:
-            # Update all cameras with new focal length
-            for cam in cameras:
-                cam.width = width
-                cam.height = height
-                cam.fx = focal_length
-                cam.fy = focal_length
-                # Update principal point to image center
-                cam.cx = width / 2.0
-                cam.cy = height / 2.0
+        # Get orbit center and auto-compute radius if needed
+        orbit_center = scene.get_bbox_center()
+        pattern = path_config["pattern"]
+        params = path_config["params"].copy()  # Don't modify original
+
+        # Auto-compute radius if not specified in path config
+        if params.get("radius") is None:
+            params["radius"] = compute_smart_orbit_radius(
+                scene=scene,
+                render_size=(width, height),
+                focal_length=focal_length,
+                fill_ratio=fill_ratio
+            )
+
+        # Create camera template
+        camera_template = Camera(
+            focal_length=(focal_length, focal_length),
+            image_size=(width, height)
+        )
+
+        # Create OrbitPath and generate cameras based on pattern
+        path_gen = OrbitPath(target=orbit_center, radius=params["radius"])
+
+        if pattern == "circular":
+            cameras = path_gen.circular(
+                n_frames=params["n_frames"],
+                elevation_deg=params["elevation_deg"],
+                start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
+                camera_template=camera_template
+            )
+        elif pattern == "sinusoidal":
+            cameras = path_gen.sinusoidal(
+                n_frames=params["n_frames"],
+                amplitude_deg=params["amplitude_deg"],
+                n_cycles=params["n_cycles"],
+                start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
+                camera_template=camera_template
+            )
+        elif pattern == "helical":
+            cameras = path_gen.helical(
+                n_frames=params["n_frames"],
+                n_loops=params["n_loops"],
+                amplitude_deg=params["amplitude_deg"],
+                lead_in_deg=params.get("lead_in_deg", 45.0),
+                lead_out_deg=params.get("lead_out_deg", 45.0),
+                start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
+                camera_template=camera_template
+            )
         else:
-            # Just update resolution
-            for cam in cameras:
-                cam.width = width
-                cam.height = height
-                # Update principal point to image center
-                cam.cx = width / 2.0
-                cam.cy = height / 2.0
-
-        # Get actual focal length
-        actual_focal_length = cameras[0].fx
+            raise ValueError(f"Unknown path pattern: {pattern}")
 
         # Prepare render colors
         mesh_color = (mesh_color_r, mesh_color_g, mesh_color_b)
         bg_color = (bg_color_r, bg_color_g, bg_color_b)
 
         # Map "grayscale" to None (no colormap = grayscale depth)
-        # Other values are valid matplotlib colormap names
         depth_cmap = None if depth_colormap == "grayscale" else depth_colormap
 
         # Create renderer - requires scene and render_size tuple
@@ -249,15 +284,15 @@ class Body2COLMAP_Render:
 
             rendered_images.append(img)
 
-        # Convert to ComfyUI IMAGE format
-        images_tensor = rendered_to_comfy(rendered_images)
+        # Convert to ComfyUI IMAGE and MASK formats
+        images_tensor, masks_tensor = rendered_to_comfy(rendered_images)
 
         # Package render data for COLMAP export
         render_data = {
             "cameras": cameras,
             "scene": scene,
             "resolution": (width, height),
-            "focal_length": actual_focal_length,
+            "focal_length": focal_length,
         }
 
-        return (images_tensor, render_data)
+        return (images_tensor, masks_tensor, render_data)

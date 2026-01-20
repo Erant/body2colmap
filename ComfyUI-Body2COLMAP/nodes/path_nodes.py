@@ -1,25 +1,18 @@
-"""Camera path generator nodes for Body2COLMAP."""
-
-import numpy as np
-from body2colmap.path import OrbitPath
-from body2colmap.camera import Camera
-from ..core.sam3d_adapter import sam3d_output_to_scene
-from ..core.path_utils import compute_smart_orbit_radius
+"""Camera path configuration nodes for Body2COLMAP."""
 
 
 class Body2COLMAP_CircularPath:
-    """Generate circular camera orbit path around mesh."""
+    """Configure circular camera orbit path."""
 
     CATEGORY = "Body2COLMAP/Path"
-    FUNCTION = "generate_path"
-    RETURN_TYPES = ("B2C_PATH",)
-    RETURN_NAMES = ("camera_path",)
+    FUNCTION = "configure"
+    RETURN_TYPES = ("B2C_PATH_CONFIG",)
+    RETURN_NAMES = ("path_config",)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mesh_data": ("SAM3D_OUTPUT",),
                 "n_frames": ("INT", {
                     "default": 36,
                     "min": 4,
@@ -43,13 +36,6 @@ class Body2COLMAP_CircularPath:
                     "step": 0.1,
                     "tooltip": "Orbit radius in meters (0=auto-compute from mesh bounds)"
                 }),
-                "fill_ratio": ("FLOAT", {
-                    "default": 0.8,
-                    "min": 0.1,
-                    "max": 1.0,
-                    "step": 0.05,
-                    "tooltip": "How much of viewport should contain mesh (for auto-radius)"
-                }),
                 "start_azimuth_deg": ("FLOAT", {
                     "default": 0.0,
                     "min": 0.0,
@@ -57,97 +43,34 @@ class Body2COLMAP_CircularPath:
                     "step": 5.0,
                     "tooltip": "Starting azimuth angle (0=front)"
                 }),
-                "width": ("INT", {
-                    "default": 512,
-                    "min": 64,
-                    "max": 4096,
-                    "step": 64,
-                    "tooltip": "Image width for auto-radius calculation"
-                }),
-                "height": ("INT", {
-                    "default": 512,
-                    "min": 64,
-                    "max": 4096,
-                    "step": 64,
-                    "tooltip": "Image height for auto-radius calculation"
-                }),
-                "focal_length": ("FLOAT", {
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 10000.0,
-                    "step": 1.0,
-                    "tooltip": "Focal length in pixels (0=auto for ~47° FOV)"
-                }),
             }
         }
 
-    def generate_path(self, mesh_data, n_frames, elevation_deg,
-                      radius=0.0, fill_ratio=0.8, start_azimuth_deg=0.0,
-                      width=512, height=512, focal_length=0.0):
-        """Generate circular orbit camera path."""
-
-        # Convert SAM3D output to Scene
-        scene = sam3d_output_to_scene(mesh_data, include_skeleton=False)
-
-        # Get orbit center from mesh bounding box
-        orbit_center = scene.get_bbox_center()
-
-        # Determine focal length (needed for auto-framing)
-        if focal_length <= 0:
-            # Auto: ~47° horizontal FOV
-            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
-
-        # Auto-compute radius if needed using SMART algorithm from pipeline
-        if radius <= 0.0:
-            radius = compute_smart_orbit_radius(
-                scene=scene,
-                render_size=(width, height),
-                focal_length=focal_length,
-                fill_ratio=fill_ratio
-            )
-
-        # Create camera template with specified intrinsics
-        camera_template = Camera(
-            focal_length=(focal_length, focal_length),
-            image_size=(width, height)
-        )
-
-        # Create OrbitPath and generate cameras
-        path_gen = OrbitPath(
-            target=orbit_center,
-            radius=radius
-        )
-
-        cameras = path_gen.circular(
-            n_frames=n_frames,
-            elevation_deg=elevation_deg,
-            start_azimuth_deg=start_azimuth_deg,
-            camera_template=camera_template
-        )
-
-        # Return B2C_PATH dict
+    def configure(self, n_frames, elevation_deg, radius=0.0, start_azimuth_deg=0.0):
+        """Return circular path configuration."""
         return ({
-            "cameras": cameras,
-            "orbit_center": orbit_center,
-            "orbit_radius": float(radius),
             "pattern": "circular",
-            "n_frames": int(n_frames),
+            "params": {
+                "n_frames": int(n_frames),
+                "elevation_deg": float(elevation_deg),
+                "radius": float(radius) if radius > 0 else None,
+                "start_azimuth_deg": float(start_azimuth_deg),
+            }
         },)
 
 
 class Body2COLMAP_SinusoidalPath:
-    """Generate sinusoidal camera orbit with oscillating elevation."""
+    """Configure sinusoidal camera orbit with oscillating elevation."""
 
     CATEGORY = "Body2COLMAP/Path"
-    FUNCTION = "generate_path"
-    RETURN_TYPES = ("B2C_PATH",)
-    RETURN_NAMES = ("camera_path",)
+    FUNCTION = "configure"
+    RETURN_TYPES = ("B2C_PATH_CONFIG",)
+    RETURN_NAMES = ("path_config",)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mesh_data": ("SAM3D_OUTPUT",),
                 "n_frames": ("INT", {
                     "default": 60,
                     "min": 4,
@@ -178,13 +101,6 @@ class Body2COLMAP_SinusoidalPath:
                     "step": 0.1,
                     "tooltip": "Orbit radius in meters (0=auto-compute)"
                 }),
-                "fill_ratio": ("FLOAT", {
-                    "default": 0.8,
-                    "min": 0.1,
-                    "max": 1.0,
-                    "step": 0.05,
-                    "tooltip": "Viewport fill ratio for auto-radius"
-                }),
                 "start_azimuth_deg": ("FLOAT", {
                     "default": 0.0,
                     "min": 0.0,
@@ -192,78 +108,36 @@ class Body2COLMAP_SinusoidalPath:
                     "step": 5.0,
                     "tooltip": "Starting azimuth angle"
                 }),
-                "width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
-                "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
-                "focal_length": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0}),
             }
         }
 
-    def generate_path(self, mesh_data, n_frames, amplitude_deg, n_cycles,
-                      radius=0.0, fill_ratio=0.8, start_azimuth_deg=0.0,
-                      width=512, height=512, focal_length=0.0):
-        """Generate sinusoidal orbit camera path."""
-
-        # Convert SAM3D output to Scene
-        scene = sam3d_output_to_scene(mesh_data, include_skeleton=False)
-
-        # Get orbit center
-        orbit_center = scene.get_bbox_center()
-
-        # Determine focal length (needed for auto-framing)
-        if focal_length <= 0:
-            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
-
-        # Auto-compute radius if needed using SMART algorithm from pipeline
-        if radius <= 0.0:
-            radius = compute_smart_orbit_radius(
-                scene=scene,
-                render_size=(width, height),
-                focal_length=focal_length,
-                fill_ratio=fill_ratio
-            )
-
-        # Create camera template
-        camera_template = Camera(
-            focal_length=(focal_length, focal_length),
-            image_size=(width, height)
-        )
-
-        # Create OrbitPath and generate cameras
-        path_gen = OrbitPath(
-            target=orbit_center,
-            radius=radius
-        )
-
-        cameras = path_gen.sinusoidal(
-            n_frames=n_frames,
-            amplitude_deg=amplitude_deg,
-            n_cycles=n_cycles,
-            start_azimuth_deg=start_azimuth_deg,
-            camera_template=camera_template
-        )
-
+    def configure(self, n_frames, amplitude_deg, n_cycles,
+                  radius=0.0, start_azimuth_deg=0.0):
+        """Return sinusoidal path configuration."""
         return ({
-            "cameras": cameras,
-            "orbit_center": orbit_center,
-            "orbit_radius": float(radius),
             "pattern": "sinusoidal",
-            "n_frames": int(n_frames),
+            "params": {
+                "n_frames": int(n_frames),
+                "amplitude_deg": float(amplitude_deg),
+                "n_cycles": int(n_cycles),
+                "radius": float(radius) if radius > 0 else None,
+                "start_azimuth_deg": float(start_azimuth_deg),
+            }
         },)
 
 
 class Body2COLMAP_HelicalPath:
-    """Generate helical camera path - best for 3D Gaussian Splatting training."""
+    """Configure helical camera path - best for 3D Gaussian Splatting training."""
 
     CATEGORY = "Body2COLMAP/Path"
-    FUNCTION = "generate_path"
-    RETURN_TYPES = ("B2C_PATH",)
-    RETURN_NAMES = ("camera_path",)
+    FUNCTION = "configure"
+    RETURN_TYPES = ("B2C_PATH_CONFIG",)
+    RETURN_NAMES = ("path_config",)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mesh_data": ("SAM3D_OUTPUT",),
                 "n_frames": ("INT", {
                     "default": 120,
                     "min": 4,
@@ -308,75 +182,28 @@ class Body2COLMAP_HelicalPath:
                     "step": 0.1,
                     "tooltip": "Orbit radius (0=auto-compute)"
                 }),
-                "fill_ratio": ("FLOAT", {
-                    "default": 0.8,
-                    "min": 0.1,
-                    "max": 1.0,
-                    "step": 0.05,
-                }),
                 "start_azimuth_deg": ("FLOAT", {
                     "default": 0.0,
                     "min": 0.0,
                     "max": 360.0,
                     "step": 5.0,
                 }),
-                "width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
-                "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
-                "focal_length": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0}),
             }
         }
 
-    def generate_path(self, mesh_data, n_frames, n_loops, amplitude_deg,
-                      lead_in_deg=45.0, lead_out_deg=45.0,
-                      radius=0.0, fill_ratio=0.8, start_azimuth_deg=0.0,
-                      width=512, height=512, focal_length=0.0):
-        """Generate helical orbit camera path."""
-
-        # Convert SAM3D output to Scene
-        scene = sam3d_output_to_scene(mesh_data, include_skeleton=False)
-
-        # Get orbit center
-        orbit_center = scene.get_bbox_center()
-
-        # Determine focal length (needed for auto-framing)
-        if focal_length <= 0:
-            focal_length = width / (2.0 * np.tan(np.deg2rad(47.0) / 2.0))
-
-        # Auto-compute radius if needed using SMART algorithm from pipeline
-        if radius <= 0.0:
-            radius = compute_smart_orbit_radius(
-                scene=scene,
-                render_size=(width, height),
-                focal_length=focal_length,
-                fill_ratio=fill_ratio
-            )
-
-        # Create camera template
-        camera_template = Camera(
-            focal_length=(focal_length, focal_length),
-            image_size=(width, height)
-        )
-
-        # Create OrbitPath and generate cameras
-        path_gen = OrbitPath(
-            target=orbit_center,
-            radius=radius
-        )
-
-        cameras = path_gen.helical(
-            n_frames=n_frames,
-            n_loops=n_loops,
-            amplitude_deg=amplitude_deg,
-            lead_in_deg=lead_in_deg,
-            lead_out_deg=lead_out_deg,
-            start_azimuth_deg=start_azimuth_deg,
-            camera_template=camera_template
-        )
-
+    def configure(self, n_frames, n_loops, amplitude_deg,
+                  lead_in_deg=45.0, lead_out_deg=45.0,
+                  radius=0.0, start_azimuth_deg=0.0):
+        """Return helical path configuration."""
         return ({
-            "cameras": cameras,
-            "orbit_center": orbit_center,
-            "orbit_radius": float(radius),
             "pattern": "helical",
-            "n_frames": int(n_frames),
+            "params": {
+                "n_frames": int(n_frames),
+                "n_loops": int(n_loops),
+                "amplitude_deg": float(amplitude_deg),
+                "lead_in_deg": float(lead_in_deg),
+                "lead_out_deg": float(lead_out_deg),
+                "radius": float(radius) if radius > 0 else None,
+                "start_azimuth_deg": float(start_azimuth_deg),
+            }
         },)
