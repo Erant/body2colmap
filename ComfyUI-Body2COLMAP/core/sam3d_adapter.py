@@ -2,7 +2,6 @@
 
 import numpy as np
 import torch
-import trimesh
 from body2colmap.scene import Scene
 from body2colmap.coordinates import sam3d_to_world
 
@@ -34,21 +33,28 @@ def sam3d_output_to_scene(mesh_data: dict, include_skeleton: bool = True) -> Sce
     # MHR: Y-down, Z-forward → World: Y-up, Z-backward
     vertices_world = sam3d_to_world(vertices, cam_t)
 
-    # Create trimesh
-    mesh = trimesh.Trimesh(vertices=vertices_world, faces=faces)
-
     # Extract skeleton if requested
-    skeleton = None
+    skeleton_joints = None
+    skeleton_format = None
     if include_skeleton and "joints" in mesh_data and mesh_data["joints"] is not None:
         joints = _to_numpy(mesh_data["joints"])
 
         # SAM3D uses 127 MHR joints, convert to MHR70 (70 joints)
-        skeleton = _convert_mhr127_to_mhr70(joints)
+        skeleton_joints = _convert_mhr127_to_mhr70(joints)
 
         # Convert to world coordinates (use same camera translation)
-        skeleton = sam3d_to_world(skeleton, cam_t)
+        skeleton_joints = sam3d_to_world(skeleton_joints, cam_t)
 
-    return Scene(mesh=mesh, skeleton=skeleton)
+        # Use MHR70 format
+        skeleton_format = "mhr70"
+
+    # Create Scene with vertices and faces directly
+    return Scene(
+        vertices=vertices_world,
+        faces=faces,
+        skeleton_joints=skeleton_joints,
+        skeleton_format=skeleton_format
+    )
 
 
 def _to_numpy(tensor_or_array) -> np.ndarray:
