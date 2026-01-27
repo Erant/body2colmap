@@ -53,6 +53,7 @@ class OrbitPath:
         n_frames: int,
         elevation_deg: float = 0.0,
         start_azimuth_deg: float = 0.0,
+        overlap: int = 1,
         camera_template: Optional[Camera] = None
     ) -> List[Camera]:
         """
@@ -65,17 +66,32 @@ class OrbitPath:
             elevation_deg: Fixed elevation angle in degrees
                           0° = eye level, positive = above, negative = below
             start_azimuth_deg: Starting azimuth angle in degrees
+            overlap: Number of camera positions that overlap between start and end
+                    overlap=1 (default): first and last positions are identical
+                    overlap=2: first 2 and last 2 positions overlap
+                    overlap=0: no overlap (first and last positions differ)
             camera_template: Camera with intrinsics to copy
                             If None, creates default cameras
 
         Returns:
             List of Camera objects positioned on circular orbit
+
+        Raises:
+            ValueError: If overlap >= n_frames or overlap < 0
         """
+        if overlap < 0:
+            raise ValueError(f"overlap must be non-negative, got {overlap}")
+        if overlap >= n_frames:
+            raise ValueError(f"overlap ({overlap}) must be less than n_frames ({n_frames})")
+
+        # Generate unique camera positions
+        unique_frames = n_frames - overlap
         cameras = []
 
-        for i in range(n_frames):
-            # Compute azimuth for this frame (full 360° rotation)
-            azimuth_deg = start_azimuth_deg + (i / n_frames) * 360.0
+        for i in range(unique_frames):
+            # Compute azimuth for this frame
+            # Distribute unique frames evenly around full 360° rotation
+            azimuth_deg = start_azimuth_deg + (i / unique_frames) * 360.0
 
             # Convert spherical to Cartesian (relative to target)
             position_rel = coordinates.spherical_to_cartesian(
@@ -88,6 +104,10 @@ class OrbitPath:
             camera.look_at(self.target, self.up_vector)
 
             cameras.append(camera)
+
+        # Append overlapping cameras from the beginning
+        for i in range(overlap):
+            cameras.append(cameras[i])
 
         return cameras
 
