@@ -104,10 +104,10 @@ class Renderer:
                 "Install with: pip install pyrender trimesh"
             )
 
-        # Create pyrender scene
+        # Create pyrender scene with strong ambient light
         pr_scene = pyrender.Scene(
             bg_color=[0, 0, 0, 0],  # Transparent background
-            ambient_light=[0.3, 0.3, 0.3]
+            ambient_light=[0.7, 0.7, 0.7]  # Strong ambient for even lighting
         )
 
         # Add mesh
@@ -134,10 +134,28 @@ class Renderer:
         pr_mesh = pyrender.Mesh.from_trimesh(mesh_tm, smooth=True)
         pr_scene.add(pr_mesh)
 
-        # Add lighting
-        # Directional light from above-front
-        light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=3.0)
-        pr_scene.add(light, pose=np.eye(4))
+        # Add multiple directional lights for even illumination from all sides
+        # Front light (positive Z)
+        light_front = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=1.0)
+        pr_scene.add(light_front, pose=np.eye(4))
+
+        # Back light (negative Z)
+        light_back = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=1.0)
+        back_pose = np.eye(4)
+        back_pose[:3, :3] = np.array([[1, 0, 0], [0, 1, 0], [0, 0, -1]])  # Rotate 180° around Y
+        pr_scene.add(light_back, pose=back_pose)
+
+        # Left light (positive X)
+        light_left = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=0.5)
+        left_pose = np.eye(4)
+        left_pose[:3, :3] = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]])  # Rotate 90° around Y
+        pr_scene.add(light_left, pose=left_pose)
+
+        # Right light (negative X)
+        light_right = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=0.5)
+        right_pose = np.eye(4)
+        right_pose[:3, :3] = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # Rotate -90° around Y
+        pr_scene.add(light_right, pose=right_pose)
 
         # TODO: Add skeleton rendering if requested
         # if include_skeleton and self.scene.skeleton_joints is not None:
