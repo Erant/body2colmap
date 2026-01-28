@@ -183,6 +183,10 @@ class Renderer:
         renderer = self._get_pyrender_renderer()
         color, depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
 
+        # Make color array writable (pyrender may return read-only array on some platforms)
+        if not color.flags.writeable:
+            color = np.array(color, copy=True)
+
         # Replace background color (where alpha=0)
         bg_rgba = np.array([
             int(bg_color[0] * 255),
@@ -497,6 +501,10 @@ class Renderer:
 
         if base_image is None:
             raise ValueError("Must specify 'mesh' or 'depth' as base layer")
+
+        # Ensure base_image is writable before compositing
+        if not base_image.flags.writeable:
+            base_image = np.array(base_image, copy=True)
 
         # Overlay skeleton if requested
         if "skeleton" in modes and self.scene.skeleton_joints is not None:
