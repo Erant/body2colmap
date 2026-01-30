@@ -281,8 +281,12 @@ class TextureProjector:
         if (h, w) != (img_h, img_w):
             raise ValueError(f"face_ids shape {(h, w)} doesn't match image shape {(img_h, img_w)}")
 
+        num_faces = len(self.faces)
+
         # Get all pixels with valid face IDs
-        valid_mask = face_ids >= 0
+        # Filter out negative IDs (background) AND out-of-bounds IDs
+        # (can occur due to anti-aliasing blending the encoded RGB colors)
+        valid_mask = (face_ids >= 0) & (face_ids < num_faces)
         valid_y, valid_x = np.where(valid_mask)
         valid_face_ids = face_ids[valid_mask]
 
@@ -387,9 +391,12 @@ class TextureProjector:
             blend_mode: Blending mode ("max", "replace", "average")
         """
         h, w = face_ids.shape
+        num_faces = len(self.faces)
 
         # Get all pixels with valid face IDs
-        valid_mask = face_ids >= 0
+        # Filter out negative IDs (background) AND out-of-bounds IDs
+        # (can occur due to anti-aliasing blending the encoded RGB colors)
+        valid_mask = (face_ids >= 0) & (face_ids < num_faces)
         valid_y, valid_x = np.where(valid_mask)
         valid_face_ids = face_ids[valid_mask]
 
