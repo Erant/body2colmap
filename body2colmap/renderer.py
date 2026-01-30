@@ -679,21 +679,15 @@ class Renderer:
             process=False
         )
 
-        # Create texture material
-        # PIL Image expects (height, width, channels), and trimesh expects it flipped
-        texture_image = Image.fromarray(texture)
-
-        # Create visual with texture
-        material = trimesh.visual.texture.SimpleMaterial(
-            image=texture_image,
-            ambient=[1.0, 1.0, 1.0, 1.0],
-            diffuse=[1.0, 1.0, 1.0, 1.0],
-        )
+        # Create texture as PIL Image
+        # Ensure it's a proper contiguous array for PIL
+        texture_arr = np.ascontiguousarray(texture)
+        texture_image = Image.fromarray(texture_arr, mode='RGBA')
 
         # Create TextureVisuals with UV coordinates
+        # Only pass uv and image - trimesh will create the material internally
         mesh_tm.visual = trimesh.visual.TextureVisuals(
-            uv=uv_coords,
-            material=material,
+            uv=uv_coords.astype(np.float64),  # trimesh expects float64 for UVs
             image=texture_image
         )
 
