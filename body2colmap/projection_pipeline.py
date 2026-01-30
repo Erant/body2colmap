@@ -628,7 +628,10 @@ class ProjectionPipeline:
             RuntimeError: If texture requested but atlas not generated
         """
         # Get texture atlas (prefer texture_atlas, fall back to canny_atlas)
-        texture_atlas = getattr(self, 'texture_atlas', None) or self.canny_atlas
+        # Use explicit None check instead of 'or' to avoid numpy array truth value error
+        texture_atlas = getattr(self, 'texture_atlas', None)
+        if texture_atlas is None:
+            texture_atlas = self.canny_atlas
 
         if include_texture and (texture_atlas is None or self.uv_coords is None):
             raise RuntimeError(
