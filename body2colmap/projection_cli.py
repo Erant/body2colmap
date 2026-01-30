@@ -21,6 +21,7 @@ from typing import Optional
 def cmd_circular(args: argparse.Namespace) -> int:
     """Execute Phase 1: Generate circular orbit for diffusion input."""
     from .projection_pipeline import ProjectionPipeline
+    from .renderer import Renderer
 
     print(f"Phase 1: Generating circular orbit views")
     print(f"  Input: {args.input}")
@@ -28,12 +29,13 @@ def cmd_circular(args: argparse.Namespace) -> int:
     print(f"  Resolution: {args.width}x{args.height}")
     print(f"  Frames: {args.n_frames}")
     print(f"  Elevation: {args.elevation}°")
+    print(f"  Mode: {args.render_mode}")
 
     # Create pipeline
     pipeline = ProjectionPipeline.from_npz_file(
         args.input,
         render_size=(args.width, args.height),
-        include_skeleton=args.skeleton,
+        include_skeleton=True,  # Always load skeleton for depth+skeleton mode
         atlas_size=(args.atlas_size, args.atlas_size)
     )
     print(f"  Loaded scene: {pipeline.scene}")
@@ -46,12 +48,27 @@ def cmd_circular(args: argparse.Namespace) -> int:
     )
     print(f"  Generated {len(pipeline.circular_cameras)} cameras")
 
-    # Render
+    # Render based on mode
     print(f"  Rendering...")
-    images = pipeline.render_circular_orbit(
-        mesh_color=tuple(args.mesh_color) if args.mesh_color else None,
-        bg_color=tuple(args.bg_color)
-    )
+    if args.render_mode == "mesh":
+        images = pipeline.render_circular_orbit(
+            mesh_color=tuple(args.mesh_color) if args.mesh_color else None,
+            bg_color=tuple(args.bg_color)
+        )
+    else:
+        # depth+skeleton mode - use renderer directly
+        renderer = Renderer(pipeline.scene, (args.width, args.height))
+        images = []
+        for camera in pipeline.circular_cameras:
+            modes = {"depth": {"normalize": True}}
+            if pipeline.scene.skeleton_joints is not None:
+                modes["skeleton"] = {
+                    "joint_radius": 0.015,
+                    "bone_radius": 0.008,
+                    "use_openpose_colors": True
+                }
+            image = renderer.render_composite(camera, modes)
+            images.append(image)
     print(f"  Rendered {len(images)} images")
 
     # Export
@@ -302,14 +319,14 @@ Examples:
     )
     circular.add_argument("input", help="Path to SAM-3D-Body .npz file")
     circular.add_argument("-o", "--output-dir", required=True, help="Output directory")
-    circular.add_argument("--width", type=int, default=512, help="Render width")
-    circular.add_argument("--height", type=int, default=512, help="Render height")
-    circular.add_argument("--n-frames", type=int, default=36, help="Number of views")
+    circular.add_argument("--width", type=int, default=720, help="Render width")
+    circular.add_argument("--height", type=int, default=1280, help="Render height")
+    circular.add_argument("--n-frames", type=int, default=81, help="Number of views")
     circular.add_argument("--elevation", type=float, default=0.0, help="Elevation angle (degrees)")
     circular.add_argument("--fill-ratio", type=float, default=0.8, help="Frame fill ratio")
-    circular.add_argument("--skeleton", action="store_true", help="Load skeleton data")
+    circular.add_argument("--render-mode", choices=["mesh", "depth+skeleton"], default="depth+skeleton", help="Render mode")
     circular.add_argument("--atlas-size", type=int, default=1024, help="UV atlas size")
-    circular.add_argument("--mesh-color", type=float, nargs=3, help="Mesh RGB color (0-1)")
+    circular.add_argument("--mesh-color", type=float, nargs=3, help="Mesh RGB color (0-1, for mesh mode)")
     circular.add_argument("--bg-color", type=float, nargs=3, default=[1.0, 1.0, 1.0], help="Background RGB")
     circular.add_argument("--filename-pattern", default="frame_{:04d}.png", help="Output filename pattern")
     circular.set_defaults(func=cmd_circular)
@@ -323,11 +340,11 @@ Examples:
     helical.add_argument("input", help="Path to SAM-3D-Body .npz file")
     helical.add_argument("--diffusion-dir", required=True, help="Directory with diffusion-processed images")
     helical.add_argument("-o", "--output-dir", required=True, help="Output directory")
-    helical.add_argument("--width", type=int, default=512, help="Render width")
-    helical.add_argument("--height", type=int, default=512, help="Render height")
+    helical.add_argument("--width", type=int, default=720, help="Render width")
+    helical.add_argument("--height", type=int, default=1280, help="Render height")
 
     # Circular orbit params (must match Phase 1)
-    helical.add_argument("--circular-frames", type=int, default=36, help="Circular orbit frame count (must match Phase 1)")
+    helical.add_argument("--circular-frames", type=int, default=81, help="Circular orbit frame count (must match Phase 1)")
     helical.add_argument("--circular-elevation", type=float, default=0.0, help="Circular elevation (must match Phase 1)")
 
     # Helical orbit params
