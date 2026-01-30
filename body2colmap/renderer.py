@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 
 from .scene import Scene
 from .camera import Camera
+from . import edges as edge_module
 
 
 class Renderer:
@@ -473,20 +474,92 @@ class Renderer:
 
         return color
 
+    def render_edges(
+        self,
+        camera: Camera,
+        source: str = "mesh",
+        method: str = "canny",
+        edge_color: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        mesh_color: Optional[Tuple[float, float, float]] = None,
+        bg_color: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        **edge_kwargs
+    ) -> NDArray[np.uint8]:
+        """
+        Render edges detected from mesh or depth.
+
+        This follows the same pattern as skeleton rendering - edges are rendered
+        with a transparent background so they can be composited onto other modes.
+
+        Args:
+            camera: Camera to render from
+            source: What to detect edges on:
+                   - "mesh": Detect edges on rendered mesh image
+                   - "depth": Detect edges on depth buffer
+            method: Edge detection method ("canny", "sobel", "laplacian")
+            edge_color: RGB color (0-1 range) for edge pixels
+            mesh_color: RGB color for mesh (only used when source="mesh")
+            bg_color: RGB color for background (only used when source="mesh")
+            **edge_kwargs: Method-specific parameters:
+                - canny: low_threshold (int), high_threshold (int), blur_kernel (int)
+                - sobel: kernel_size (int), threshold (int)
+                - laplacian: kernel_size (int), threshold (int)
+
+        Returns:
+            RGBA image, shape (height, width, 4), dtype uint8
+            - Edge pixels: edge_color with alpha=255
+            - Non-edge pixels: transparent (alpha=0)
+
+        Note:
+            Like skeleton, edges do NOT contribute to alpha for masking purposes.
+            The alpha channel only indicates where edges exist for compositing.
+        """
+        # Render source image
+        if source == "mesh":
+            source_image = self.render_mesh(
+                camera,
+                mesh_color=mesh_color,
+                bg_color=bg_color
+            )
+        elif source == "depth":
+            source_image = self.render_depth(
+                camera,
+                normalize=True,
+                colormap=None  # Grayscale works best for edge detection
+            )
+        else:
+            raise ValueError(f"Unknown edge source: {source}. Use 'mesh' or 'depth'.")
+
+        # Detect edges
+        edges = edge_module.detect_edges(
+            source_image[:, :, :3],  # Use RGB, ignore alpha
+            method=method,
+            **edge_kwargs
+        )
+
+        # Convert to RGBA with specified color
+        rgba = edge_module.edges_to_rgba(
+            edges,
+            color=edge_color,
+            background_alpha=0  # Transparent background for compositing
+        )
+
+        return rgba
+
     def render_composite(
         self,
         camera: Camera,
         modes: Dict[str, Any]
     ) -> NDArray[np.uint8]:
         """
-        Render composite of multiple modes (e.g., mesh + skeleton overlay).
+        Render composite of multiple modes (e.g., mesh + skeleton + edges overlay).
 
         Args:
             camera: Camera to render from
             modes: Dictionary specifying which modes to render and their options
                   Example: {
                       "mesh": {"color": (0.65, 0.74, 0.86)},
-                      "skeleton": {"joint_radius": 0.015}
+                      "skeleton": {"joint_radius": 0.015},
+                      "edges": {"method": "canny", "color": (1.0, 1.0, 1.0)}
                   }
 
         Returns:
@@ -495,9 +568,11 @@ class Renderer:
         Note:
             Modes are composited in order:
             1. mesh or depth (base layer)
-            2. skeleton (overlay)
+            2. skeleton (overlay, if present)
+            3. edges (overlay, if present)
 
             Alpha channel comes from base layer only (mesh or depth).
+            Skeleton and edges are overlays that don't affect masking.
         """
         # Render base layer
         base_image = None
@@ -546,6 +621,45 @@ class Renderer:
             ).astype(np.uint8)
 
             # Keep base layer's alpha (skeleton doesn't affect masking)
+
+        # Overlay edges if requested
+        if "edges" in modes:
+            edges_opts = modes["edges"] if isinstance(modes["edges"], dict) else {}
+
+            # Determine edge source - defaults to base layer type
+            edge_source = edges_opts.get("source")
+            if edge_source is None:
+                edge_source = "mesh" if "mesh" in modes else "depth"
+
+            # Get mesh color for edge source rendering (if source is mesh)
+            edge_mesh_color = None
+            edge_bg_color = (1.0, 1.0, 1.0)
+            if "mesh" in modes:
+                mesh_opts = modes["mesh"] if isinstance(modes["mesh"], dict) else {}
+                edge_mesh_color = mesh_opts.get("color")
+                edge_bg_color = mesh_opts.get("bg_color", (1.0, 1.0, 1.0))
+
+            # Render edges
+            edges_image = self.render_edges(
+                camera,
+                source=edge_source,
+                method=edges_opts.get("method", "canny"),
+                edge_color=edges_opts.get("color", (1.0, 1.0, 1.0)),
+                mesh_color=edge_mesh_color,
+                bg_color=edge_bg_color,
+                low_threshold=edges_opts.get("low_threshold", 50),
+                high_threshold=edges_opts.get("high_threshold", 150),
+                blur_kernel=edges_opts.get("blur_kernel", 5)
+            )
+
+            # Composite edges over base using alpha blending
+            edges_alpha = edges_image[:, :, 3:4] / 255.0
+            base_image[:, :, :3] = (
+                edges_image[:, :, :3] * edges_alpha +
+                base_image[:, :, :3] * (1 - edges_alpha)
+            ).astype(np.uint8)
+
+            # Keep base layer's alpha (edges don't affect masking)
 
         return base_image
 

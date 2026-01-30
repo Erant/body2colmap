@@ -63,6 +63,28 @@ class SkeletonConfig:
 
 
 @dataclass
+class EdgesConfig:
+    """Edge detection and overlay configuration."""
+    enabled: bool = False
+    method: str = "canny"  # "canny", "sobel", "laplacian"
+    source: str = "mesh"   # "mesh" or "depth"
+    color: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # White edges by default
+
+    # Canny-specific parameters
+    canny_low_threshold: int = 50
+    canny_high_threshold: int = 150
+    canny_blur_kernel: int = 5
+
+    # Sobel-specific parameters
+    sobel_kernel_size: int = 3
+    sobel_threshold: Optional[int] = None  # None = no thresholding
+
+    # Laplacian-specific parameters
+    laplacian_kernel_size: int = 3
+    laplacian_threshold: Optional[int] = None
+
+
+@dataclass
 class ExportConfig:
     """Export configuration."""
     output_dir: str = "./output"
@@ -80,6 +102,7 @@ class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     path: PathConfig = field(default_factory=PathConfig)
     skeleton: SkeletonConfig = field(default_factory=SkeletonConfig)
+    edges: EdgesConfig = field(default_factory=EdgesConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
 
     @classmethod
@@ -114,6 +137,7 @@ class Config:
                 camera=CameraConfig(),
                 path=PathConfig(),
                 skeleton=SkeletonConfig(),
+                edges=EdgesConfig(),
                 export=ExportConfig(output_dir=args.output_dir)
             )
 
