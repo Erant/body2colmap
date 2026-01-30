@@ -43,6 +43,11 @@ def generate_cylindrical_uvs(
     # Compute angle around the axis
     x = vertices[:, other_axes[0]]
     z = vertices[:, other_axes[1]]
+
+    # Debug: print vertex extents
+    print(f"  [UV Debug] Vertex X range: [{x.min():.3f}, {x.max():.3f}]")
+    print(f"  [UV Debug] Vertex Z range: [{z.min():.3f}, {z.max():.3f}]")
+
     angles = np.arctan2(z, x)  # Range: [-pi, pi]
 
     # Normalize to [0, 1]
@@ -55,6 +60,10 @@ def generate_cylindrical_uvs(
         v = (heights - v_min) / (v_max - v_min)
     else:
         v = np.zeros_like(heights)
+
+    # Debug: print UV range
+    print(f"  [UV Debug] U range: [{u.min():.3f}, {u.max():.3f}]")
+    print(f"  [UV Debug] V range: [{v.min():.3f}, {v.max():.3f}]")
 
     return np.stack([u, v], axis=1).astype(np.float32)
 
