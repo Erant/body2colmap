@@ -4,13 +4,22 @@ High-level pipeline for texture projection workflow.
 This module provides the ProjectionPipeline class that orchestrates the
 circular-orbit-to-helical-orbit Canny projection workflow:
 
-1. Generate cameras for circular orbit (reference views)
-2. Render mesh and detect Canny edges from circular views
-3. Project edges onto UV atlas
-4. Generate cameras for helical orbit (target views)
-5. Render depth + projected-canny + skeleton composites for helical views
+**Phase 1 - Generate reference views for diffusion:**
+1. Generate cameras for circular orbit (eye-level reference views)
+2. Render mesh from circular orbit
+3. Export images + COLMAP for diffusion model input
 
-The output is suitable for ControlNet guidance in diffusion models.
+**External step (not handled by this tool):**
+- User processes circular orbit images through diffusion model
+
+**Phase 2 - Project diffusion output and render guidance:**
+4. Load diffusion-processed images (matching COLMAP filenames)
+5. Detect Canny edges on diffusion output
+6. Project edges onto UV atlas
+7. Generate helical orbit cameras
+8. Render depth + projected-canny + skeleton composites
+
+The output is suitable for ControlNet guidance in subsequent diffusion passes.
 """
 
 from pathlib import Path
@@ -32,30 +41,24 @@ class ProjectionPipeline:
     """
     Pipeline for circular→helical Canny projection workflow.
 
-    This pipeline:
-    1. Renders mesh from circular orbit at fixed elevation
-    2. Detects Canny edges from each circular view
-    3. Projects edges onto UV atlas (texture)
-    4. Renders depth + textured-canny + skeleton from helical orbit
+    This is a two-phase pipeline with an external diffusion step in between:
 
-    Example:
+    **Phase 1 - Generate reference views:**
         pipeline = ProjectionPipeline.from_npz_file("mesh.npz")
+        pipeline.setup_circular_orbit(n_frames=36, elevation_deg=0.0)
+        images = pipeline.render_circular_orbit()
+        pipeline.export_circular_orbit("./circular_output")
+        # → User runs diffusion on ./circular_output/*.png
 
-        # Step 1: Generate Canny atlas from circular orbit
-        pipeline.generate_canny_atlas(
-            n_circular_frames=36,
-            elevation_deg=0.0
-        )
+    **Phase 2 - Project and render guidance:**
+        pipeline.load_diffusion_images("./circular_output")  # or different dir
+        pipeline.generate_canny_atlas_from_images()
+        pipeline.setup_helical_orbit(n_frames=120, n_loops=3)
+        guidance = pipeline.render_helical_with_canny()
+        pipeline.export_helical_output("./helical_output", guidance)
 
-        # Step 2: Render helical orbit with projected Canny
-        pipeline.set_helical_orbit(n_frames=120, n_loops=3)
-        images = pipeline.render_helical_with_canny(
-            modes=["depth", "textured", "skeleton"]
-        )
-
-        # Step 3: Export
-        pipeline.export_colmap("./output")
-        pipeline.export_images("./output", images)
+    The circular and helical outputs use the same COLMAP camera format,
+    so diffusion models can use consistent camera conditioning.
     """
 
     def __init__(
@@ -138,63 +141,245 @@ class ProjectionPipeline:
             image_size=self.render_size
         )
 
-    def generate_canny_atlas(
+    # =========================================================================
+    # PHASE 1: Generate circular orbit for diffusion input
+    # =========================================================================
+
+    def setup_circular_orbit(
         self,
-        n_circular_frames: int = 36,
+        n_frames: int = 36,
         elevation_deg: float = 0.0,
         radius: Optional[float] = None,
-        fill_ratio: float = 0.8,
-        canny_low: int = 50,
-        canny_high: int = 150,
-        canny_blur: int = 5,
-        edge_color: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        uv_method: str = "cylindrical",
-        blend_mode: str = "max",
-        mesh_color: Optional[Tuple[float, float, float]] = None,
-        bg_color: Tuple[float, float, float] = (1.0, 1.0, 1.0)
-    ) -> NDArray[np.uint8]:
+        fill_ratio: float = 0.8
+    ) -> List[Camera]:
         """
-        Generate Canny edge atlas from circular orbit views.
-
-        This is the main method for step 1 of the workflow:
-        - Generates circular orbit cameras
-        - Renders mesh from each camera
-        - Detects Canny edges
-        - Projects edges onto UV atlas
+        Set up circular orbit cameras for Phase 1 (diffusion input).
 
         Args:
-            n_circular_frames: Number of views in circular orbit
-            elevation_deg: Elevation angle for circular orbit (0 = eye level)
+            n_frames: Number of views in circular orbit
+            elevation_deg: Elevation angle (0 = eye level)
             radius: Orbit radius (None = auto-compute)
             fill_ratio: How much of frame to fill (for auto radius)
-            canny_low: Canny low threshold
-            canny_high: Canny high threshold
-            canny_blur: Gaussian blur kernel size before Canny
-            edge_color: RGB color for edges in atlas
-            uv_method: UV generation method ("cylindrical", "spherical")
-            blend_mode: How to blend overlapping projections ("max", "average")
-            mesh_color: Mesh color for rendering (None = default)
-            bg_color: Background color for rendering
 
         Returns:
-            Canny atlas, shape (atlas_height, atlas_width, 4), RGBA uint8
+            List of Camera objects for circular orbit
         """
-        renderer = self._get_renderer()
-
-        # Compute orbit parameters
         if radius is None:
             radius = self._compute_orbit_radius(fill_ratio)
+
+        self._circular_radius = radius  # Store for helical orbit
 
         target = self.scene.get_bbox_center()
         orbit = OrbitPath(target=target, radius=radius)
         camera_template = self._create_camera_template()
 
-        # Generate circular orbit cameras
         self.circular_cameras = orbit.circular(
-            n_frames=n_circular_frames,
+            n_frames=n_frames,
             elevation_deg=elevation_deg,
             camera_template=camera_template
         )
+
+        return self.circular_cameras
+
+    def render_circular_orbit(
+        self,
+        mesh_color: Optional[Tuple[float, float, float]] = None,
+        bg_color: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    ) -> List[NDArray[np.uint8]]:
+        """
+        Render mesh from all circular orbit cameras.
+
+        These renders are intended as input for diffusion models.
+
+        Args:
+            mesh_color: Mesh color (None = default)
+            bg_color: Background color
+
+        Returns:
+            List of RGBA images, one per camera
+
+        Raises:
+            RuntimeError: If circular orbit not set up
+        """
+        if self.circular_cameras is None:
+            raise RuntimeError("Circular orbit not set up. Call setup_circular_orbit() first.")
+
+        renderer = self._get_renderer()
+        images = []
+
+        for camera in self.circular_cameras:
+            image = renderer.render_mesh(
+                camera,
+                mesh_color=mesh_color,
+                bg_color=bg_color
+            )
+            images.append(image)
+
+        return images
+
+    def export_circular_orbit(
+        self,
+        output_dir: str,
+        images: List[NDArray[np.uint8]],
+        filename_pattern: str = "frame_{:04d}.png",
+        n_pointcloud_samples: int = 50000
+    ) -> Path:
+        """
+        Export circular orbit images and COLMAP files.
+
+        After this, process images through diffusion, then call
+        load_diffusion_images() with the processed images.
+
+        Args:
+            output_dir: Directory for output
+            images: Rendered images from render_circular_orbit()
+            filename_pattern: Image filename pattern
+            n_pointcloud_samples: Points for COLMAP point cloud
+
+        Returns:
+            Path to output directory
+        """
+        if self.circular_cameras is None:
+            raise RuntimeError("Circular orbit not set up.")
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Export images
+        filenames = ImageExporter.generate_filenames(
+            n_frames=len(images),
+            pattern=filename_pattern
+        )
+        exporter = ImageExporter(images, filenames)
+        exporter.export(output_path)
+
+        # Export COLMAP
+        colmap_exporter = ColmapExporter.from_scene_and_cameras(
+            scene=self.scene,
+            cameras=self.circular_cameras,
+            image_names=filenames,
+            n_pointcloud_samples=n_pointcloud_samples
+        )
+        colmap_exporter.export(output_path)
+
+        # Store filename pattern for later use
+        self._circular_filename_pattern = filename_pattern
+
+        return output_path
+
+    # =========================================================================
+    # PHASE 2: Load diffusion output and generate Canny atlas
+    # =========================================================================
+
+    def load_diffusion_images(
+        self,
+        image_dir: str,
+        filename_pattern: Optional[str] = None
+    ) -> List[NDArray[np.uint8]]:
+        """
+        Load diffusion-processed images for Canny projection.
+
+        Images must correspond to the circular orbit cameras (same filenames
+        as exported in Phase 1).
+
+        Args:
+            image_dir: Directory containing diffusion output images
+            filename_pattern: Filename pattern (default: use pattern from export)
+
+        Returns:
+            List of loaded images (RGBA)
+
+        Raises:
+            RuntimeError: If circular cameras not set
+            FileNotFoundError: If expected images are missing
+        """
+        if self.circular_cameras is None:
+            raise RuntimeError(
+                "Circular cameras not set. Either call setup_circular_orbit() "
+                "or load cameras from COLMAP export."
+            )
+
+        try:
+            from PIL import Image
+        except ImportError:
+            raise ImportError("Pillow required for image loading")
+
+        if filename_pattern is None:
+            filename_pattern = getattr(self, '_circular_filename_pattern', 'frame_{:04d}.png')
+
+        image_dir = Path(image_dir)
+        n_frames = len(self.circular_cameras)
+        filenames = ImageExporter.generate_filenames(n_frames, filename_pattern)
+
+        images = []
+        for filename in filenames:
+            filepath = image_dir / filename
+            if not filepath.exists():
+                raise FileNotFoundError(
+                    f"Expected diffusion image not found: {filepath}\n"
+                    f"Make sure diffusion output uses same filenames as circular orbit export."
+                )
+
+            img = Image.open(filepath)
+            # Convert to RGBA if needed
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            images.append(np.array(img))
+
+        self._diffusion_images = images
+        return images
+
+    def generate_canny_atlas_from_images(
+        self,
+        images: Optional[List[NDArray[np.uint8]]] = None,
+        canny_low: int = 50,
+        canny_high: int = 150,
+        canny_blur: int = 5,
+        edge_color: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        uv_method: str = "cylindrical",
+        blend_mode: str = "max"
+    ) -> NDArray[np.uint8]:
+        """
+        Generate Canny atlas from diffusion-processed images.
+
+        This detects Canny edges on the provided images and projects
+        them onto the mesh UV atlas.
+
+        Args:
+            images: List of images to process. If None, uses images from
+                   load_diffusion_images()
+            canny_low: Canny low threshold
+            canny_high: Canny high threshold
+            canny_blur: Gaussian blur kernel size
+            edge_color: RGB color for edges in atlas
+            uv_method: UV generation method ("cylindrical", "spherical")
+            blend_mode: Blending mode ("max", "average")
+
+        Returns:
+            Canny atlas, shape (atlas_height, atlas_width, 4), RGBA uint8
+
+        Raises:
+            RuntimeError: If no images available
+        """
+        if images is None:
+            images = getattr(self, '_diffusion_images', None)
+
+        if images is None:
+            raise RuntimeError(
+                "No images to process. Call load_diffusion_images() first, "
+                "or pass images directly."
+            )
+
+        if self.circular_cameras is None:
+            raise RuntimeError("Circular cameras not set.")
+
+        if len(images) != len(self.circular_cameras):
+            raise ValueError(
+                f"Number of images ({len(images)}) doesn't match "
+                f"number of cameras ({len(self.circular_cameras)})"
+            )
+
+        renderer = self._get_renderer()
 
         # Generate UVs for the mesh
         self.uv_coords = tex_proj.generate_uvs(
@@ -211,18 +396,11 @@ class ProjectionPipeline:
             self.atlas_size
         )
 
-        # Process each circular view
-        for camera in self.circular_cameras:
-            # Render mesh
-            mesh_image = renderer.render_mesh(
-                camera,
-                mesh_color=mesh_color,
-                bg_color=bg_color
-            )
-
-            # Detect Canny edges
+        # Process each image with its corresponding camera
+        for camera, image in zip(self.circular_cameras, images):
+            # Detect Canny edges on diffusion output
             edges = edge_module.canny(
-                mesh_image[:, :, :3],
+                image[:, :, :3],  # Use RGB
                 low_threshold=canny_low,
                 high_threshold=canny_high,
                 blur_kernel=canny_blur
@@ -231,7 +409,7 @@ class ProjectionPipeline:
             # Convert to RGBA
             edge_rgba = edge_module.edges_to_rgba(edges, color=edge_color)
 
-            # Render face IDs for this view
+            # Render face IDs for this camera view
             face_ids = renderer.render_face_ids(camera)
 
             # Project onto atlas
@@ -242,7 +420,11 @@ class ProjectionPipeline:
 
         return self.canny_atlas
 
-    def set_helical_orbit(
+    # =========================================================================
+    # PHASE 2 continued: Set up helical orbit and render with Canny
+    # =========================================================================
+
+    def setup_helical_orbit(
         self,
         n_frames: int = 120,
         n_loops: int = 3,
@@ -253,22 +435,28 @@ class ProjectionPipeline:
         fill_ratio: float = 0.8
     ) -> List[Camera]:
         """
-        Set up helical orbit cameras for final rendering.
+        Set up helical orbit cameras for Phase 2 rendering.
+
+        Uses same orbit radius as circular orbit by default to ensure
+        consistent framing.
 
         Args:
             n_frames: Number of frames in helical orbit
             n_loops: Number of full rotations
-            amplitude_deg: Maximum elevation deviation
-            lead_in_deg: Azimuth range for lead-in (smooth start)
-            lead_out_deg: Azimuth range for lead-out (smooth end)
-            radius: Orbit radius (None = auto, should match circular orbit)
-            fill_ratio: Fill ratio for auto radius
+            amplitude_deg: Maximum elevation deviation from center
+            lead_in_deg: Azimuth range for smooth lead-in
+            lead_out_deg: Azimuth range for smooth lead-out
+            radius: Orbit radius (None = use circular orbit radius or auto)
+            fill_ratio: Fill ratio for auto radius (if no circular radius)
 
         Returns:
             List of Camera objects for helical orbit
         """
         if radius is None:
-            radius = self._compute_orbit_radius(fill_ratio)
+            # Use circular orbit radius if available, otherwise compute
+            radius = getattr(self, '_circular_radius', None)
+            if radius is None:
+                radius = self._compute_orbit_radius(fill_ratio)
 
         target = self.scene.get_bbox_center()
         orbit = OrbitPath(target=target, radius=radius)
@@ -309,12 +497,12 @@ class ProjectionPipeline:
         """
         if self.canny_atlas is None or self.uv_coords is None:
             raise RuntimeError(
-                "Canny atlas not generated. Call generate_canny_atlas() first."
+                "Canny atlas not generated. Call generate_canny_atlas_from_images() first."
             )
 
         if self.helical_cameras is None:
             raise RuntimeError(
-                "Helical cameras not set. Call set_helical_orbit() first."
+                "Helical cameras not set. Call setup_helical_orbit() first."
             )
 
         renderer = self._get_renderer()
@@ -448,6 +636,35 @@ class ProjectionPipeline:
         img.save(path)
 
         return path
+
+    def export_helical_output(
+        self,
+        output_dir: str,
+        images: List[NDArray[np.uint8]],
+        filename_pattern: str = "frame_{:04d}.png",
+        n_pointcloud_samples: int = 50000
+    ) -> Path:
+        """
+        Export helical orbit images and COLMAP files together.
+
+        Convenience method that calls both export_images() and export_colmap().
+
+        Args:
+            output_dir: Directory for output
+            images: Rendered images from render_helical_with_canny()
+            filename_pattern: Image filename pattern
+            n_pointcloud_samples: Points for COLMAP point cloud
+
+        Returns:
+            Path to output directory
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        self.export_images(output_dir, images, filename_pattern)
+        self.export_colmap(output_dir, n_pointcloud_samples, filename_pattern)
+
+        return output_path
 
     def get_cameras(self) -> List[Camera]:
         """Get the helical orbit cameras (for COLMAP export)."""
