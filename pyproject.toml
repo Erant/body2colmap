@@ -28,7 +28,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.20.0",
     "pyribbit>=0.1.0",
-    "PyOpenGL>=3.1.5",
+    "PyOpenGL==3.1.5",
     "trimesh>=3.9.0",
     "opencv-python>=4.5.0",
     "scipy>=1.7.0",
