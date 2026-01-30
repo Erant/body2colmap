@@ -789,30 +789,8 @@ class Renderer:
         if not base_image.flags.writeable:
             base_image = np.array(base_image, copy=True)
 
-        # Overlay skeleton if requested
-        if "skeleton" in modes and self.scene.skeleton_joints is not None:
-            skel_opts = modes["skeleton"] if isinstance(modes["skeleton"], dict) else {}
-
-            # Render skeleton
-            skel_image = self.render_skeleton(
-                camera,
-                joint_radius=skel_opts.get("joint_radius", 0.015),
-                bone_radius=skel_opts.get("bone_radius", 0.008),
-                joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
-                bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0))
-            )
-
-            # Composite skeleton over base using alpha blending
-            # Skeleton alpha determines blending
-            skel_alpha = skel_image[:, :, 3:4] / 255.0
-            base_image[:, :, :3] = (
-                skel_image[:, :, :3] * skel_alpha +
-                base_image[:, :, :3] * (1 - skel_alpha)
-            ).astype(np.uint8)
-
-            # Keep base layer's alpha (skeleton doesn't affect masking)
-
         # Overlay textured mesh if requested (e.g., projected Canny edges)
+        # This comes BEFORE skeleton so skeleton renders on top
         if "textured" in modes:
             tex_opts = modes["textured"] if isinstance(modes["textured"], dict) else {}
 
@@ -840,6 +818,29 @@ class Renderer:
             ).astype(np.uint8)
 
             # Keep base layer's alpha (textured doesn't affect masking)
+
+        # Overlay skeleton if requested
+        if "skeleton" in modes and self.scene.skeleton_joints is not None:
+            skel_opts = modes["skeleton"] if isinstance(modes["skeleton"], dict) else {}
+
+            # Render skeleton
+            skel_image = self.render_skeleton(
+                camera,
+                joint_radius=skel_opts.get("joint_radius", 0.015),
+                bone_radius=skel_opts.get("bone_radius", 0.008),
+                joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
+                bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0))
+            )
+
+            # Composite skeleton over base using alpha blending
+            # Skeleton alpha determines blending
+            skel_alpha = skel_image[:, :, 3:4] / 255.0
+            base_image[:, :, :3] = (
+                skel_image[:, :, :3] * skel_alpha +
+                base_image[:, :, :3] * (1 - skel_alpha)
+            ).astype(np.uint8)
+
+            # Keep base layer's alpha (skeleton doesn't affect masking)
 
         # Overlay edges if requested
         if "edges" in modes:
