@@ -40,13 +40,22 @@ def generate_cylindrical_uvs(
     # The other two axes form the circular cross-section
     other_axes = [i for i in range(3) if i != up_axis]
 
-    # Compute angle around the axis
-    x = vertices[:, other_axes[0]]
-    z = vertices[:, other_axes[1]]
+    # Get coordinates in the cross-section plane
+    x_raw = vertices[:, other_axes[0]]
+    z_raw = vertices[:, other_axes[1]]
+
+    # CENTER the mesh before computing angles!
+    # This is critical - the mesh may have a large offset from origin
+    x_center = (x_raw.min() + x_raw.max()) / 2
+    z_center = (z_raw.min() + z_raw.max()) / 2
+    x = x_raw - x_center
+    z = z_raw - z_center
 
     # Debug: print vertex extents
-    print(f"  [UV Debug] Vertex X range: [{x.min():.3f}, {x.max():.3f}]")
-    print(f"  [UV Debug] Vertex Z range: [{z.min():.3f}, {z.max():.3f}]")
+    print(f"  [UV Debug] Raw X range: [{x_raw.min():.3f}, {x_raw.max():.3f}], centered at {x_center:.3f}")
+    print(f"  [UV Debug] Raw Z range: [{z_raw.min():.3f}, {z_raw.max():.3f}], centered at {z_center:.3f}")
+    print(f"  [UV Debug] Centered X range: [{x.min():.3f}, {x.max():.3f}]")
+    print(f"  [UV Debug] Centered Z range: [{z.min():.3f}, {z.max():.3f}]")
 
     angles = np.arctan2(z, x)  # Range: [-pi, pi]
 
