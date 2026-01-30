@@ -195,6 +195,9 @@ class TextureProjector:
         # Pre-compute face UVs (3 UV coords per face)
         self.face_uvs = uv_coords[faces]  # Shape: (M, 3, 2)
 
+        # Pre-compute face normals for view-angle weighting
+        self._precompute_face_normals()
+
         # Initialize atlas accumulator (RGBA + weight for blending)
         # Using float for accumulation, will convert to uint8 at end
         self._atlas_accum = np.zeros(
@@ -205,9 +208,32 @@ class TextureProjector:
             (self.atlas_height, self.atlas_width),
             dtype=np.float32
         )
+        # For best_angle mode: track best view angle per pixel
+        self._atlas_best_angle = np.full(
+            (self.atlas_height, self.atlas_width),
+            -1.0,  # -1 means no data yet (valid angles are 0 to 1)
+            dtype=np.float32
+        )
 
         # Pre-compute UV bounds per face for faster lookup
         self._precompute_face_uv_bounds()
+
+    def _precompute_face_normals(self):
+        """Pre-compute face normals for view-angle calculations."""
+        # Get vertices for each face
+        v0 = self.vertices[self.faces[:, 0]]
+        v1 = self.vertices[self.faces[:, 1]]
+        v2 = self.vertices[self.faces[:, 2]]
+
+        # Compute face normals via cross product
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        normals = np.cross(edge1, edge2)
+
+        # Normalize
+        lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+        lengths = np.maximum(lengths, 1e-8)  # Avoid division by zero
+        self.face_normals = normals / lengths  # Shape: (M, 3)
 
     def _precompute_face_uv_bounds(self):
         """Pre-compute axis-aligned bounding boxes in UV space for each face."""
@@ -358,6 +384,28 @@ class TextureProjector:
             # Accumulate sums and weights, then divide at the end in get_atlas()
             np.add.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
             np.add.at(self._atlas_weights, (atlas_y, atlas_x), 1)
+        elif blend_mode == "best_angle":
+            # Keep only the color from the view with best viewing angle
+            # (most perpendicular to surface = highest dot product with normal)
+
+            # Compute view direction for each pixel
+            # Use face center as approximation for surface point
+            face_centers = (face_v0 + face_v1 + face_v2) / 3.0  # Shape: (K, 3)
+            view_dirs = camera.position - face_centers  # Direction from surface to camera
+            view_dirs_norm = view_dirs / np.linalg.norm(view_dirs, axis=1, keepdims=True)
+
+            # Get face normals for these faces
+            face_norms = self.face_normals[valid_face_ids]  # Shape: (K, 3)
+
+            # Compute dot product (view angle quality: 1.0 = head-on, 0.0 = grazing)
+            dot_products = np.abs(np.sum(view_dirs_norm * face_norms, axis=1))  # Shape: (K,)
+
+            # For each atlas pixel, only update if this view has better angle
+            for i in range(len(atlas_x)):
+                ax, ay = atlas_x[i], atlas_y[i]
+                if dot_products[i] > self._atlas_best_angle[ay, ax]:
+                    self._atlas_best_angle[ay, ax] = dot_products[i]
+                    self._atlas_accum[ay, ax] = pixel_colors[i]
         else:
             raise ValueError(f"Unknown blend mode: {blend_mode}")
 
@@ -437,6 +485,7 @@ class TextureProjector:
         """Reset the atlas accumulator for a new projection pass."""
         self._atlas_accum.fill(0)
         self._atlas_weights.fill(0)
+        self._atlas_best_angle.fill(-1.0)
 
 
 def project_edges_to_atlas(

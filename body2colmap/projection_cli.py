@@ -127,16 +127,37 @@ def cmd_helical(args: argparse.Namespace) -> int:
     )
     print(f"  Loaded {len(images)} images")
 
+    # Select subset of frames for projection if requested
+    projection_images = images
+    projection_cameras = pipeline.circular_cameras
+    if args.projection_frames is not None and args.projection_frames < len(images):
+        # Evenly sample frames around the orbit
+        n_proj = args.projection_frames
+        indices = [int(i * len(images) / n_proj) for i in range(n_proj)]
+        projection_images = [images[i] for i in indices]
+        projection_cameras = [pipeline.circular_cameras[i] for i in indices]
+        print(f"  Using {len(projection_images)} frames for projection (indices: {indices})")
+        # Temporarily override circular_cameras for atlas generation
+        original_cameras = pipeline.circular_cameras
+        pipeline.circular_cameras = projection_cameras
+
     # Generate texture atlas
-    print(f"  Generating texture atlas (mode: {args.texture_mode})...")
+    blend_mode = args.blend_mode
+    print(f"  Generating texture atlas (mode: {args.texture_mode}, blend: {blend_mode})...")
     atlas = pipeline.generate_texture_atlas_from_images(
+        images=projection_images,
         mode=args.texture_mode,
         canny_low=args.canny_low,
         canny_high=args.canny_high,
         canny_blur=args.canny_blur,
-        uv_method=args.uv_method
+        uv_method=args.uv_method,
+        blend_mode=blend_mode
     )
     print(f"  Generated atlas: {atlas.shape}")
+
+    # Restore original cameras if we overrode them
+    if args.projection_frames is not None and args.projection_frames < len(images):
+        pipeline.circular_cameras = original_cameras
 
     # Save atlas if requested
     if args.save_atlas:
@@ -360,10 +381,14 @@ Examples:
 
     # Texture projection params
     helical.add_argument("--texture-mode", choices=["canny", "color", "both"], default="color", help="Texture projection mode")
+    helical.add_argument("--blend-mode", choices=["max", "average", "best_angle"], default="best_angle",
+                        help="Blending mode: max (preserve all), average (blend), best_angle (use best view per texel)")
     helical.add_argument("--canny-low", type=int, default=50, help="Canny low threshold (for canny/both modes)")
     helical.add_argument("--canny-high", type=int, default=150, help="Canny high threshold (for canny/both modes)")
     helical.add_argument("--canny-blur", type=int, default=5, help="Canny blur kernel size (for canny/both modes)")
     helical.add_argument("--uv-method", choices=["cylindrical", "spherical"], default="cylindrical", help="UV generation method")
+    helical.add_argument("--projection-frames", type=int, default=None,
+                        help="Number of frames to use for projection (default: all circular frames). Use 4-8 for sharper results.")
 
     # Output options
     helical.add_argument("--skeleton", action="store_true", help="Include skeleton overlay")
