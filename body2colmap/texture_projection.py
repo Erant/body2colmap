@@ -347,28 +347,17 @@ class TextureProjector:
         atlas_x = np.clip(atlas_x, 0, self.atlas_width - 1)
         atlas_y = np.clip(atlas_y, 0, self.atlas_height - 1)
 
-        # Apply blending
+        # Apply blending (vectorized for speed)
         if blend_mode == "max":
-            # For each atlas pixel, take max across all source pixels
-            for i in range(len(atlas_x)):
-                ax, ay = atlas_x[i], atlas_y[i]
-                self._atlas_accum[ay, ax] = np.maximum(
-                    self._atlas_accum[ay, ax],
-                    pixel_colors[i]
-                )
+            # Use numpy's maximum.at for atomic max updates
+            np.maximum.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
         elif blend_mode == "replace":
             # Simple overwrite
             self._atlas_accum[atlas_y, atlas_x] = pixel_colors
         elif blend_mode == "average":
-            # Running average
-            for i in range(len(atlas_x)):
-                ax, ay = atlas_x[i], atlas_y[i]
-                w_old = self._atlas_weights[ay, ax]
-                w_new = w_old + 1
-                self._atlas_accum[ay, ax] = (
-                    self._atlas_accum[ay, ax] * w_old + pixel_colors[i]
-                ) / w_new
-                self._atlas_weights[ay, ax] = w_new
+            # Accumulate sums and weights, then divide at the end in get_atlas()
+            np.add.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
+            np.add.at(self._atlas_weights, (atlas_y, atlas_x), 1)
         else:
             raise ValueError(f"Unknown blend mode: {blend_mode}")
 

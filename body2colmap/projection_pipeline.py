@@ -413,8 +413,8 @@ class ProjectionPipeline:
             # Render face IDs for this camera view
             face_ids = renderer.render_face_ids(camera)
 
-            # Project onto atlas
-            projector.project_view_fast(edge_rgba, face_ids, blend_mode)
+            # Project onto atlas with proper UV interpolation
+            projector.project_view(edge_rgba, camera, face_ids, blend_mode)
 
         # Get final atlas
         self.canny_atlas = projector.get_atlas()
@@ -531,8 +531,15 @@ class ProjectionPipeline:
             else:
                 raise ValueError(f"Unknown texture mode: {mode}. Use 'canny', 'color', or 'both'.")
 
-            # Project onto atlas
-            projector.project_view_fast(proj_image, face_ids, blend_mode)
+            # Choose blend mode based on texture type
+            # - "max" for edges: preserves all edges from any view
+            # - "average" for colors: blends colors from multiple views
+            effective_blend_mode = blend_mode
+            if blend_mode == "max" and mode == "color":
+                effective_blend_mode = "average"
+
+            # Project onto atlas with proper UV interpolation
+            projector.project_view(proj_image, camera, face_ids, effective_blend_mode)
 
         # Get and store atlas
         atlas = projector.get_atlas()
