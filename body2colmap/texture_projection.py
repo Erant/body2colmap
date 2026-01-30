@@ -303,11 +303,10 @@ class TextureProjector:
         blend_mode: str = "max"
     ) -> None:
         """
-        Project a single view onto the UV atlas.
+        Project a single view onto the UV atlas by rasterizing UV triangles.
 
-        Uses face-center UVs for robustness (avoids coordinate system mismatches
-        between pyrender and camera projection). For best quality, use best_angle
-        blend mode which selects the view with most perpendicular viewing angle.
+        For each visible face, computes the average color from the source image
+        and fills the corresponding UV triangle in the atlas.
 
         Args:
             image: Source image to project, shape (H, W, C), RGBA uint8
@@ -324,88 +323,123 @@ class TextureProjector:
             This method modifies internal state. Call get_atlas() to retrieve result.
         """
         h, w = face_ids.shape
-        img_h, img_w = image.shape[:2]
-
-        if (h, w) != (img_h, img_w):
-            raise ValueError(f"face_ids shape {(h, w)} doesn't match image shape {(img_h, img_w)}")
-
         num_faces = len(self.faces)
 
         # Get all pixels with valid face IDs
         valid_mask = (face_ids >= 0) & (face_ids < num_faces)
-        valid_y, valid_x = np.where(valid_mask)
+
+        if not np.any(valid_mask):
+            return
+
+        # Group pixels by face and compute average color per face
         valid_face_ids = face_ids[valid_mask]
+        valid_colors = image[valid_mask].astype(np.float32)
 
-        if len(valid_face_ids) == 0:
-            return  # No visible faces
+        # Find unique visible faces
+        unique_faces = np.unique(valid_face_ids)
 
-        # Get pixel colors from source image
-        pixel_colors = image[valid_y, valid_x].astype(np.float32)  # Shape: (K, 4)
-
-        # Use face center UVs (robust, doesn't depend on projection matching)
-        face_center_uvs = self.face_uvs.mean(axis=1)  # Shape: (M, 2)
-        pixel_uvs = face_center_uvs[valid_face_ids]  # Shape: (K, 2)
-
-        # Handle UV seam for cylindrical mapping
-        # Check if any face crosses the seam by looking at UV range
-        face_u_values = self.face_uvs[:, :, 0]  # Shape: (M, 3)
-        face_u_range = face_u_values.max(axis=1) - face_u_values.min(axis=1)
-        seam_faces = face_u_range > 0.5
-
-        # For seam faces, adjust the center UV
-        # If center U < 0.5 but face spans seam, it should be on the "high" side
-        for i, face_id in enumerate(valid_face_ids):
-            if seam_faces[face_id]:
-                # Recompute center with seam handling
-                uvs = self.face_uvs[face_id]  # Shape: (3, 2)
-                u_vals = uvs[:, 0].copy()
-                # Add 1 to small U values before averaging
-                u_vals[u_vals < 0.5] += 1.0
-                center_u = u_vals.mean() % 1.0
-                pixel_uvs[i, 0] = center_u
-
-        # Convert to atlas coordinates
-        atlas_x = (pixel_uvs[:, 0] * (self.atlas_width - 1)).astype(np.int32)
-        atlas_y = ((1 - pixel_uvs[:, 1]) * (self.atlas_height - 1)).astype(np.int32)
-
-        atlas_x = np.clip(atlas_x, 0, self.atlas_width - 1)
-        atlas_y = np.clip(atlas_y, 0, self.atlas_height - 1)
-
-        # For best_angle mode, compute view angles
+        # For best_angle mode, compute view angles per face
         if blend_mode == "best_angle":
-            # Get face centers in 3D
-            face_v0 = self.vertices[self.faces[valid_face_ids, 0]]
-            face_v1 = self.vertices[self.faces[valid_face_ids, 1]]
-            face_v2 = self.vertices[self.faces[valid_face_ids, 2]]
-            face_centers = (face_v0 + face_v1 + face_v2) / 3.0
+            face_centers_3d = self.vertices[self.faces].mean(axis=1)  # (M, 3)
+            view_dirs = camera.position - face_centers_3d
+            view_dirs = view_dirs / np.linalg.norm(view_dirs, axis=1, keepdims=True)
+            face_dot_products = np.abs(np.sum(view_dirs * self.face_normals, axis=1))
 
-            # Compute view direction
-            view_dirs = camera.position - face_centers
-            view_dirs_norm = view_dirs / np.linalg.norm(view_dirs, axis=1, keepdims=True)
+        # Process each visible face
+        for face_id in unique_faces:
+            # Get average color for this face
+            face_mask = valid_face_ids == face_id
+            face_color = valid_colors[face_mask].mean(axis=0)
 
-            # Get face normals
-            face_norms = self.face_normals[valid_face_ids]
+            # Get UV coordinates for this face's vertices
+            uv0, uv1, uv2 = self.face_uvs[face_id]  # Each is (2,)
 
-            # Dot product = view angle quality (1.0 = head-on)
-            dot_products = np.abs(np.sum(view_dirs_norm * face_norms, axis=1))
+            # Handle UV seam
+            u_vals = np.array([uv0[0], uv1[0], uv2[0]])
+            if u_vals.max() - u_vals.min() > 0.5:
+                # Face crosses seam - adjust small values
+                if uv0[0] < 0.5: uv0 = (uv0[0] + 1.0, uv0[1])
+                if uv1[0] < 0.5: uv1 = (uv1[0] + 1.0, uv1[1])
+                if uv2[0] < 0.5: uv2 = (uv2[0] + 1.0, uv2[1])
 
-        # Apply blending
-        if blend_mode == "max":
-            np.maximum.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
-        elif blend_mode == "replace":
-            self._atlas_accum[atlas_y, atlas_x] = pixel_colors
-        elif blend_mode == "average":
-            np.add.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
-            np.add.at(self._atlas_weights, (atlas_y, atlas_x), 1)
-        elif blend_mode == "best_angle":
-            # Keep only the color from the view with best viewing angle
-            for i in range(len(atlas_x)):
-                ax, ay = atlas_x[i], atlas_y[i]
-                if dot_products[i] > self._atlas_best_angle[ay, ax]:
-                    self._atlas_best_angle[ay, ax] = dot_products[i]
-                    self._atlas_accum[ay, ax] = pixel_colors[i]
-        else:
-            raise ValueError(f"Unknown blend mode: {blend_mode}")
+            # Convert UV to atlas coordinates
+            def uv_to_atlas(uv):
+                ax = int(uv[0] % 1.0 * (self.atlas_width - 1))
+                ay = int((1 - uv[1]) * (self.atlas_height - 1))
+                return np.clip(ax, 0, self.atlas_width - 1), np.clip(ay, 0, self.atlas_height - 1)
+
+            p0 = uv_to_atlas(uv0)
+            p1 = uv_to_atlas(uv1)
+            p2 = uv_to_atlas(uv2)
+
+            # Rasterize triangle in atlas
+            atlas_pixels = self._rasterize_triangle(p0, p1, p2)
+
+            # Apply color to atlas pixels
+            if blend_mode == "best_angle":
+                dot = face_dot_products[face_id]
+                for ax, ay in atlas_pixels:
+                    if dot > self._atlas_best_angle[ay, ax]:
+                        self._atlas_best_angle[ay, ax] = dot
+                        self._atlas_accum[ay, ax] = face_color
+            elif blend_mode == "max":
+                for ax, ay in atlas_pixels:
+                    self._atlas_accum[ay, ax] = np.maximum(self._atlas_accum[ay, ax], face_color)
+            elif blend_mode == "replace":
+                for ax, ay in atlas_pixels:
+                    self._atlas_accum[ay, ax] = face_color
+            elif blend_mode == "average":
+                for ax, ay in atlas_pixels:
+                    self._atlas_accum[ay, ax] += face_color
+                    self._atlas_weights[ay, ax] += 1
+
+    def _rasterize_triangle(self, p0, p1, p2):
+        """
+        Rasterize a triangle and return list of (x, y) pixels inside.
+
+        Uses scanline algorithm for filled triangle rasterization.
+        """
+        # Sort vertices by y coordinate
+        pts = sorted([p0, p1, p2], key=lambda p: p[1])
+        (x0, y0), (x1, y1), (x2, y2) = pts
+
+        pixels = []
+
+        def add_scanline(y, x_start, x_end):
+            if x_start > x_end:
+                x_start, x_end = x_end, x_start
+            for x in range(max(0, x_start), min(self.atlas_width, x_end + 1)):
+                if 0 <= y < self.atlas_height:
+                    pixels.append((x, y))
+
+        # Handle degenerate triangles
+        if y0 == y2:
+            # Horizontal line
+            x_min = min(x0, x1, x2)
+            x_max = max(x0, x1, x2)
+            add_scanline(y0, x_min, x_max)
+            return pixels
+
+        for y in range(max(0, y0), min(self.atlas_height, y2 + 1)):
+            # Compute x intersections with triangle edges
+            if y < y1:
+                # Upper part: edges (p0, p1) and (p0, p2)
+                if y1 != y0:
+                    xa = x0 + (x1 - x0) * (y - y0) // max(1, y1 - y0)
+                else:
+                    xa = x0
+                xb = x0 + (x2 - x0) * (y - y0) // max(1, y2 - y0)
+            else:
+                # Lower part: edges (p1, p2) and (p0, p2)
+                if y2 != y1:
+                    xa = x1 + (x2 - x1) * (y - y1) // max(1, y2 - y1)
+                else:
+                    xa = x1
+                xb = x0 + (x2 - x0) * (y - y0) // max(1, y2 - y0)
+
+            add_scanline(y, xa, xb)
+
+        return pixels
 
     def project_view_fast(
         self,
