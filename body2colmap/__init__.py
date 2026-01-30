@@ -22,12 +22,14 @@ __author__ = "Your Name"
 from .camera import Camera
 from .scene import Scene
 from .pipeline import OrbitPipeline
+from .projection_pipeline import ProjectionPipeline
 from .utils import compute_auto_orbit_radius, compute_default_focal_length
 
 __all__ = [
     "Camera",
     "Scene",
     "OrbitPipeline",
+    "ProjectionPipeline",
     "compute_auto_orbit_radius",
     "compute_default_focal_length",
 ]

@@ -545,19 +545,203 @@ class Renderer:
 
         return rgba
 
+    def render_face_ids(
+        self,
+        camera: Camera
+    ) -> NDArray[np.int32]:
+        """
+        Render face ID buffer for visibility determination.
+
+        Each pixel contains the index of the mesh face visible at that pixel,
+        or -1 for background pixels. This is used for projecting textures
+        onto the mesh from rendered views.
+
+        Args:
+            camera: Camera to render from
+
+        Returns:
+            Face ID buffer, shape (height, width), dtype int32
+            Values are face indices (0 to num_faces-1) or -1 for background
+
+        Note:
+            Uses flat shading with unique colors per face to avoid interpolation.
+            Face index is encoded in RGB channels: R + G*256 + B*65536
+            Supports up to ~16.7 million faces.
+        """
+        try:
+            import pyrender
+            import trimesh
+        except ImportError:
+            raise ImportError(
+                "pyrender and trimesh are required. "
+                "Install with: pip install pyrender trimesh"
+            )
+
+        # Create a mesh with unique color per face
+        # We need to split vertices so each face has its own vertices
+        num_faces = len(self.scene.faces)
+
+        # Create new vertices array: 3 vertices per face
+        split_vertices = self.scene.vertices[self.scene.faces.flatten()]
+
+        # Create new faces array: sequential indices
+        split_faces = np.arange(num_faces * 3).reshape(-1, 3)
+
+        # Create colors: encode face index in RGB
+        # Face index = R + G*256 + B*65536
+        face_colors = np.zeros((num_faces * 3, 4), dtype=np.uint8)
+        for face_idx in range(num_faces):
+            r = face_idx % 256
+            g = (face_idx // 256) % 256
+            b = (face_idx // 65536) % 256
+            # All 3 vertices of this face get the same color
+            face_colors[face_idx * 3:(face_idx + 1) * 3] = [r, g, b, 255]
+
+        # Create trimesh with flat vertex colors
+        mesh_tm = trimesh.Trimesh(
+            vertices=split_vertices,
+            faces=split_faces,
+            process=False
+        )
+        mesh_tm.visual.vertex_colors = face_colors
+
+        # Create pyrender scene with no lighting (flat shading)
+        pr_scene = pyrender.Scene(
+            bg_color=[0, 0, 0, 0],  # Transparent background (will decode as -1)
+            ambient_light=[1.0, 1.0, 1.0]  # Full ambient, no shading
+        )
+
+        # Create mesh with flat shading (no smooth normals)
+        pr_mesh = pyrender.Mesh.from_trimesh(mesh_tm, smooth=False)
+        pr_scene.add(pr_mesh)
+
+        # Add camera
+        pr_camera = pyrender.PerspectiveCamera(
+            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
+            aspectRatio=self.width / self.height
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        # Render with flat shading flag
+        renderer = self._get_pyrender_renderer()
+        color, depth = renderer.render(
+            pr_scene,
+            flags=pyrender.RenderFlags.RGBA | pyrender.RenderFlags.FLAT
+        )
+
+        # Decode face IDs from RGB
+        face_ids = np.full((self.height, self.width), -1, dtype=np.int32)
+
+        # Where alpha > 0, decode face index
+        mask = color[:, :, 3] > 0
+        face_ids[mask] = (
+            color[mask, 0].astype(np.int32) +
+            color[mask, 1].astype(np.int32) * 256 +
+            color[mask, 2].astype(np.int32) * 65536
+        )
+
+        return face_ids
+
+    def render_textured(
+        self,
+        camera: Camera,
+        texture: NDArray[np.uint8],
+        uv_coords: NDArray[np.float32],
+        bg_color: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    ) -> NDArray[np.uint8]:
+        """
+        Render mesh with a texture applied.
+
+        Args:
+            camera: Camera to render from
+            texture: Texture image, shape (tex_height, tex_width, 4), RGBA uint8
+            uv_coords: UV coordinates per vertex, shape (num_vertices, 2)
+                      Values in [0, 1], with (0,0) at bottom-left
+            bg_color: Background color RGBA (0-1 range)
+
+        Returns:
+            RGBA image, shape (height, width, 4), dtype uint8
+        """
+        try:
+            import pyrender
+            import trimesh
+            from PIL import Image
+        except ImportError:
+            raise ImportError(
+                "pyrender, trimesh, and Pillow are required. "
+                "Install with: pip install pyrender trimesh Pillow"
+            )
+
+        # Create trimesh with texture
+        mesh_tm = trimesh.Trimesh(
+            vertices=self.scene.vertices,
+            faces=self.scene.faces,
+            process=False
+        )
+
+        # Create texture material
+        # PIL Image expects (height, width, channels), and trimesh expects it flipped
+        texture_image = Image.fromarray(texture)
+
+        # Create visual with texture
+        material = trimesh.visual.texture.SimpleMaterial(
+            image=texture_image,
+            ambient=[1.0, 1.0, 1.0, 1.0],
+            diffuse=[1.0, 1.0, 1.0, 1.0],
+        )
+
+        # Create TextureVisuals with UV coordinates
+        mesh_tm.visual = trimesh.visual.TextureVisuals(
+            uv=uv_coords,
+            material=material,
+            image=texture_image
+        )
+
+        # Create pyrender scene
+        bg_rgba = [
+            bg_color[0], bg_color[1], bg_color[2],
+            bg_color[3] if len(bg_color) > 3 else 0.0
+        ]
+        pr_scene = pyrender.Scene(
+            bg_color=bg_rgba,
+            ambient_light=[1.0, 1.0, 1.0]  # Full ambient for texture visibility
+        )
+
+        # Create pyrender mesh from trimesh
+        pr_mesh = pyrender.Mesh.from_trimesh(mesh_tm, smooth=False)
+        pr_scene.add(pr_mesh)
+
+        # Add camera
+        pr_camera = pyrender.PerspectiveCamera(
+            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
+            aspectRatio=self.width / self.height
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        # Render
+        renderer = self._get_pyrender_renderer()
+        color, depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
+
+        # Ensure writable
+        if not color.flags.writeable:
+            color = np.array(color, copy=True)
+
+        return color
+
     def render_composite(
         self,
         camera: Camera,
         modes: Dict[str, Any]
     ) -> NDArray[np.uint8]:
         """
-        Render composite of multiple modes (e.g., mesh + skeleton + edges overlay).
+        Render composite of multiple modes (e.g., depth + textured + skeleton).
 
         Args:
             camera: Camera to render from
             modes: Dictionary specifying which modes to render and their options
                   Example: {
-                      "mesh": {"color": (0.65, 0.74, 0.86)},
+                      "depth": {"normalize": True},
+                      "textured": {"texture": atlas, "uv_coords": uvs},
                       "skeleton": {"joint_radius": 0.015},
                       "edges": {"method": "canny", "color": (1.0, 1.0, 1.0)}
                   }
@@ -568,11 +752,17 @@ class Renderer:
         Note:
             Modes are composited in order:
             1. mesh or depth (base layer)
-            2. skeleton (overlay, if present)
-            3. edges (overlay, if present)
+            2. textured (overlay, if present) - mesh with projected texture
+            3. skeleton (overlay, if present)
+            4. edges (overlay, if present) - per-view edge detection
 
             Alpha channel comes from base layer only (mesh or depth).
-            Skeleton and edges are overlays that don't affect masking.
+            Overlays (textured, skeleton, edges) don't affect masking.
+
+            For the texture projection workflow (circular→helical):
+            - Use "depth" as base layer
+            - Use "textured" with Canny atlas from circular orbit
+            - Optionally add "skeleton" for pose guidance
         """
         # Render base layer
         base_image = None
@@ -621,6 +811,35 @@ class Renderer:
             ).astype(np.uint8)
 
             # Keep base layer's alpha (skeleton doesn't affect masking)
+
+        # Overlay textured mesh if requested (e.g., projected Canny edges)
+        if "textured" in modes:
+            tex_opts = modes["textured"] if isinstance(modes["textured"], dict) else {}
+
+            texture = tex_opts.get("texture")
+            uv_coords = tex_opts.get("uv_coords")
+
+            if texture is None or uv_coords is None:
+                raise ValueError(
+                    "textured mode requires 'texture' (RGBA array) and 'uv_coords' (UV array)"
+                )
+
+            # Render textured mesh with transparent background
+            textured_image = self.render_textured(
+                camera,
+                texture=texture,
+                uv_coords=uv_coords,
+                bg_color=(0.0, 0.0, 0.0, 0.0)  # Transparent background
+            )
+
+            # Composite textured over base using alpha blending
+            textured_alpha = textured_image[:, :, 3:4] / 255.0
+            base_image[:, :, :3] = (
+                textured_image[:, :, :3] * textured_alpha +
+                base_image[:, :, :3] * (1 - textured_alpha)
+            ).astype(np.uint8)
+
+            # Keep base layer's alpha (textured doesn't affect masking)
 
         # Overlay edges if requested
         if "edges" in modes:
