@@ -287,16 +287,20 @@ class TextureProjector:
         """
         Project a single view onto the UV atlas.
 
+        Uses face-center UVs for robustness (avoids coordinate system mismatches
+        between pyrender and camera projection). For best quality, use best_angle
+        blend mode which selects the view with most perpendicular viewing angle.
+
         Args:
             image: Source image to project, shape (H, W, C), RGBA uint8
-            camera: Camera that captured the image (unused in current impl,
-                   but kept for potential view-angle weighting)
+            camera: Camera that captured the image (used for view-angle weighting)
             face_ids: Face ID buffer from render_face_ids(), shape (H, W)
                      Values are face indices or -1 for background
             blend_mode: How to blend with existing atlas values:
                 - "max": Take maximum value (preserves all edges)
                 - "replace": Overwrite existing values
                 - "average": Running average
+                - "best_angle": Keep color from best viewing angle
 
         Note:
             This method modifies internal state. Call get_atlas() to retrieve result.
@@ -310,8 +314,6 @@ class TextureProjector:
         num_faces = len(self.faces)
 
         # Get all pixels with valid face IDs
-        # Filter out negative IDs (background) AND out-of-bounds IDs
-        # (can occur due to anti-aliasing blending the encoded RGB colors)
         valid_mask = (face_ids >= 0) & (face_ids < num_faces)
         valid_y, valid_x = np.where(valid_mask)
         valid_face_ids = face_ids[valid_mask]
@@ -322,141 +324,63 @@ class TextureProjector:
         # Get pixel colors from source image
         pixel_colors = image[valid_y, valid_x].astype(np.float32)  # Shape: (K, 4)
 
-        # For each valid pixel, compute its UV coordinate
-        # This requires knowing where in the face triangle the pixel falls
-        # We use barycentric interpolation based on the face's UV coordinates
+        # Use face center UVs (robust, doesn't depend on projection matching)
+        face_center_uvs = self.face_uvs.mean(axis=1)  # Shape: (M, 2)
+        pixel_uvs = face_center_uvs[valid_face_ids]  # Shape: (K, 2)
 
-        # Normalize pixel coords to [0, 1]
-        px_norm = valid_x / (w - 1)
-        py_norm = valid_y / (h - 1)
+        # Handle UV seam for cylindrical mapping
+        # Check if any face crosses the seam by looking at UV range
+        face_u_values = self.face_uvs[:, :, 0]  # Shape: (M, 3)
+        face_u_range = face_u_values.max(axis=1) - face_u_values.min(axis=1)
+        seam_faces = face_u_range > 0.5
 
-        # Get the UV coordinates of each face
-        face_uv0 = self.face_uvs[valid_face_ids, 0]  # Shape: (K, 2)
-        face_uv1 = self.face_uvs[valid_face_ids, 1]
-        face_uv2 = self.face_uvs[valid_face_ids, 2]
+        # For seam faces, adjust the center UV
+        # If center U < 0.5 but face spans seam, it should be on the "high" side
+        for i, face_id in enumerate(valid_face_ids):
+            if seam_faces[face_id]:
+                # Recompute center with seam handling
+                uvs = self.face_uvs[face_id]  # Shape: (3, 2)
+                u_vals = uvs[:, 0].copy()
+                # Add 1 to small U values before averaging
+                u_vals[u_vals < 0.5] += 1.0
+                center_u = u_vals.mean() % 1.0
+                pixel_uvs[i, 0] = center_u
 
-        # Get 3D vertices of each face for barycentric computation in screen space
-        face_v0 = self.vertices[self.faces[valid_face_ids, 0]]  # Shape: (K, 3)
-        face_v1 = self.vertices[self.faces[valid_face_ids, 1]]
-        face_v2 = self.vertices[self.faces[valid_face_ids, 2]]
+        # Convert to atlas coordinates
+        atlas_x = (pixel_uvs[:, 0] * (self.atlas_width - 1)).astype(np.int32)
+        atlas_y = ((1 - pixel_uvs[:, 1]) * (self.atlas_height - 1)).astype(np.int32)
 
-        # Project 3D vertices to screen space
-        screen_v0 = camera.project(face_v0)  # Shape: (K, 2)
-        screen_v1 = camera.project(face_v1)
-        screen_v2 = camera.project(face_v2)
-
-        # Normalize screen coords to [0, 1]
-        screen_v0_norm = screen_v0 / np.array([[w - 1, h - 1]])
-        screen_v1_norm = screen_v1 / np.array([[w - 1, h - 1]])
-        screen_v2_norm = screen_v2 / np.array([[w - 1, h - 1]])
-
-        # Pixel positions
-        pixel_pos = np.stack([px_norm, py_norm], axis=1)  # Shape: (K, 2)
-
-        # Compute barycentric coordinates in screen space
-        bary_u, bary_v, bary_w = self._barycentric_coords(
-            pixel_pos, screen_v0_norm, screen_v1_norm, screen_v2_norm
-        )
-
-        # Filter out pixels with invalid barycentric coords (outside triangle)
-        # This can happen due to face_id aliasing at triangle edges
-        bary_valid = (
-            (bary_u >= -0.1) & (bary_u <= 1.1) &
-            (bary_v >= -0.1) & (bary_v <= 1.1) &
-            (bary_w >= -0.1) & (bary_w <= 1.1)
-        )
-
-        if not np.any(bary_valid):
-            return  # No valid pixels
-
-        # Filter all arrays
-        bary_u = bary_u[bary_valid]
-        bary_v = bary_v[bary_valid]
-        bary_w = bary_w[bary_valid]
-        face_uv0 = face_uv0[bary_valid]
-        face_uv1 = face_uv1[bary_valid]
-        face_uv2 = face_uv2[bary_valid]
-        pixel_colors = pixel_colors[bary_valid]
-        valid_face_ids = valid_face_ids[bary_valid]
-        face_v0 = face_v0[bary_valid]
-        face_v1 = face_v1[bary_valid]
-        face_v2 = face_v2[bary_valid]
-
-        # Clamp barycentric coords to [0, 1] for robustness
-        bary_u = np.clip(bary_u, 0, 1)
-        bary_v = np.clip(bary_v, 0, 1)
-        bary_w = np.clip(bary_w, 0, 1)
-        # Renormalize so they sum to 1
-        bary_sum = bary_u + bary_v + bary_w
-        bary_u /= bary_sum
-        bary_v /= bary_sum
-        bary_w /= bary_sum
-
-        # Handle UV seam wraparound for cylindrical mapping
-        # If face UVs span > 0.5 in U, the face crosses the seam
-        u_range = np.max(np.stack([face_uv0[:, 0], face_uv1[:, 0], face_uv2[:, 0]], axis=1), axis=1) - \
-                  np.min(np.stack([face_uv0[:, 0], face_uv1[:, 0], face_uv2[:, 0]], axis=1), axis=1)
-        seam_faces = u_range > 0.5
-
-        # For seam faces, add 1.0 to small U values before interpolation
-        if np.any(seam_faces):
-            face_uv0_adj = face_uv0.copy()
-            face_uv1_adj = face_uv1.copy()
-            face_uv2_adj = face_uv2.copy()
-            face_uv0_adj[seam_faces & (face_uv0[:, 0] < 0.5), 0] += 1.0
-            face_uv1_adj[seam_faces & (face_uv1[:, 0] < 0.5), 0] += 1.0
-            face_uv2_adj[seam_faces & (face_uv2[:, 0] < 0.5), 0] += 1.0
-        else:
-            face_uv0_adj = face_uv0
-            face_uv1_adj = face_uv1
-            face_uv2_adj = face_uv2
-
-        # Interpolate UV coordinates using barycentric coords
-        uv_coords = (
-            bary_u[:, np.newaxis] * face_uv0_adj +
-            bary_v[:, np.newaxis] * face_uv1_adj +
-            bary_w[:, np.newaxis] * face_uv2_adj
-        )  # Shape: (K, 2)
-
-        # Wrap U back to [0, 1] for seam faces
-        uv_coords[:, 0] = uv_coords[:, 0] % 1.0
-
-        # Convert UV to atlas pixel coordinates
-        atlas_x = (uv_coords[:, 0] * (self.atlas_width - 1)).astype(np.int32)
-        atlas_y = ((1 - uv_coords[:, 1]) * (self.atlas_height - 1)).astype(np.int32)  # Flip V
-
-        # Clamp to valid range
         atlas_x = np.clip(atlas_x, 0, self.atlas_width - 1)
         atlas_y = np.clip(atlas_y, 0, self.atlas_height - 1)
 
-        # Apply blending (vectorized for speed)
+        # For best_angle mode, compute view angles
+        if blend_mode == "best_angle":
+            # Get face centers in 3D
+            face_v0 = self.vertices[self.faces[valid_face_ids, 0]]
+            face_v1 = self.vertices[self.faces[valid_face_ids, 1]]
+            face_v2 = self.vertices[self.faces[valid_face_ids, 2]]
+            face_centers = (face_v0 + face_v1 + face_v2) / 3.0
+
+            # Compute view direction
+            view_dirs = camera.position - face_centers
+            view_dirs_norm = view_dirs / np.linalg.norm(view_dirs, axis=1, keepdims=True)
+
+            # Get face normals
+            face_norms = self.face_normals[valid_face_ids]
+
+            # Dot product = view angle quality (1.0 = head-on)
+            dot_products = np.abs(np.sum(view_dirs_norm * face_norms, axis=1))
+
+        # Apply blending
         if blend_mode == "max":
-            # Use numpy's maximum.at for atomic max updates
             np.maximum.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
         elif blend_mode == "replace":
-            # Simple overwrite
             self._atlas_accum[atlas_y, atlas_x] = pixel_colors
         elif blend_mode == "average":
-            # Accumulate sums and weights, then divide at the end in get_atlas()
             np.add.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
             np.add.at(self._atlas_weights, (atlas_y, atlas_x), 1)
         elif blend_mode == "best_angle":
             # Keep only the color from the view with best viewing angle
-            # (most perpendicular to surface = highest dot product with normal)
-
-            # Compute view direction for each pixel
-            # Use face center as approximation for surface point
-            face_centers = (face_v0 + face_v1 + face_v2) / 3.0  # Shape: (K, 3)
-            view_dirs = camera.position - face_centers  # Direction from surface to camera
-            view_dirs_norm = view_dirs / np.linalg.norm(view_dirs, axis=1, keepdims=True)
-
-            # Get face normals for these faces
-            face_norms = self.face_normals[valid_face_ids]  # Shape: (K, 3)
-
-            # Compute dot product (view angle quality: 1.0 = head-on, 0.0 = grazing)
-            dot_products = np.abs(np.sum(view_dirs_norm * face_norms, axis=1))  # Shape: (K,)
-
-            # For each atlas pixel, only update if this view has better angle
             for i in range(len(atlas_x)):
                 ax, ay = atlas_x[i], atlas_y[i]
                 if dot_products[i] > self._atlas_best_angle[ay, ax]:
