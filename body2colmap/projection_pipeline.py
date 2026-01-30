@@ -92,6 +92,7 @@ class ProjectionPipeline:
         self.helical_cameras: Optional[List[Camera]] = None
         self.uv_coords: Optional[NDArray[np.float32]] = None
         self.canny_atlas: Optional[NDArray[np.uint8]] = None
+        self.texture_atlas: Optional[NDArray[np.uint8]] = None
 
         # Renderer (lazily created)
         self._renderer: Optional[Renderer] = None
@@ -420,6 +421,130 @@ class ProjectionPipeline:
 
         return self.canny_atlas
 
+    def generate_texture_atlas_from_images(
+        self,
+        images: Optional[List[NDArray[np.uint8]]] = None,
+        mode: str = "canny",
+        canny_low: int = 50,
+        canny_high: int = 150,
+        canny_blur: int = 5,
+        edge_color: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        uv_method: str = "cylindrical",
+        blend_mode: str = "max"
+    ) -> NDArray[np.uint8]:
+        """
+        Generate texture atlas from diffusion-processed images.
+
+        Supports multiple texture modes for different ControlNet conditioning:
+        - "canny": Edge detection (good for structure)
+        - "color": Direct color projection (preserves texture details)
+        - "both": Canny edges overlaid on color
+
+        Args:
+            images: List of images to process. If None, uses cached images.
+            mode: Texture mode - "canny", "color", or "both"
+            canny_low: Canny low threshold (for canny/both modes)
+            canny_high: Canny high threshold (for canny/both modes)
+            canny_blur: Gaussian blur kernel size (for canny/both modes)
+            edge_color: RGB color for edges (for canny mode only)
+            uv_method: UV generation method ("cylindrical", "spherical")
+            blend_mode: Blending mode ("max", "average")
+
+        Returns:
+            Texture atlas, shape (atlas_height, atlas_width, 4), RGBA uint8
+        """
+        if images is None:
+            images = getattr(self, '_diffusion_images', None)
+
+        if images is None:
+            raise RuntimeError(
+                "No images to process. Call load_diffusion_images() first, "
+                "or pass images directly."
+            )
+
+        if self.circular_cameras is None:
+            raise RuntimeError("Circular cameras not set.")
+
+        if len(images) != len(self.circular_cameras):
+            raise ValueError(
+                f"Number of images ({len(images)}) doesn't match "
+                f"number of cameras ({len(self.circular_cameras)})"
+            )
+
+        renderer = self._get_renderer()
+
+        # Generate UVs for the mesh (reuse if already generated)
+        if self.uv_coords is None:
+            self.uv_coords = tex_proj.generate_uvs(
+                self.scene.vertices,
+                self.scene.faces,
+                method=uv_method
+            )
+
+        # Create projector
+        projector = tex_proj.TextureProjector(
+            self.scene.vertices,
+            self.scene.faces,
+            self.uv_coords,
+            self.atlas_size
+        )
+
+        # Process each image with its corresponding camera
+        for camera, image in zip(self.circular_cameras, images):
+            # Render face IDs for visibility
+            face_ids = renderer.render_face_ids(camera)
+
+            if mode == "canny":
+                # Detect Canny edges
+                edges = edge_module.canny(
+                    image[:, :, :3],
+                    low_threshold=canny_low,
+                    high_threshold=canny_high,
+                    blur_kernel=canny_blur
+                )
+                proj_image = edge_module.edges_to_rgba(edges, color=edge_color)
+
+            elif mode == "color":
+                # Use image directly (ensure RGBA)
+                if image.shape[2] == 3:
+                    proj_image = np.dstack([image, np.full(image.shape[:2], 255, dtype=np.uint8)])
+                else:
+                    proj_image = image
+
+            elif mode == "both":
+                # Color with Canny edges overlaid
+                edges = edge_module.canny(
+                    image[:, :, :3],
+                    low_threshold=canny_low,
+                    high_threshold=canny_high,
+                    blur_kernel=canny_blur
+                )
+                # Start with color
+                if image.shape[2] == 3:
+                    proj_image = np.dstack([image, np.full(image.shape[:2], 255, dtype=np.uint8)])
+                else:
+                    proj_image = image.copy()
+                # Overlay white edges
+                edge_mask = edges > 0
+                proj_image[edge_mask] = [255, 255, 255, 255]
+
+            else:
+                raise ValueError(f"Unknown texture mode: {mode}. Use 'canny', 'color', or 'both'.")
+
+            # Project onto atlas
+            projector.project_view_fast(proj_image, face_ids, blend_mode)
+
+        # Get and store atlas
+        atlas = projector.get_atlas()
+
+        # Store as texture_atlas (more general than canny_atlas)
+        self.texture_atlas = atlas
+        # Also store as canny_atlas for backwards compatibility
+        if mode in ("canny", "both"):
+            self.canny_atlas = atlas
+
+        return atlas
+
     # =========================================================================
     # PHASE 2 continued: Set up helical orbit and render with Canny
     # =========================================================================
@@ -473,31 +598,42 @@ class ProjectionPipeline:
 
         return self.helical_cameras
 
-    def render_helical_with_canny(
+    def render_helical_with_texture(
         self,
-        include_depth: bool = True,
+        base_mode: str = "depth",
+        include_texture: bool = True,
         include_skeleton: bool = True,
         depth_colormap: Optional[str] = None,
+        normal_space: str = "camera",
         skeleton_opts: Optional[Dict[str, Any]] = None
     ) -> List[NDArray[np.uint8]]:
         """
-        Render helical orbit views with projected Canny overlay.
+        Render helical orbit views with projected texture overlay.
+
+        This is a more general version of render_helical_with_canny that
+        supports different base modes and texture sources.
 
         Args:
-            include_depth: Include depth as base layer
+            base_mode: Base layer type - "depth", "normals", or "mesh"
+            include_texture: Include projected texture overlay
             include_skeleton: Include skeleton overlay
             depth_colormap: Colormap for depth (None = grayscale)
+            normal_space: Normal map space ("camera" or "world")
             skeleton_opts: Skeleton rendering options
 
         Returns:
             List of composite RGBA images, one per helical camera
 
         Raises:
-            RuntimeError: If canny_atlas or helical_cameras not set
+            RuntimeError: If texture requested but atlas not generated
         """
-        if self.canny_atlas is None or self.uv_coords is None:
+        # Get texture atlas (prefer texture_atlas, fall back to canny_atlas)
+        texture_atlas = getattr(self, 'texture_atlas', None) or self.canny_atlas
+
+        if include_texture and (texture_atlas is None or self.uv_coords is None):
             raise RuntimeError(
-                "Canny atlas not generated. Call generate_canny_atlas_from_images() first."
+                "Texture atlas not generated. Call generate_texture_atlas_from_images() "
+                "or generate_canny_atlas_from_images() first."
             )
 
         if self.helical_cameras is None:
@@ -512,24 +648,30 @@ class ProjectionPipeline:
             # Build composite modes
             modes: Dict[str, Any] = {}
 
-            # Base layer: depth
-            if include_depth:
+            # Base layer
+            if base_mode == "depth":
                 modes["depth"] = {
                     "normalize": True,
                     "colormap": depth_colormap
                 }
-            else:
-                # Need some base layer - use mesh with neutral color
+            elif base_mode == "normals":
+                modes["normals"] = {
+                    "space": normal_space
+                }
+            elif base_mode == "mesh":
                 modes["mesh"] = {
                     "color": (0.5, 0.5, 0.5),
                     "bg_color": (0.0, 0.0, 0.0)
                 }
+            else:
+                raise ValueError(f"Unknown base_mode: {base_mode}")
 
-            # Textured overlay: projected Canny
-            modes["textured"] = {
-                "texture": self.canny_atlas,
-                "uv_coords": self.uv_coords
-            }
+            # Textured overlay: projected texture
+            if include_texture:
+                modes["textured"] = {
+                    "texture": texture_atlas,
+                    "uv_coords": self.uv_coords
+                }
 
             # Skeleton overlay
             if include_skeleton and self.scene.skeleton_joints is not None:
@@ -543,6 +685,82 @@ class ProjectionPipeline:
                 modes["skeleton"] = skel_defaults
 
             # Render composite
+            image = renderer.render_composite(camera, modes)
+            images.append(image)
+
+        return images
+
+    def render_helical_with_canny(
+        self,
+        include_depth: bool = True,
+        include_skeleton: bool = True,
+        depth_colormap: Optional[str] = None,
+        skeleton_opts: Optional[Dict[str, Any]] = None
+    ) -> List[NDArray[np.uint8]]:
+        """
+        Render helical orbit views with projected Canny overlay.
+
+        This is a convenience wrapper around render_helical_with_texture
+        for backwards compatibility.
+
+        Args:
+            include_depth: Include depth as base layer
+            include_skeleton: Include skeleton overlay
+            depth_colormap: Colormap for depth (None = grayscale)
+            skeleton_opts: Skeleton rendering options
+
+        Returns:
+            List of composite RGBA images, one per helical camera
+        """
+        return self.render_helical_with_texture(
+            base_mode="depth" if include_depth else "mesh",
+            include_texture=True,
+            include_skeleton=include_skeleton,
+            depth_colormap=depth_colormap,
+            skeleton_opts=skeleton_opts
+        )
+
+    def render_helical_normals(
+        self,
+        include_skeleton: bool = False,
+        normal_space: str = "camera",
+        skeleton_opts: Optional[Dict[str, Any]] = None
+    ) -> List[NDArray[np.uint8]]:
+        """
+        Render helical orbit normal maps.
+
+        Normal maps encode surface orientation and are useful for
+        ControlNet-Normal conditioning.
+
+        Args:
+            include_skeleton: Include skeleton overlay
+            normal_space: "camera" (recommended) or "world"
+            skeleton_opts: Skeleton rendering options
+
+        Returns:
+            List of normal map RGBA images, one per helical camera
+        """
+        if self.helical_cameras is None:
+            raise RuntimeError("Helical cameras not set.")
+
+        renderer = self._get_renderer()
+        images = []
+
+        for camera in self.helical_cameras:
+            modes: Dict[str, Any] = {
+                "normals": {"space": normal_space}
+            }
+
+            if include_skeleton and self.scene.skeleton_joints is not None:
+                skel_defaults = {
+                    "joint_radius": 0.015,
+                    "bone_radius": 0.008,
+                    "use_openpose_colors": True
+                }
+                if skeleton_opts:
+                    skel_defaults.update(skeleton_opts)
+                modes["skeleton"] = skel_defaults
+
             image = renderer.render_composite(camera, modes)
             images.append(image)
 

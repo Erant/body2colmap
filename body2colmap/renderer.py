@@ -295,6 +295,99 @@ class Renderer:
 
         return rgba
 
+    def render_normals(
+        self,
+        camera: Camera,
+        space: str = "camera"
+    ) -> NDArray[np.uint8]:
+        """
+        Render surface normal map.
+
+        Normal maps encode surface orientation as RGB colors, providing
+        view-independent 3D structure information useful for ControlNet
+        conditioning.
+
+        Args:
+            camera: Camera to render from
+            space: Coordinate space for normals:
+                  - "camera": Normals in camera space (blue = facing camera)
+                  - "world": Normals in world space
+
+        Returns:
+            RGBA image, shape (height, width, 4), dtype uint8
+            RGB encodes normal direction: R=(Nx+1)/2, G=(Ny+1)/2, B=(Nz+1)/2
+            Alpha = 255 where geometry exists, 0 for background
+
+        Note:
+            Camera-space normals are more useful for ControlNet as they're
+            view-consistent (surfaces facing the camera are always blue).
+        """
+        try:
+            import pyribbit as pyrender
+            import trimesh
+        except ImportError:
+            raise ImportError("pyribbit is required")
+
+        # Create trimesh to compute normals
+        mesh_tm = trimesh.Trimesh(
+            vertices=self.scene.vertices,
+            faces=self.scene.faces,
+            process=False
+        )
+
+        # Get vertex normals (trimesh computes these automatically)
+        vertex_normals = mesh_tm.vertex_normals.copy()
+
+        # Transform normals to camera space if requested
+        if space == "camera":
+            # Get world-to-camera rotation (no translation for normals)
+            c2w = camera.get_c2w()
+            w2c_rot = c2w[:3, :3].T  # Inverse rotation
+            vertex_normals = (w2c_rot @ vertex_normals.T).T
+
+        # Normalize (should already be normalized, but ensure)
+        norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+        norms[norms == 0] = 1  # Avoid division by zero
+        vertex_normals = vertex_normals / norms
+
+        # Encode normals as colors: (n + 1) / 2 maps [-1, 1] to [0, 1]
+        normal_colors = ((vertex_normals + 1) / 2 * 255).astype(np.uint8)
+        # Add alpha channel
+        normal_colors_rgba = np.hstack([
+            normal_colors,
+            np.full((len(normal_colors), 1), 255, dtype=np.uint8)
+        ])
+
+        # Create mesh with normal colors as vertex colors
+        mesh_tm.visual.vertex_colors = normal_colors_rgba
+
+        # Create pyrender scene
+        pr_scene = pyrender.Scene(
+            bg_color=[0, 0, 0, 0],
+            ambient_light=[1.0, 1.0, 1.0]  # Full ambient - no shading
+        )
+
+        # Create pyrender mesh with flat shading to preserve normal colors
+        pr_mesh = pyrender.Mesh.from_trimesh(mesh_tm, smooth=False)
+        pr_scene.add(pr_mesh)
+
+        # Add camera
+        pr_camera = pyrender.PerspectiveCamera(
+            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
+            aspectRatio=self.width / self.height
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        # Render
+        renderer = self._get_pyrender_renderer()
+        color, depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
+
+        # Ensure writable
+        if not color.flags.writeable:
+            color = np.array(color, copy=True)
+
+        return color
+
     def render_skeleton(
         self,
         camera: Camera,
@@ -735,6 +828,7 @@ class Renderer:
             modes: Dictionary specifying which modes to render and their options
                   Example: {
                       "depth": {"normalize": True},
+                      "normals": {"space": "camera"},
                       "textured": {"texture": atlas, "uv_coords": uvs},
                       "skeleton": {"joint_radius": 0.015},
                       "edges": {"method": "canny", "color": (1.0, 1.0, 1.0)}
@@ -745,18 +839,23 @@ class Renderer:
 
         Note:
             Modes are composited in order:
-            1. mesh or depth (base layer)
+            1. mesh, depth, or normals (base layer)
             2. textured (overlay, if present) - mesh with projected texture
             3. skeleton (overlay, if present)
             4. edges (overlay, if present) - per-view edge detection
 
-            Alpha channel comes from base layer only (mesh or depth).
+            Alpha channel comes from base layer only (mesh, depth, or normals).
             Overlays (textured, skeleton, edges) don't affect masking.
 
             For the texture projection workflow (circular→helical):
             - Use "depth" as base layer
             - Use "textured" with Canny atlas from circular orbit
             - Optionally add "skeleton" for pose guidance
+
+            For ControlNet conditioning:
+            - "depth" provides depth information
+            - "normals" provides surface orientation (good for normal ControlNet)
+            - "textured" with Canny provides edge structure
         """
         # Render base layer
         base_image = None
@@ -775,9 +874,15 @@ class Renderer:
                 normalize=depth_opts.get("normalize", True),
                 colormap=depth_opts.get("colormap")
             )
+        elif "normals" in modes:
+            normal_opts = modes["normals"] if isinstance(modes["normals"], dict) else {}
+            base_image = self.render_normals(
+                camera,
+                space=normal_opts.get("space", "camera")
+            )
 
         if base_image is None:
-            raise ValueError("Must specify 'mesh' or 'depth' as base layer")
+            raise ValueError("Must specify 'mesh', 'depth', or 'normals' as base layer")
 
         # Ensure base_image is writable before compositing
         if not base_image.flags.writeable:
