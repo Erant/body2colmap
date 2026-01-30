@@ -1,12 +1,12 @@
 """
-Rendering engine using pyribbit (pyrender fork).
+Rendering engine using pyrender.
 
 This module provides the Renderer class which handles actual image generation
-using pyribbit. Supports multiple rendering modes: mesh, depth, skeleton, and
+using pyrender. Supports multiple rendering modes: mesh, depth, skeleton, and
 composite modes.
 
 All rendering happens in world coordinates (no coordinate conversion needed
-since pyribbit uses OpenGL convention matching our world coords).
+since pyrender uses OpenGL convention matching our world coords).
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ from . import edges as edge_module
 
 class Renderer:
     """
-    Render images from Scene using pyribbit.
+    Render images from Scene using pyrender.
 
     Supports multiple rendering modes:
     - mesh: Colored mesh with lighting
@@ -62,11 +62,11 @@ class Renderer:
         """
         if self._renderer is None:
             try:
-                import pyribbit as pyrender
+                import pyrender
             except ImportError:
                 raise ImportError(
-                    "pyribbit is required for rendering. "
-                    "Install with: pip install pyribbit"
+                    "pyrender is required for rendering. "
+                    "Install with: pip install pyrender"
                 )
 
             self._renderer = pyrender.OffscreenRenderer(
@@ -97,12 +97,12 @@ class Renderer:
             No coordinate conversion needed here.
         """
         try:
-            import pyribbit as pyrender
+            import pyrender
             import trimesh
         except ImportError:
             raise ImportError(
-                "pyribbit and trimesh are required. "
-                "Install with: pip install pyribbit trimesh"
+                "pyrender and trimesh are required. "
+                "Install with: pip install pyrender trimesh"
             )
 
         # Create pyrender scene with strong ambient light
@@ -183,9 +183,9 @@ class Renderer:
             Alpha = 255 where mesh, 0 where background
         """
         try:
-            import pyribbit as pyrender
+            import pyrender
         except ImportError:
-            raise ImportError("pyribbit is required")
+            raise ImportError("pyrender is required")
 
         # Create scene
         pr_scene = self._create_pyrender_scene(mesh_color=mesh_color)
@@ -239,9 +239,9 @@ class Renderer:
             Alpha = 255 where depth exists, 0 where no geometry
         """
         try:
-            import pyribbit as pyrender
+            import pyrender
         except ImportError:
-            raise ImportError("pyribbit is required")
+            raise ImportError("pyrender is required")
 
         # Create scene
         pr_scene = self._create_pyrender_scene()
@@ -333,7 +333,7 @@ class Renderer:
             raise ValueError("Scene has no skeleton data")
 
         try:
-            import pyribbit as pyrender
+            import pyrender
             import trimesh
             from . import skeleton as skel_module
         except ImportError as e:
@@ -569,12 +569,12 @@ class Renderer:
             Supports up to ~16.7 million faces.
         """
         try:
-            import pyribbit as pyrender
+            import pyrender
             import trimesh
         except ImportError:
             raise ImportError(
-                "pyribbit and trimesh are required. "
-                "Install with: pip install pyribbit trimesh"
+                "pyrender and trimesh are required. "
+                "Install with: pip install pyrender trimesh"
             )
 
         # Create a mesh with unique color per face
@@ -663,13 +663,13 @@ class Renderer:
             RGBA image, shape (height, width, 4), dtype uint8
         """
         try:
-            import pyribbit as pyrender
+            import pyrender
             import trimesh
             from PIL import Image
         except ImportError:
             raise ImportError(
-                "pyribbit, trimesh, and Pillow are required. "
-                "Install with: pip install pyribbit trimesh Pillow"
+                "pyrender, trimesh, and Pillow are required. "
+                "Install with: pip install pyrender trimesh Pillow"
             )
 
         # Create trimesh with texture
