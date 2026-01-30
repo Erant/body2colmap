@@ -127,9 +127,10 @@ def cmd_helical(args: argparse.Namespace) -> int:
     )
     print(f"  Loaded {len(images)} images")
 
-    # Generate Canny atlas
-    print(f"  Generating Canny atlas (thresholds: {args.canny_low}/{args.canny_high})...")
-    atlas = pipeline.generate_canny_atlas_from_images(
+    # Generate texture atlas
+    print(f"  Generating texture atlas (mode: {args.texture_mode})...")
+    atlas = pipeline.generate_texture_atlas_from_images(
+        mode=args.texture_mode,
         canny_low=args.canny_low,
         canny_high=args.canny_high,
         canny_blur=args.canny_blur,
@@ -139,9 +140,10 @@ def cmd_helical(args: argparse.Namespace) -> int:
 
     # Save atlas if requested
     if args.save_atlas:
-        atlas_path = Path(args.output_dir) / "canny_atlas.png"
+        atlas_path = Path(args.output_dir) / f"texture_atlas_{args.texture_mode}.png"
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        pipeline.export_canny_atlas(str(atlas_path))
+        from PIL import Image
+        Image.fromarray(atlas).save(atlas_path)
         print(f"  Saved atlas to {atlas_path}")
 
     # Setup helical orbit
@@ -155,10 +157,11 @@ def cmd_helical(args: argparse.Namespace) -> int:
     )
     print(f"  Set up {len(pipeline.helical_cameras)} helical cameras")
 
-    # Render with Canny
-    print(f"  Rendering composites (depth + canny + skeleton)...")
-    guidance_images = pipeline.render_helical_with_canny(
-        include_depth=args.include_depth,
+    # Render with texture
+    print(f"  Rendering composites (depth + texture + skeleton)...")
+    guidance_images = pipeline.render_helical_with_texture(
+        base_mode="depth" if args.include_depth else "mesh",
+        include_texture=True,
         include_skeleton=args.skeleton
     )
     print(f"  Rendered {len(guidance_images)} images")
@@ -355,10 +358,11 @@ Examples:
     helical.add_argument("--lead-out", type=float, default=45.0, help="Lead-out azimuth range")
     helical.add_argument("--fill-ratio", type=float, default=0.8, help="Frame fill ratio")
 
-    # Canny params
-    helical.add_argument("--canny-low", type=int, default=50, help="Canny low threshold")
-    helical.add_argument("--canny-high", type=int, default=150, help="Canny high threshold")
-    helical.add_argument("--canny-blur", type=int, default=5, help="Canny blur kernel size")
+    # Texture projection params
+    helical.add_argument("--texture-mode", choices=["canny", "color", "both"], default="color", help="Texture projection mode")
+    helical.add_argument("--canny-low", type=int, default=50, help="Canny low threshold (for canny/both modes)")
+    helical.add_argument("--canny-high", type=int, default=150, help="Canny high threshold (for canny/both modes)")
+    helical.add_argument("--canny-blur", type=int, default=5, help="Canny blur kernel size (for canny/both modes)")
     helical.add_argument("--uv-method", choices=["cylindrical", "spherical"], default="cylindrical", help="UV generation method")
 
     # Output options
@@ -366,7 +370,7 @@ Examples:
     helical.add_argument("--include-depth", action="store_true", default=True, help="Include depth base layer")
     helical.add_argument("--no-depth", dest="include_depth", action="store_false", help="Exclude depth base layer")
     helical.add_argument("--atlas-size", type=int, default=1024, help="UV atlas size")
-    helical.add_argument("--save-atlas", action="store_true", help="Save Canny atlas image")
+    helical.add_argument("--save-atlas", action="store_true", help="Save texture atlas image")
     helical.add_argument("--filename-pattern", default="frame_{:04d}.png", help="Output filename pattern")
     helical.set_defaults(func=cmd_helical)
 
