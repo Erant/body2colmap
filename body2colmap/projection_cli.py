@@ -1,0 +1,393 @@
+"""
+Command-line interface for texture projection workflow.
+
+Provides subcommands for the two-phase circular→helical Canny projection pipeline:
+
+  Phase 1 (circular): Generate reference views for diffusion
+    body2colmap-projection circular input.npz -o ./circular_output
+
+  (External: User runs diffusion model on circular_output/*.png)
+
+  Phase 2 (helical): Project diffusion output and render guidance
+    body2colmap-projection helical input.npz --diffusion-dir ./circular_output -o ./helical_output
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Optional
+
+
+def cmd_circular(args: argparse.Namespace) -> int:
+    """Execute Phase 1: Generate circular orbit for diffusion input."""
+    from .projection_pipeline import ProjectionPipeline
+
+    print(f"Phase 1: Generating circular orbit views")
+    print(f"  Input: {args.input}")
+    print(f"  Output: {args.output_dir}")
+    print(f"  Resolution: {args.width}x{args.height}")
+    print(f"  Frames: {args.n_frames}")
+    print(f"  Elevation: {args.elevation}°")
+
+    # Create pipeline
+    pipeline = ProjectionPipeline.from_npz_file(
+        args.input,
+        render_size=(args.width, args.height),
+        include_skeleton=args.skeleton,
+        atlas_size=(args.atlas_size, args.atlas_size)
+    )
+    print(f"  Loaded scene: {pipeline.scene}")
+
+    # Setup circular orbit
+    pipeline.setup_circular_orbit(
+        n_frames=args.n_frames,
+        elevation_deg=args.elevation,
+        fill_ratio=args.fill_ratio
+    )
+    print(f"  Generated {len(pipeline.circular_cameras)} cameras")
+
+    # Render
+    print(f"  Rendering...")
+    images = pipeline.render_circular_orbit(
+        mesh_color=tuple(args.mesh_color) if args.mesh_color else None,
+        bg_color=tuple(args.bg_color)
+    )
+    print(f"  Rendered {len(images)} images")
+
+    # Export
+    print(f"  Exporting...")
+    pipeline.export_circular_orbit(
+        args.output_dir,
+        images,
+        filename_pattern=args.filename_pattern
+    )
+    print(f"  Exported to {args.output_dir}")
+
+    print()
+    print("Phase 1 complete!")
+    print(f"Next steps:")
+    print(f"  1. Process images in {args.output_dir}/ through your diffusion model")
+    print(f"  2. Save processed images back to {args.output_dir}/ (or another directory)")
+    print(f"  3. Run: body2colmap-projection helical {args.input} --diffusion-dir {args.output_dir} -o ./helical_output")
+
+    return 0
+
+
+def cmd_helical(args: argparse.Namespace) -> int:
+    """Execute Phase 2: Project Canny and render helical guidance."""
+    from .projection_pipeline import ProjectionPipeline
+
+    print(f"Phase 2: Generating helical orbit with Canny projection")
+    print(f"  Input: {args.input}")
+    print(f"  Diffusion dir: {args.diffusion_dir}")
+    print(f"  Output: {args.output_dir}")
+    print(f"  Resolution: {args.width}x{args.height}")
+    print(f"  Frames: {args.n_frames}")
+    print(f"  Loops: {args.n_loops}")
+
+    # Create pipeline
+    pipeline = ProjectionPipeline.from_npz_file(
+        args.input,
+        render_size=(args.width, args.height),
+        include_skeleton=args.skeleton,
+        atlas_size=(args.atlas_size, args.atlas_size)
+    )
+    print(f"  Loaded scene: {pipeline.scene}")
+
+    # Setup circular orbit (needed to match camera count)
+    pipeline.setup_circular_orbit(
+        n_frames=args.circular_frames,
+        elevation_deg=args.circular_elevation,
+        fill_ratio=args.fill_ratio
+    )
+    print(f"  Set up {len(pipeline.circular_cameras)} circular cameras")
+
+    # Load diffusion images
+    print(f"  Loading diffusion images from {args.diffusion_dir}...")
+    images = pipeline.load_diffusion_images(
+        args.diffusion_dir,
+        filename_pattern=args.filename_pattern
+    )
+    print(f"  Loaded {len(images)} images")
+
+    # Generate Canny atlas
+    print(f"  Generating Canny atlas (thresholds: {args.canny_low}/{args.canny_high})...")
+    atlas = pipeline.generate_canny_atlas_from_images(
+        canny_low=args.canny_low,
+        canny_high=args.canny_high,
+        canny_blur=args.canny_blur,
+        uv_method=args.uv_method
+    )
+    print(f"  Generated atlas: {atlas.shape}")
+
+    # Save atlas if requested
+    if args.save_atlas:
+        atlas_path = Path(args.output_dir) / "canny_atlas.png"
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        pipeline.export_canny_atlas(str(atlas_path))
+        print(f"  Saved atlas to {atlas_path}")
+
+    # Setup helical orbit
+    pipeline.setup_helical_orbit(
+        n_frames=args.n_frames,
+        n_loops=args.n_loops,
+        amplitude_deg=args.amplitude,
+        lead_in_deg=args.lead_in,
+        lead_out_deg=args.lead_out,
+        fill_ratio=args.fill_ratio
+    )
+    print(f"  Set up {len(pipeline.helical_cameras)} helical cameras")
+
+    # Render with Canny
+    print(f"  Rendering composites (depth + canny + skeleton)...")
+    guidance_images = pipeline.render_helical_with_canny(
+        include_depth=args.include_depth,
+        include_skeleton=args.skeleton
+    )
+    print(f"  Rendered {len(guidance_images)} images")
+
+    # Export
+    print(f"  Exporting...")
+    pipeline.export_helical_output(
+        args.output_dir,
+        guidance_images,
+        filename_pattern=args.filename_pattern
+    )
+    print(f"  Exported to {args.output_dir}")
+
+    print()
+    print("Phase 2 complete!")
+    print(f"Guidance images saved to {args.output_dir}/")
+    print(f"COLMAP files saved to {args.output_dir}/sparse/0/")
+
+    return 0
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    """Quick test of pipeline components without full rendering."""
+    print("Testing projection pipeline components...")
+    print()
+
+    # Test imports
+    print("[1/6] Testing imports...")
+    try:
+        from . import edges as edge_module
+        from . import texture_projection as tex_proj
+        from .projection_pipeline import ProjectionPipeline
+        from .scene import Scene
+        from .renderer import Renderer
+        print("  OK: All modules imported")
+    except ImportError as e:
+        print(f"  FAIL: Import error: {e}")
+        return 1
+
+    # Test edge detection
+    print("[2/6] Testing edge detection...")
+    try:
+        import numpy as np
+        test_img = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        edges = edge_module.canny(test_img, low_threshold=50, high_threshold=150)
+        rgba = edge_module.edges_to_rgba(edges, color=(1.0, 1.0, 1.0))
+        print(f"  OK: Canny output shape: {edges.shape}, RGBA shape: {rgba.shape}")
+    except Exception as e:
+        print(f"  FAIL: {e}")
+        return 1
+
+    # Test UV generation
+    print("[3/6] Testing UV generation...")
+    try:
+        import numpy as np
+        # Simple cube vertices
+        vertices = np.array([
+            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]
+        ], dtype=np.float32)
+        faces = np.array([
+            [0, 1, 2], [0, 2, 3],  # front
+            [4, 6, 5], [4, 7, 6],  # back
+        ], dtype=np.int32)
+
+        uvs_cyl = tex_proj.generate_cylindrical_uvs(vertices)
+        uvs_sph = tex_proj.generate_spherical_uvs(vertices)
+        print(f"  OK: Cylindrical UVs shape: {uvs_cyl.shape}, Spherical: {uvs_sph.shape}")
+    except Exception as e:
+        print(f"  FAIL: {e}")
+        return 1
+
+    # Test TextureProjector
+    print("[4/6] Testing TextureProjector...")
+    try:
+        projector = tex_proj.TextureProjector(vertices, faces, uvs_cyl, atlas_size=(128, 128))
+        atlas = projector.get_atlas()
+        print(f"  OK: Atlas shape: {atlas.shape}")
+    except Exception as e:
+        print(f"  FAIL: {e}")
+        return 1
+
+    # Test with actual file if provided
+    if args.input:
+        print(f"[5/6] Testing Scene loading from {args.input}...")
+        try:
+            scene = Scene.from_npz_file(args.input, include_skeleton=True)
+            print(f"  OK: Loaded scene with {len(scene.vertices)} vertices, {len(scene.faces)} faces")
+            if scene.skeleton_joints is not None:
+                print(f"      Skeleton: {len(scene.skeleton_joints)} joints")
+        except Exception as e:
+            print(f"  FAIL: {e}")
+            return 1
+
+        print(f"[6/6] Testing Renderer...")
+        try:
+            renderer = Renderer(scene, render_size=(128, 128))
+            from .camera import Camera
+            from .path import OrbitPath
+            from .utils import compute_default_focal_length
+
+            # Create a test camera
+            focal = compute_default_focal_length(128)
+            camera = Camera(focal_length=(focal, focal), image_size=(128, 128))
+            target = scene.get_bbox_center()
+            camera.look_at(eye=target + np.array([0, 0, 2]), target=target)
+
+            # Test render_face_ids
+            face_ids = renderer.render_face_ids(camera)
+            n_visible = np.sum(face_ids >= 0)
+            print(f"  OK: Face IDs rendered, {n_visible} pixels have visible faces")
+
+            # Test render_mesh
+            mesh_img = renderer.render_mesh(camera)
+            print(f"  OK: Mesh rendered, shape: {mesh_img.shape}")
+
+        except Exception as e:
+            print(f"  FAIL: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+    else:
+        print("[5/6] Skipping Scene loading (no input file provided)")
+        print("[6/6] Skipping Renderer test (no input file)")
+
+    print()
+    print("All tests passed!")
+    return 0
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create argument parser with subcommands."""
+    parser = argparse.ArgumentParser(
+        prog="body2colmap-projection",
+        description="Texture projection workflow for circular→helical Canny guidance",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Phase 1: Generate circular orbit for diffusion
+  body2colmap-projection circular input.npz -o ./circular_output
+
+  # Phase 2: Load diffusion output and generate helical guidance
+  body2colmap-projection helical input.npz --diffusion-dir ./circular_output -o ./helical_output
+
+  # Quick test of components
+  body2colmap-projection test
+  body2colmap-projection test input.npz  # with actual mesh
+"""
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- circular subcommand ---
+    circular = subparsers.add_parser(
+        "circular",
+        help="Phase 1: Generate circular orbit views for diffusion input",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    circular.add_argument("input", help="Path to SAM-3D-Body .npz file")
+    circular.add_argument("-o", "--output-dir", required=True, help="Output directory")
+    circular.add_argument("--width", type=int, default=512, help="Render width")
+    circular.add_argument("--height", type=int, default=512, help="Render height")
+    circular.add_argument("--n-frames", type=int, default=36, help="Number of views")
+    circular.add_argument("--elevation", type=float, default=0.0, help="Elevation angle (degrees)")
+    circular.add_argument("--fill-ratio", type=float, default=0.8, help="Frame fill ratio")
+    circular.add_argument("--skeleton", action="store_true", help="Load skeleton data")
+    circular.add_argument("--atlas-size", type=int, default=1024, help="UV atlas size")
+    circular.add_argument("--mesh-color", type=float, nargs=3, help="Mesh RGB color (0-1)")
+    circular.add_argument("--bg-color", type=float, nargs=3, default=[1.0, 1.0, 1.0], help="Background RGB")
+    circular.add_argument("--filename-pattern", default="frame_{:04d}.png", help="Output filename pattern")
+    circular.set_defaults(func=cmd_circular)
+
+    # --- helical subcommand ---
+    helical = subparsers.add_parser(
+        "helical",
+        help="Phase 2: Project Canny and render helical guidance",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    helical.add_argument("input", help="Path to SAM-3D-Body .npz file")
+    helical.add_argument("--diffusion-dir", required=True, help="Directory with diffusion-processed images")
+    helical.add_argument("-o", "--output-dir", required=True, help="Output directory")
+    helical.add_argument("--width", type=int, default=512, help="Render width")
+    helical.add_argument("--height", type=int, default=512, help="Render height")
+
+    # Circular orbit params (must match Phase 1)
+    helical.add_argument("--circular-frames", type=int, default=36, help="Circular orbit frame count (must match Phase 1)")
+    helical.add_argument("--circular-elevation", type=float, default=0.0, help="Circular elevation (must match Phase 1)")
+
+    # Helical orbit params
+    helical.add_argument("--n-frames", type=int, default=120, help="Helical orbit frame count")
+    helical.add_argument("--n-loops", type=int, default=3, help="Number of full rotations")
+    helical.add_argument("--amplitude", type=float, default=30.0, help="Elevation amplitude (degrees)")
+    helical.add_argument("--lead-in", type=float, default=45.0, help="Lead-in azimuth range")
+    helical.add_argument("--lead-out", type=float, default=45.0, help="Lead-out azimuth range")
+    helical.add_argument("--fill-ratio", type=float, default=0.8, help="Frame fill ratio")
+
+    # Canny params
+    helical.add_argument("--canny-low", type=int, default=50, help="Canny low threshold")
+    helical.add_argument("--canny-high", type=int, default=150, help="Canny high threshold")
+    helical.add_argument("--canny-blur", type=int, default=5, help="Canny blur kernel size")
+    helical.add_argument("--uv-method", choices=["cylindrical", "spherical"], default="cylindrical", help="UV generation method")
+
+    # Output options
+    helical.add_argument("--skeleton", action="store_true", help="Include skeleton overlay")
+    helical.add_argument("--include-depth", action="store_true", default=True, help="Include depth base layer")
+    helical.add_argument("--no-depth", dest="include_depth", action="store_false", help="Exclude depth base layer")
+    helical.add_argument("--atlas-size", type=int, default=1024, help="UV atlas size")
+    helical.add_argument("--save-atlas", action="store_true", help="Save Canny atlas image")
+    helical.add_argument("--filename-pattern", default="frame_{:04d}.png", help="Output filename pattern")
+    helical.set_defaults(func=cmd_helical)
+
+    # --- test subcommand ---
+    test = subparsers.add_parser(
+        "test",
+        help="Quick test of pipeline components",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    test.add_argument("input", nargs="?", help="Optional .npz file for full test")
+    test.set_defaults(func=cmd_test)
+
+    return parser
+
+
+def main(argv: Optional[list] = None) -> int:
+    """Main entry point."""
+    parser = create_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        return 0
+
+    try:
+        return args.func(args)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

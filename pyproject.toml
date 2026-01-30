@@ -31,6 +31,7 @@ dependencies = [
     "trimesh>=3.9.0",
     "opencv-python>=4.5.0",
     "scipy>=1.7.0",
+    "Pillow>=8.0.0",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,7 @@ Issues = "https://github.com/yourusername/body2colmap/issues"
 
 [project.scripts]
 body2colmap = "body2colmap.cli:main"
+body2colmap-projection = "body2colmap.projection_cli:main"
 
 [tool.setuptools]
 packages = ["body2colmap"]
