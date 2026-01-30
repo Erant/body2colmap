@@ -125,22 +125,32 @@ def generate_uvs(
     elif method == "spherical":
         return generate_spherical_uvs(vertices, center=kwargs.get("center"))
     elif method == "xatlas":
+        # Use trimesh's built-in unwrap() which uses xatlas internally
         try:
-            import xatlas
+            import trimesh
         except ImportError:
             raise ImportError(
-                "xatlas is required for proper UV unwrapping. "
-                "Install with: pip install xatlas"
+                "trimesh is required for UV unwrapping. "
+                "Install with: pip install trimesh"
             )
-        # xatlas expects vertices and faces
-        vmapping, indices, uvs = xatlas.parametrize(vertices, faces)
-        # Note: xatlas may create new vertices at seams
-        # For simplicity, we'll use cylindrical as fallback if xatlas changes topology
-        if len(uvs) != len(vertices):
-            print(f"Warning: xatlas changed vertex count ({len(vertices)} -> {len(uvs)}), "
-                  f"falling back to cylindrical UVs")
+
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+        try:
+            # trimesh.unwrap() uses xatlas internally
+            unwrapped = mesh.unwrap()
+            uvs = unwrapped.visual.uv
+
+            # xatlas may create new vertices at seams
+            if len(uvs) != len(vertices):
+                print(f"Warning: xatlas changed vertex count ({len(vertices)} -> {len(uvs)}), "
+                      f"falling back to cylindrical UVs")
+                return generate_cylindrical_uvs(vertices)
+            return uvs.astype(np.float32)
+        except Exception as e:
+            # xatlas not installed or failed
+            print(f"Warning: UV unwrapping failed ({e}), falling back to cylindrical UVs")
             return generate_cylindrical_uvs(vertices)
-        return uvs.astype(np.float32)
     else:
         raise ValueError(f"Unknown UV method: {method}. Use 'cylindrical', 'spherical', or 'xatlas'")
 

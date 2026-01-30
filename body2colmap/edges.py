@@ -18,12 +18,19 @@ def _ensure_grayscale(image: NDArray) -> NDArray[np.uint8]:
     """
     Convert image to grayscale if needed.
 
+    Uses cv2.cvtColor for standard cases, with fallback for edge cases.
+
     Args:
         image: Input image, shape (H, W), (H, W, 3), or (H, W, 4)
 
     Returns:
         Grayscale image, shape (H, W), dtype uint8
     """
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError("OpenCV (cv2) is required for grayscale conversion")
+
     if image.ndim == 2:
         # Already grayscale
         if image.dtype != np.uint8:
@@ -34,28 +41,18 @@ def _ensure_grayscale(image: NDArray) -> NDArray[np.uint8]:
         return image
 
     if image.ndim == 3:
-        # RGB or RGBA
+        # Handle float images first
+        if image.dtype != np.uint8:
+            if image.max() <= 1.0:
+                image = (image * 255).astype(np.uint8)
+            else:
+                image = image.astype(np.uint8)
+
+        # Use cv2.cvtColor for conversion
         if image.shape[2] == 4:
-            image = image[:, :, :3]  # Drop alpha
-
-        # Convert to grayscale using luminance weights
-        # Y = 0.299*R + 0.587*G + 0.114*B
-        if image.dtype == np.uint8:
-            gray = (
-                0.299 * image[:, :, 0].astype(np.float32) +
-                0.587 * image[:, :, 1].astype(np.float32) +
-                0.114 * image[:, :, 2].astype(np.float32)
-            ).astype(np.uint8)
-        else:
-            # Assume float [0, 1]
-            gray = (
-                0.299 * image[:, :, 0] +
-                0.587 * image[:, :, 1] +
-                0.114 * image[:, :, 2]
-            )
-            gray = (gray * 255).astype(np.uint8)
-
-        return gray
+            return cv2.cvtColor(image, cv2.COLOR_RGBA2GRAY)
+        elif image.shape[2] == 3:
+            return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
     raise ValueError(f"Unsupported image shape: {image.shape}")
 
