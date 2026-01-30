@@ -358,12 +358,68 @@ class TextureProjector:
             pixel_pos, screen_v0_norm, screen_v1_norm, screen_v2_norm
         )
 
+        # Filter out pixels with invalid barycentric coords (outside triangle)
+        # This can happen due to face_id aliasing at triangle edges
+        bary_valid = (
+            (bary_u >= -0.1) & (bary_u <= 1.1) &
+            (bary_v >= -0.1) & (bary_v <= 1.1) &
+            (bary_w >= -0.1) & (bary_w <= 1.1)
+        )
+
+        if not np.any(bary_valid):
+            return  # No valid pixels
+
+        # Filter all arrays
+        bary_u = bary_u[bary_valid]
+        bary_v = bary_v[bary_valid]
+        bary_w = bary_w[bary_valid]
+        face_uv0 = face_uv0[bary_valid]
+        face_uv1 = face_uv1[bary_valid]
+        face_uv2 = face_uv2[bary_valid]
+        pixel_colors = pixel_colors[bary_valid]
+        valid_face_ids = valid_face_ids[bary_valid]
+        face_v0 = face_v0[bary_valid]
+        face_v1 = face_v1[bary_valid]
+        face_v2 = face_v2[bary_valid]
+
+        # Clamp barycentric coords to [0, 1] for robustness
+        bary_u = np.clip(bary_u, 0, 1)
+        bary_v = np.clip(bary_v, 0, 1)
+        bary_w = np.clip(bary_w, 0, 1)
+        # Renormalize so they sum to 1
+        bary_sum = bary_u + bary_v + bary_w
+        bary_u /= bary_sum
+        bary_v /= bary_sum
+        bary_w /= bary_sum
+
+        # Handle UV seam wraparound for cylindrical mapping
+        # If face UVs span > 0.5 in U, the face crosses the seam
+        u_range = np.max(np.stack([face_uv0[:, 0], face_uv1[:, 0], face_uv2[:, 0]], axis=1), axis=1) - \
+                  np.min(np.stack([face_uv0[:, 0], face_uv1[:, 0], face_uv2[:, 0]], axis=1), axis=1)
+        seam_faces = u_range > 0.5
+
+        # For seam faces, add 1.0 to small U values before interpolation
+        if np.any(seam_faces):
+            face_uv0_adj = face_uv0.copy()
+            face_uv1_adj = face_uv1.copy()
+            face_uv2_adj = face_uv2.copy()
+            face_uv0_adj[seam_faces & (face_uv0[:, 0] < 0.5), 0] += 1.0
+            face_uv1_adj[seam_faces & (face_uv1[:, 0] < 0.5), 0] += 1.0
+            face_uv2_adj[seam_faces & (face_uv2[:, 0] < 0.5), 0] += 1.0
+        else:
+            face_uv0_adj = face_uv0
+            face_uv1_adj = face_uv1
+            face_uv2_adj = face_uv2
+
         # Interpolate UV coordinates using barycentric coords
         uv_coords = (
-            bary_u[:, np.newaxis] * face_uv0 +
-            bary_v[:, np.newaxis] * face_uv1 +
-            bary_w[:, np.newaxis] * face_uv2
+            bary_u[:, np.newaxis] * face_uv0_adj +
+            bary_v[:, np.newaxis] * face_uv1_adj +
+            bary_w[:, np.newaxis] * face_uv2_adj
         )  # Shape: (K, 2)
+
+        # Wrap U back to [0, 1] for seam faces
+        uv_coords[:, 0] = uv_coords[:, 0] % 1.0
 
         # Convert UV to atlas pixel coordinates
         atlas_x = (uv_coords[:, 0] * (self.atlas_width - 1)).astype(np.int32)
