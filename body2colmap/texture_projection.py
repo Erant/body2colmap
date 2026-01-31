@@ -832,23 +832,14 @@ class VertexColorProjector:
             if dots[vi] < -0.1:
                 continue
 
-            # CRITICAL: Flip X coordinate to fix horizontal mirroring.
-            # The projection gives mirrored X coordinates due to the camera coordinate
-            # system: in OpenGL, +X is right in camera space, but the projection and
-            # rendering produce horizontally mirrored results. This causes textures to
-            # appear "backwards" (front of head texture on back of mesh).
+            # CRITICAL: Flip X coordinate for IMAGE sampling to fix horizontal mirroring.
+            # The source images have mirrored X due to camera coordinate conventions.
+            # But the DEPTH BUFFER is rendered with our projection, so it uses original coords.
             px_flipped = w - 1 - px_int
 
-            # Sample color from image using flipped X coordinate
-            color = image[py_int, px_flipped].astype(np.float32)
-
-            # Skip background pixels in source image
-            is_bg = color[:3].min() > 240 or (len(color) > 3 and color[3] < 10)
-            if is_bg:
-                continue
-
-            # Check visibility using depth buffer (also with flipped X)
-            rendered_depth = depth_buffer[py_int, px_flipped]
+            # Check visibility using depth buffer with ORIGINAL coordinates
+            # (depth buffer was rendered with same camera/projection, no mirroring)
+            rendered_depth = depth_buffer[py_int, px_int]
             vertex_depth = vertex_depths[vi]
 
             # If depth buffer shows geometry, check if vertex is approximately at surface
@@ -858,6 +849,14 @@ class VertexColorProjector:
                     continue  # Vertex is significantly behind rendered surface
             # If depth buffer is 0 (background) but source image has content,
             # allow the sample - diffusion may have altered silhouette slightly
+
+            # Sample color from image using FLIPPED X coordinate
+            color = image[py_int, px_flipped].astype(np.float32)
+
+            # Skip background pixels in source image
+            is_bg = color[:3].min() > 240 or (len(color) > 3 and color[3] < 10)
+            if is_bg:
+                continue
 
             # Apply color based on blend mode
             dot = dots[vi]
