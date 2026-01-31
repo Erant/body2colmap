@@ -832,16 +832,24 @@ class VertexColorProjector:
             if dots[vi] < -0.1:
                 continue
 
-            # Sample color from image first
-            color = image[py_int, px_int].astype(np.float32)
+            # CRITICAL: Flip Y coordinate to convert from projection space to image space.
+            # Projection uses OpenCV convention (Y increases downward from top-left),
+            # but pyrender outputs images with Y increasing downward (row 0 = top).
+            # However, the projection math assumes camera +Y points up, while in the
+            # rendered image, things above camera center appear at TOP (low row number).
+            # So we need to flip: py_flipped = (h - 1) - py_int
+            py_flipped = h - 1 - py_int
+
+            # Sample color from image using flipped Y coordinate
+            color = image[py_flipped, px_int].astype(np.float32)
 
             # Skip background pixels in source image
             is_bg = color[:3].min() > 240 or (len(color) > 3 and color[3] < 10)
             if is_bg:
                 continue
 
-            # Check visibility using depth buffer
-            rendered_depth = depth_buffer[py_int, px_int]
+            # Check visibility using depth buffer (also with flipped Y)
+            rendered_depth = depth_buffer[py_flipped, px_int]
             vertex_depth = vertex_depths[vi]
 
             # If depth buffer shows geometry, check if vertex is approximately at surface
