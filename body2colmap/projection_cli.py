@@ -190,9 +190,10 @@ def cmd_helical(args: argparse.Namespace) -> int:
 
     # Render with texture
     mode_desc = "vertex colors" if use_vertex_colors else "texture atlas"
-    print(f"  Rendering composites (depth + {mode_desc} + skeleton)...")
+    skel_desc = " + skeleton" if args.skeleton else ""
+    print(f"  Rendering composites ({args.base_mode} + {mode_desc}{skel_desc})...")
     guidance_images = pipeline.render_helical_with_texture(
-        base_mode="depth" if args.include_depth else "mesh",
+        base_mode=args.base_mode,
         include_texture=True,
         include_skeleton=args.skeleton,
         use_vertex_colors=use_vertex_colors
@@ -384,8 +385,8 @@ Examples:
     helical.add_argument("--circular-elevation", type=float, default=0.0, help="Circular elevation (must match Phase 1)")
 
     # Helical orbit params
-    helical.add_argument("--n-frames", type=int, default=120, help="Helical orbit frame count")
-    helical.add_argument("--n-loops", type=int, default=3, help="Number of full rotations")
+    helical.add_argument("--n-frames", type=int, default=81, help="Helical orbit frame count")
+    helical.add_argument("--n-loops", type=int, default=2, help="Number of full rotations")
     helical.add_argument("--amplitude", type=float, default=30.0, help="Elevation amplitude (degrees)")
     helical.add_argument("--lead-in", type=float, default=45.0, help="Lead-in azimuth range")
     helical.add_argument("--lead-out", type=float, default=45.0, help="Lead-out azimuth range")
@@ -404,10 +405,11 @@ Examples:
     helical.add_argument("--use-vertex-colors", action="store_true",
                         help="Use vertex colors instead of texture atlas (avoids UV overlap issues)")
 
-    # Output options
-    helical.add_argument("--skeleton", action="store_true", help="Include skeleton overlay")
-    helical.add_argument("--include-depth", action="store_true", default=True, help="Include depth base layer")
-    helical.add_argument("--no-depth", dest="include_depth", action="store_false", help="Exclude depth base layer")
+    # Output options - defaults: mesh base + skeleton
+    helical.add_argument("--skeleton", action="store_true", default=True, help="Include skeleton overlay (default)")
+    helical.add_argument("--no-skeleton", dest="skeleton", action="store_false", help="Exclude skeleton overlay")
+    helical.add_argument("--base-mode", choices=["mesh", "depth", "normals"], default="mesh",
+                        help="Base layer type (default: mesh)")
     helical.add_argument("--atlas-size", type=int, default=1024, help="UV atlas size")
     helical.add_argument("--save-atlas", action="store_true", help="Save texture atlas image")
     helical.add_argument("--filename-pattern", default="frame_{:04d}.png", help="Output filename pattern")
