@@ -779,7 +779,7 @@ class VertexColorProjector:
         depth_buffer: NDArray[np.float32],
         camera: 'Camera',
         blend_mode: str = "best_angle",
-        depth_tolerance: float = 0.1
+        depth_tolerance: float = 0.02
     ) -> None:
         """
         Project colors directly to vertices using depth buffer visibility.
@@ -795,7 +795,7 @@ class VertexColorProjector:
             depth_buffer: Depth buffer from same camera, shape (H, W)
             camera: Camera that captured the image
             blend_mode: "best_angle", "average", or "replace"
-            depth_tolerance: Tolerance for depth comparison (relative, default 10%)
+            depth_tolerance: Absolute tolerance for depth comparison in meters (default 2cm)
         """
         h, w = depth_buffer.shape
 
@@ -844,9 +844,9 @@ class VertexColorProjector:
 
             # If depth buffer shows geometry, check if vertex is approximately at surface
             if rendered_depth > 0:
-                # Allow generous tolerance (10% by default)
-                if vertex_depth > rendered_depth * (1 + depth_tolerance):
-                    continue  # Vertex is significantly behind rendered surface
+                # Absolute tolerance in meters (default 2cm) - prevents arm/torso bleed
+                if vertex_depth > rendered_depth + depth_tolerance:
+                    continue  # Vertex is behind rendered surface (occluded)
             # If depth buffer is 0 (background) but source image has content,
             # allow the sample - diffusion may have altered silhouette slightly
 
