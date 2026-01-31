@@ -763,8 +763,8 @@ class ProjectionPipeline:
             # Skeleton overlay
             if include_skeleton and self.scene.skeleton_joints is not None:
                 skel_defaults = {
-                    "joint_radius": 0.015,
-                    "bone_radius": 0.008,
+                    "joint_radius": 0.006,
+                    "bone_radius": 0.003,
                     "use_openpose_colors": True
                 }
                 if skeleton_opts:
@@ -840,8 +840,8 @@ class ProjectionPipeline:
 
             if include_skeleton and self.scene.skeleton_joints is not None:
                 skel_defaults = {
-                    "joint_radius": 0.015,
-                    "bone_radius": 0.008,
+                    "joint_radius": 0.006,
+                    "bone_radius": 0.003,
                     "use_openpose_colors": True
                 }
                 if skeleton_opts:

@@ -63,8 +63,8 @@ def cmd_circular(args: argparse.Namespace) -> int:
             modes = {"depth": {"normalize": True}}
             if pipeline.scene.skeleton_joints is not None:
                 modes["skeleton"] = {
-                    "joint_radius": 0.015,
-                    "bone_radius": 0.008,
+                    "joint_radius": 0.006,
+                    "bone_radius": 0.003,
                     "use_openpose_colors": True
                 }
             image = renderer.render_composite(camera, modes)
