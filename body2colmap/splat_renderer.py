@@ -250,14 +250,16 @@ class SplatRenderer:
                 C2[4] * (xx - yy).unsqueeze(-1) * sh_coeffs[:, 8, :]
 
         if sh_degree >= 3 and sh_coeffs.shape[1] >= 16:
+            # IMPORTANT: Compute scalar terms first, then unsqueeze to avoid
+            # broadcasting (N,) * (N, 1) -> (N, N) which explodes memory
             result = result + \
-                C3[0] * y * (3.0 * xx - yy).unsqueeze(-1) * sh_coeffs[:, 9, :] + \
-                C3[1] * xy * z.unsqueeze(-1) * sh_coeffs[:, 10, :] + \
-                C3[2] * y * (4.0 * zz - xx - yy).unsqueeze(-1) * sh_coeffs[:, 11, :] + \
-                C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy).unsqueeze(-1) * sh_coeffs[:, 12, :] + \
-                C3[4] * x * (4.0 * zz - xx - yy).unsqueeze(-1) * sh_coeffs[:, 13, :] + \
-                C3[5] * z * (xx - yy).unsqueeze(-1) * sh_coeffs[:, 14, :] + \
-                C3[6] * x * (xx - 3.0 * yy).unsqueeze(-1) * sh_coeffs[:, 15, :]
+                C3[0] * (y * (3.0 * xx - yy)).unsqueeze(-1) * sh_coeffs[:, 9, :] + \
+                C3[1] * (xy * z).unsqueeze(-1) * sh_coeffs[:, 10, :] + \
+                C3[2] * (y * (4.0 * zz - xx - yy)).unsqueeze(-1) * sh_coeffs[:, 11, :] + \
+                C3[3] * (z * (2.0 * zz - 3.0 * xx - 3.0 * yy)).unsqueeze(-1) * sh_coeffs[:, 12, :] + \
+                C3[4] * (x * (4.0 * zz - xx - yy)).unsqueeze(-1) * sh_coeffs[:, 13, :] + \
+                C3[5] * (z * (xx - yy)).unsqueeze(-1) * sh_coeffs[:, 14, :] + \
+                C3[6] * (x * (xx - 3.0 * yy)).unsqueeze(-1) * sh_coeffs[:, 15, :]
 
         # Add 0.5 bias and clamp to valid color range
         result = result + 0.5
