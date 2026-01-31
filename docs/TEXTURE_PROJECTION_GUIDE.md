@@ -71,16 +71,18 @@ px, py = int(round(projected[0])), int(round(projected[1]))
 rendered_depth = depth_buffer[py, px]
 vertex_depth = compute_vertex_depth(vertex, camera)
 
-# Visible if vertex is at or in front of rendered surface
-if vertex_depth <= rendered_depth * (1 + tolerance):
+# Visible if vertex is at or in front of rendered surface (2cm tolerance)
+if vertex_depth <= rendered_depth + 0.02:  # Absolute tolerance in meters
     # Vertex is visible from this camera
 ```
 
 ### 4. Depth Tolerance and Backface Culling
 
-**Lesson**: Be generous with tolerances
+**Lesson**: Use absolute tolerance for depth, not relative
 
-- **Depth tolerance**: 10% works well (`vertex_depth <= rendered_depth * 1.1`)
+- **Depth tolerance**: Use **absolute** 2cm (`vertex_depth <= rendered_depth + 0.02`)
+  - Relative 10% at 2.5m = 25cm tolerance → arm/torso color bleed
+  - Absolute 2cm handles mesh discretization without allowing nearby body parts to bleed
 - **Backface culling**: Allow `dot > -0.1` (slightly negative) for grazing angles
 
 Too strict = missing colors on many vertices (gray patches)
@@ -163,7 +165,7 @@ class VertexColorProjector:
         image: NDArray[np.uint8],      # Source image (H, W, 4) RGBA
         depth_buffer: NDArray[np.float32],  # Depth from same camera (H, W)
         camera: Camera,
-        depth_tolerance: float = 0.1
+        depth_tolerance: float = 0.02
     ) -> None:
         """
         Project colors from a single view onto visible vertices.
@@ -172,7 +174,7 @@ class VertexColorProjector:
             image: Source image to sample colors from
             depth_buffer: Rendered depth buffer for visibility testing
             camera: Camera used to render both image and depth buffer
-            depth_tolerance: Relative tolerance for depth comparison (default 10%)
+            depth_tolerance: Absolute tolerance in meters (default 2cm)
         """
         h, w = depth_buffer.shape
 
@@ -201,8 +203,8 @@ class VertexColorProjector:
             # Visibility check using depth buffer (ORIGINAL coordinates)
             rendered_depth = depth_buffer[py, px]
             if rendered_depth > 0:
-                if vertex_depths[vi] > rendered_depth * (1 + depth_tolerance):
-                    continue  # Occluded
+                if vertex_depths[vi] > rendered_depth + depth_tolerance:
+                    continue  # Occluded (absolute tolerance, default 2cm)
 
             # Sample color with X-FLIP (source image coordinate mismatch)
             px_flipped = w - 1 - px
@@ -335,7 +337,7 @@ For the projection pipeline CLI:
 | `--joint-radius` | 0.006 | Subtle overlay |
 | `--bone-radius` | 0.003 | Subtle overlay |
 | `--blend-mode` | best_angle | Use best view per vertex |
-| `--depth-tolerance` | 0.1 | 10% for robust visibility |
+| `--depth-tolerance` | 0.02 | 2cm absolute (meters) |
 
 ---
 
