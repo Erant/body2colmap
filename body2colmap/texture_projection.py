@@ -779,7 +779,7 @@ class VertexColorProjector:
         depth_buffer: NDArray[np.float32],
         camera: 'Camera',
         blend_mode: str = "best_angle",
-        depth_tolerance: float = 0.02
+        depth_tolerance: float = 0.1
     ) -> None:
         """
         Project colors directly to vertices using depth buffer visibility.
@@ -795,7 +795,7 @@ class VertexColorProjector:
             depth_buffer: Depth buffer from same camera, shape (H, W)
             camera: Camera that captured the image
             blend_mode: "best_angle", "average", or "replace"
-            depth_tolerance: Tolerance for depth comparison (relative)
+            depth_tolerance: Tolerance for depth comparison (relative, default 10%)
         """
         h, w = depth_buffer.shape
 
@@ -807,7 +807,7 @@ class VertexColorProjector:
         view_dists = np.linalg.norm(view_dirs, axis=1, keepdims=True)
         view_dirs_normalized = view_dirs / np.maximum(view_dists, 1e-8)
 
-        # Dot product (view angle quality)
+        # Dot product (view angle quality) - allow slightly negative for grazing angles
         dots = np.sum(view_dirs_normalized * vertex_normals, axis=1)
 
         # Project all vertices to screen coordinates
@@ -828,8 +828,8 @@ class VertexColorProjector:
             if px_int < 0 or px_int >= w or py_int < 0 or py_int >= h:
                 continue
 
-            # Check if vertex is facing camera (backface culling)
-            if dots[vi] < 0:
+            # Relaxed backface culling - allow slightly negative (grazing angles)
+            if dots[vi] < -0.1:
                 continue
 
             # Check visibility using depth buffer
@@ -839,9 +839,10 @@ class VertexColorProjector:
 
             vertex_depth = vertex_depths[vi]
 
-            # Allow small tolerance for depth comparison
+            # Allow generous tolerance for depth comparison (10% by default)
+            # Accept if vertex is approximately at or in front of rendered surface
             if vertex_depth > rendered_depth * (1 + depth_tolerance):
-                continue  # Vertex is behind rendered surface
+                continue  # Vertex is significantly behind rendered surface
 
             # Sample color from image
             color = image[py_int, px_int].astype(np.float32)
