@@ -141,26 +141,36 @@ def cmd_helical(args: argparse.Namespace) -> int:
         original_cameras = pipeline.circular_cameras
         pipeline.circular_cameras = projection_cameras
 
-    # Generate texture atlas
+    # Generate texture (atlas or vertex colors)
     blend_mode = args.blend_mode
-    print(f"  Generating texture atlas (mode: {args.texture_mode}, blend: {blend_mode})...")
-    atlas = pipeline.generate_texture_atlas_from_images(
-        images=projection_images,
-        mode=args.texture_mode,
-        canny_low=args.canny_low,
-        canny_high=args.canny_high,
-        canny_blur=args.canny_blur,
-        uv_method=args.uv_method,
-        blend_mode=blend_mode
-    )
-    print(f"  Generated atlas: {atlas.shape}")
+    use_vertex_colors = getattr(args, 'use_vertex_colors', False)
+
+    if use_vertex_colors:
+        print(f"  Generating vertex colors (blend: {blend_mode})...")
+        vertex_colors = pipeline.generate_vertex_colors_from_images(
+            images=projection_images,
+            blend_mode=blend_mode
+        )
+        print(f"  Generated vertex colors: {vertex_colors.shape}")
+    else:
+        print(f"  Generating texture atlas (mode: {args.texture_mode}, blend: {blend_mode})...")
+        atlas = pipeline.generate_texture_atlas_from_images(
+            images=projection_images,
+            mode=args.texture_mode,
+            canny_low=args.canny_low,
+            canny_high=args.canny_high,
+            canny_blur=args.canny_blur,
+            uv_method=args.uv_method,
+            blend_mode=blend_mode
+        )
+        print(f"  Generated atlas: {atlas.shape}")
 
     # Restore original cameras if we overrode them
     if args.projection_frames is not None and args.projection_frames < len(images):
         pipeline.circular_cameras = original_cameras
 
-    # Save atlas if requested
-    if args.save_atlas:
+    # Save atlas if requested (only for texture atlas mode)
+    if args.save_atlas and not use_vertex_colors:
         atlas_path = Path(args.output_dir) / f"texture_atlas_{args.texture_mode}.png"
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         from PIL import Image
@@ -179,11 +189,13 @@ def cmd_helical(args: argparse.Namespace) -> int:
     print(f"  Set up {len(pipeline.helical_cameras)} helical cameras")
 
     # Render with texture
-    print(f"  Rendering composites (depth + texture + skeleton)...")
+    mode_desc = "vertex colors" if use_vertex_colors else "texture atlas"
+    print(f"  Rendering composites (depth + {mode_desc} + skeleton)...")
     guidance_images = pipeline.render_helical_with_texture(
         base_mode="depth" if args.include_depth else "mesh",
         include_texture=True,
-        include_skeleton=args.skeleton
+        include_skeleton=args.skeleton,
+        use_vertex_colors=use_vertex_colors
     )
     print(f"  Rendered {len(guidance_images)} images")
 
@@ -389,6 +401,8 @@ Examples:
     helical.add_argument("--uv-method", choices=["cylindrical", "spherical"], default="cylindrical", help="UV generation method")
     helical.add_argument("--projection-frames", type=int, default=None,
                         help="Number of frames to use for projection (default: all circular frames). Use 4-8 for sharper results.")
+    helical.add_argument("--use-vertex-colors", action="store_true",
+                        help="Use vertex colors instead of texture atlas (avoids UV overlap issues)")
 
     # Output options
     helical.add_argument("--skeleton", action="store_true", help="Include skeleton overlay")

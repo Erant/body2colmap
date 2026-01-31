@@ -815,6 +815,74 @@ class Renderer:
 
         return color
 
+    def render_vertex_colors(
+        self,
+        camera: Camera,
+        vertex_colors: NDArray[np.uint8],
+        bg_color: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    ) -> NDArray[np.uint8]:
+        """
+        Render mesh with vertex colors applied.
+
+        This is an alternative to texture-based rendering that avoids
+        UV overlap issues by storing colors directly on vertices.
+
+        Args:
+            camera: Camera to render from
+            vertex_colors: Colors per vertex, shape (num_vertices, 4), RGBA uint8
+            bg_color: Background color RGBA (0-1 range)
+
+        Returns:
+            RGBA image, shape (height, width, 4), dtype uint8
+        """
+        try:
+            import pyribbit as pyrender
+            import trimesh
+        except ImportError:
+            raise ImportError(
+                "pyribbit and trimesh are required. "
+                "Install with: pip install pyribbit trimesh"
+            )
+
+        # Create trimesh with vertex colors
+        mesh_tm = trimesh.Trimesh(
+            vertices=self.scene.vertices,
+            faces=self.scene.faces,
+            process=False
+        )
+        mesh_tm.visual.vertex_colors = vertex_colors
+
+        # Create pyrender scene
+        bg_rgba = [
+            bg_color[0], bg_color[1], bg_color[2],
+            bg_color[3] if len(bg_color) > 3 else 0.0
+        ]
+        pr_scene = pyrender.Scene(
+            bg_color=bg_rgba,
+            ambient_light=[1.0, 1.0, 1.0]  # Full ambient for color visibility
+        )
+
+        # Create pyrender mesh - use smooth=True for interpolated vertex colors
+        pr_mesh = pyrender.Mesh.from_trimesh(mesh_tm, smooth=True)
+        pr_scene.add(pr_mesh)
+
+        # Add camera
+        pr_camera = pyrender.PerspectiveCamera(
+            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
+            aspectRatio=self.width / self.height
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        # Render
+        renderer = self._get_pyrender_renderer()
+        color, depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
+
+        # Ensure writable
+        if not color.flags.writeable:
+            color = np.array(color, copy=True)
+
+        return color
+
     def render_composite(
         self,
         camera: Camera,
@@ -917,6 +985,31 @@ class Renderer:
             ).astype(np.uint8)
 
             # Keep base layer's alpha (textured doesn't affect masking)
+
+        # Overlay vertex-colored mesh if requested (alternative to textured)
+        if "vertex_colors" in modes:
+            vc_opts = modes["vertex_colors"] if isinstance(modes["vertex_colors"], dict) else {}
+
+            colors = vc_opts.get("colors")
+
+            if colors is None:
+                raise ValueError(
+                    "vertex_colors mode requires 'colors' (RGBA array per vertex)"
+                )
+
+            # Render vertex-colored mesh with transparent background
+            vc_image = self.render_vertex_colors(
+                camera,
+                vertex_colors=colors,
+                bg_color=(0.0, 0.0, 0.0, 0.0)
+            )
+
+            # Composite over base using alpha blending
+            vc_alpha = vc_image[:, :, 3:4] / 255.0
+            base_image[:, :, :3] = (
+                vc_image[:, :, :3] * vc_alpha +
+                base_image[:, :, :3] * (1 - vc_alpha)
+            ).astype(np.uint8)
 
         # Overlay skeleton if requested
         if "skeleton" in modes and self.scene.skeleton_joints is not None:

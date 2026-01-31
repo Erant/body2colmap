@@ -552,6 +552,64 @@ class ProjectionPipeline:
 
         return atlas
 
+    def generate_vertex_colors_from_images(
+        self,
+        images: Optional[List[NDArray[np.uint8]]] = None,
+        blend_mode: str = "best_angle"
+    ) -> NDArray[np.uint8]:
+        """
+        Generate vertex colors from diffusion-processed images.
+
+        This is an alternative to texture atlas that avoids UV overlap issues
+        inherent in cylindrical UV mapping. Colors are stored directly on
+        vertices and interpolated during rendering.
+
+        Args:
+            images: List of images to process. If None, uses cached images.
+            blend_mode: Blending mode ("best_angle", "average", "replace")
+
+        Returns:
+            Vertex colors, shape (num_vertices, 4), RGBA uint8
+        """
+        if images is None:
+            images = getattr(self, '_diffusion_images', None)
+
+        if images is None:
+            raise RuntimeError(
+                "No images to process. Call load_diffusion_images() first, "
+                "or pass images directly."
+            )
+
+        if self.circular_cameras is None:
+            raise RuntimeError("Circular cameras not set.")
+
+        if len(images) != len(self.circular_cameras):
+            raise ValueError(
+                f"Number of images ({len(images)}) doesn't match "
+                f"number of cameras ({len(self.circular_cameras)})"
+            )
+
+        renderer = self._get_renderer()
+
+        # Create vertex color projector
+        projector = tex_proj.VertexColorProjector(
+            self.scene.vertices,
+            self.scene.faces
+        )
+
+        # Process each view
+        for camera, image in zip(self.circular_cameras, images):
+            # Render face IDs for this camera view
+            face_ids = renderer.render_face_ids(camera)
+
+            # Project onto vertex colors
+            projector.project_view(image, camera, face_ids, blend_mode)
+
+        # Get and store vertex colors
+        self.vertex_colors = projector.get_vertex_colors()
+
+        return self.vertex_colors
+
     # =========================================================================
     # PHASE 2 continued: Set up helical orbit and render with Canny
     # =========================================================================
@@ -612,7 +670,8 @@ class ProjectionPipeline:
         include_skeleton: bool = True,
         depth_colormap: Optional[str] = None,
         normal_space: str = "camera",
-        skeleton_opts: Optional[Dict[str, Any]] = None
+        skeleton_opts: Optional[Dict[str, Any]] = None,
+        use_vertex_colors: bool = False
     ) -> List[NDArray[np.uint8]]:
         """
         Render helical orbit views with projected texture overlay.
@@ -627,6 +686,8 @@ class ProjectionPipeline:
             depth_colormap: Colormap for depth (None = grayscale)
             normal_space: Normal map space ("camera" or "world")
             skeleton_opts: Skeleton rendering options
+            use_vertex_colors: Use vertex colors instead of texture atlas
+                              (avoids UV overlap issues with cylindrical UVs)
 
         Returns:
             List of composite RGBA images, one per helical camera
@@ -634,17 +695,27 @@ class ProjectionPipeline:
         Raises:
             RuntimeError: If texture requested but atlas not generated
         """
-        # Get texture atlas (prefer texture_atlas, fall back to canny_atlas)
-        # Use explicit None check instead of 'or' to avoid numpy array truth value error
-        texture_atlas = getattr(self, 'texture_atlas', None)
-        if texture_atlas is None:
-            texture_atlas = self.canny_atlas
+        # Get texture data (atlas or vertex colors)
+        texture_atlas = None
+        vertex_colors = None
 
-        if include_texture and (texture_atlas is None or self.uv_coords is None):
-            raise RuntimeError(
-                "Texture atlas not generated. Call generate_texture_atlas_from_images() "
-                "or generate_canny_atlas_from_images() first."
-            )
+        if use_vertex_colors:
+            vertex_colors = getattr(self, 'vertex_colors', None)
+            if include_texture and vertex_colors is None:
+                raise RuntimeError(
+                    "Vertex colors not generated. Call generate_vertex_colors_from_images() first."
+                )
+        else:
+            # Use texture atlas (prefer texture_atlas, fall back to canny_atlas)
+            texture_atlas = getattr(self, 'texture_atlas', None)
+            if texture_atlas is None:
+                texture_atlas = self.canny_atlas
+
+            if include_texture and (texture_atlas is None or self.uv_coords is None):
+                raise RuntimeError(
+                    "Texture atlas not generated. Call generate_texture_atlas_from_images() "
+                    "or generate_canny_atlas_from_images() first."
+                )
 
         if self.helical_cameras is None:
             raise RuntimeError(
@@ -676,12 +747,17 @@ class ProjectionPipeline:
             else:
                 raise ValueError(f"Unknown base_mode: {base_mode}")
 
-            # Textured overlay: projected texture
+            # Textured overlay: projected texture (atlas or vertex colors)
             if include_texture:
-                modes["textured"] = {
-                    "texture": texture_atlas,
-                    "uv_coords": self.uv_coords
-                }
+                if use_vertex_colors:
+                    modes["vertex_colors"] = {
+                        "colors": vertex_colors
+                    }
+                else:
+                    modes["textured"] = {
+                        "texture": texture_atlas,
+                        "uv_coords": self.uv_coords
+                    }
 
             # Skeleton overlay
             if include_skeleton and self.scene.skeleton_joints is not None:

@@ -649,3 +649,149 @@ def project_edges_to_atlas(
             projector.project_view(edge_img, camera, face_ids, blend_mode)
 
     return projector.get_atlas(), uv_coords
+
+
+class VertexColorProjector:
+    """
+    Projects rendered images directly to vertex colors.
+
+    Unlike TextureProjector which uses a UV atlas (prone to overlap issues
+    with cylindrical UVs), this class stores colors per-vertex directly.
+    This avoids UV overlap problems at the cost of per-vertex resolution.
+
+    Each vertex accumulates color from views where its faces are visible.
+    """
+
+    def __init__(
+        self,
+        vertices: NDArray[np.float32],
+        faces: NDArray[np.int32]
+    ):
+        """
+        Initialize VertexColorProjector.
+
+        Args:
+            vertices: Mesh vertices, shape (N, 3)
+            faces: Mesh face indices, shape (M, 3)
+        """
+        self.vertices = vertices
+        self.faces = faces
+        self.num_vertices = len(vertices)
+        self.num_faces = len(faces)
+
+        # Pre-compute face normals for view-angle weighting
+        self._precompute_face_normals()
+
+        # Initialize vertex color accumulator
+        self._vertex_colors = np.zeros((self.num_vertices, 4), dtype=np.float32)
+        self._vertex_weights = np.zeros(self.num_vertices, dtype=np.float32)
+        self._vertex_best_angle = np.full(self.num_vertices, -1.0, dtype=np.float32)
+
+    def _precompute_face_normals(self):
+        """Pre-compute face normals for view-angle calculations."""
+        v0 = self.vertices[self.faces[:, 0]]
+        v1 = self.vertices[self.faces[:, 1]]
+        v2 = self.vertices[self.faces[:, 2]]
+
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        normals = np.cross(edge1, edge2)
+
+        lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+        lengths = np.maximum(lengths, 1e-8)
+        self.face_normals = normals / lengths
+
+    def project_view(
+        self,
+        image: NDArray[np.uint8],
+        camera: 'Camera',
+        face_ids: NDArray[np.int32],
+        blend_mode: str = "best_angle"
+    ) -> None:
+        """
+        Project a single view onto vertex colors.
+
+        Args:
+            image: Source image, shape (H, W, C), RGBA uint8
+            camera: Camera that captured the image
+            face_ids: Face ID buffer, shape (H, W)
+            blend_mode: "best_angle", "average", or "replace"
+        """
+        h, w = face_ids.shape
+
+        # Get all pixels with valid face IDs
+        valid_mask = (face_ids >= 0) & (face_ids < self.num_faces)
+
+        if not np.any(valid_mask):
+            return
+
+        valid_face_ids = face_ids[valid_mask]
+        valid_colors = image[valid_mask].astype(np.float32)
+
+        # Filter out background pixels
+        is_white = (valid_colors[:, :3].min(axis=1) > 240)
+        is_transparent = (valid_colors[:, 3] < 10) if valid_colors.shape[1] > 3 else np.zeros(len(valid_colors), dtype=bool)
+        is_background = is_white | is_transparent
+
+        valid_colors = valid_colors[~is_background]
+        valid_face_ids = valid_face_ids[~is_background]
+
+        if len(valid_face_ids) == 0:
+            return
+
+        # Compute view angles for each face
+        face_centers = self.vertices[self.faces].mean(axis=1)
+        view_dirs = camera.position - face_centers
+        view_dirs = view_dirs / np.linalg.norm(view_dirs, axis=1, keepdims=True)
+        face_dot_products = np.abs(np.sum(view_dirs * self.face_normals, axis=1))
+
+        # Process each visible face
+        unique_faces = np.unique(valid_face_ids)
+
+        for face_id in unique_faces:
+            # Get median color for this face
+            face_mask = valid_face_ids == face_id
+            face_pixels = valid_colors[face_mask]
+
+            if len(face_pixels) == 0:
+                continue
+
+            face_color = np.median(face_pixels, axis=0)
+            dot = face_dot_products[face_id]
+
+            # Apply color to all 3 vertices of this face
+            vertex_indices = self.faces[face_id]
+
+            for vi in vertex_indices:
+                if blend_mode == "best_angle":
+                    if dot > self._vertex_best_angle[vi]:
+                        self._vertex_best_angle[vi] = dot
+                        self._vertex_colors[vi] = face_color
+                elif blend_mode == "average":
+                    self._vertex_colors[vi] += face_color
+                    self._vertex_weights[vi] += 1
+                elif blend_mode == "replace":
+                    self._vertex_colors[vi] = face_color
+
+    def get_vertex_colors(self) -> NDArray[np.uint8]:
+        """
+        Get the accumulated vertex colors.
+
+        Returns:
+            Vertex colors, shape (num_vertices, 4), RGBA uint8
+        """
+        colors = self._vertex_colors.copy()
+
+        # Handle averaging
+        mask = self._vertex_weights > 0
+        if np.any(mask):
+            for c in range(4):
+                colors[mask, c] /= self._vertex_weights[mask]
+
+        return np.clip(colors, 0, 255).astype(np.uint8)
+
+    def reset(self) -> None:
+        """Reset the accumulator."""
+        self._vertex_colors.fill(0)
+        self._vertex_weights.fill(0)
+        self._vertex_best_angle.fill(-1.0)
