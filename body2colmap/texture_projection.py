@@ -337,9 +337,22 @@ class TextureProjector:
 
         # Process each visible face
         for face_id in unique_faces:
-            # Get average color for this face
+            # Get colors for this face's pixels
             face_mask = valid_face_ids == face_id
-            face_color = valid_colors[face_mask].mean(axis=0)
+            face_pixels = valid_colors[face_mask]
+
+            # Filter out background pixels (near-white or low alpha)
+            # Background typically has RGB values > 240 or alpha < 10
+            is_white = (face_pixels[:, :3].min(axis=1) > 240)
+            is_transparent = (face_pixels[:, 3] < 10) if face_pixels.shape[1] > 3 else np.zeros(len(face_pixels), dtype=bool)
+            is_background = is_white | is_transparent
+
+            # Only use non-background pixels
+            non_bg_pixels = face_pixels[~is_background]
+            if len(non_bg_pixels) == 0:
+                continue  # Skip this face if all pixels are background
+
+            face_color = non_bg_pixels.mean(axis=0)
 
             # Get UV coordinates for this face's vertices
             uv0, uv1, uv2 = self.face_uvs[face_id]  # Each is (2,)
