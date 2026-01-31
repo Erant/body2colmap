@@ -56,15 +56,30 @@ def main(argv: Optional[list] = None) -> int:
         print("=" * 60)
 
     try:
-        # Load scene
+        # Load scene - detect file type from extension
         if args.verbose:
             print("\n[1/4] Loading scene...")
 
-        pipeline = OrbitPipeline.from_npz_file(
-            config.input_file,
-            render_size=config.render.resolution,
-            include_skeleton=config.skeleton.enabled
-        )
+        input_path = Path(config.input_file)
+        input_ext = input_path.suffix.lower()
+
+        if input_ext == '.ply':
+            # Gaussian Splat PLY file
+            pipeline = OrbitPipeline.from_ply_file(
+                config.input_file,
+                render_size=config.render.resolution
+            )
+            is_splat = True
+        elif input_ext == '.npz':
+            # SAM-3D-Body NPZ file
+            pipeline = OrbitPipeline.from_npz_file(
+                config.input_file,
+                render_size=config.render.resolution,
+                include_skeleton=config.skeleton.enabled
+            )
+            is_splat = False
+        else:
+            raise ValueError(f"Unsupported input file type: {input_ext}. Use .npz or .ply")
 
         if args.verbose:
             print(f"  Loaded: {pipeline.scene}")
@@ -102,52 +117,70 @@ def main(argv: Optional[list] = None) -> int:
         # Render
         if args.verbose:
             print("\n[3/4] Rendering frames...")
-            print(f"  Modes: {', '.join(config.render.modes)}")
 
-        # Parse render modes and handle composites
         rendered = {}
-        for mode_str in config.render.modes:
-            if '+' in mode_str:
-                # Composite mode (e.g., "mesh+skeleton" or "depth+skeleton")
-                parts = mode_str.split('+')
-                base_mode = parts[0].strip()
-                overlay_modes = [p.strip() for p in parts[1:]]
 
-                # Build composite rendering configuration
-                composite_modes = {base_mode: {}}
+        if is_splat:
+            # Splat rendering - only "splat" mode supported
+            if args.verbose:
+                print("  Mode: splat")
 
-                if base_mode == "mesh":
-                    composite_modes[base_mode]["color"] = config.render.mesh_color
-                    composite_modes[base_mode]["bg_color"] = config.render.bg_color
+            mode_rendered = pipeline.render_all(
+                modes=["splat"],
+                bg_color=config.render.bg_color
+            )
+            rendered.update(mode_rendered)
 
-                # Add overlays
-                for overlay in overlay_modes:
-                    if overlay == "skeleton":
-                        composite_modes["skeleton"] = {
-                            "joint_radius": config.skeleton.joint_radius,
-                            "bone_radius": config.skeleton.bone_radius,
-                            "use_openpose_colors": True,
-                            "target_format": config.skeleton.format
-                        }
+            if args.verbose:
+                print(f"  Rendered {len(mode_rendered.get('splat', []))} splat frames")
+        else:
+            # Mesh rendering - supports mesh, depth, skeleton, composites
+            if args.verbose:
+                print(f"  Modes: {', '.join(config.render.modes)}")
 
-                # Render composite for all frames
-                mode_images = pipeline.render_composite_all(composite_modes)
-                rendered[mode_str] = mode_images
+            # Parse render modes and handle composites
+            for mode_str in config.render.modes:
+                if '+' in mode_str:
+                    # Composite mode (e.g., "mesh+skeleton" or "depth+skeleton")
+                    parts = mode_str.split('+')
+                    base_mode = parts[0].strip()
+                    overlay_modes = [p.strip() for p in parts[1:]]
 
-                if args.verbose:
-                    print(f"  Rendered {len(mode_images)} {mode_str} frames")
-            else:
-                # Single mode rendering
-                mode_rendered = pipeline.render_all(
-                    modes=[mode_str],
-                    mesh_color=config.render.mesh_color,
-                    bg_color=config.render.bg_color
-                )
-                rendered.update(mode_rendered)
+                    # Build composite rendering configuration
+                    composite_modes = {base_mode: {}}
 
-                if args.verbose:
-                    for mode, images in mode_rendered.items():
-                        print(f"  Rendered {len(images)} {mode} frames")
+                    if base_mode == "mesh":
+                        composite_modes[base_mode]["color"] = config.render.mesh_color
+                        composite_modes[base_mode]["bg_color"] = config.render.bg_color
+
+                    # Add overlays
+                    for overlay in overlay_modes:
+                        if overlay == "skeleton":
+                            composite_modes["skeleton"] = {
+                                "joint_radius": config.skeleton.joint_radius,
+                                "bone_radius": config.skeleton.bone_radius,
+                                "use_openpose_colors": True,
+                                "target_format": config.skeleton.format
+                            }
+
+                    # Render composite for all frames
+                    mode_images = pipeline.render_composite_all(composite_modes)
+                    rendered[mode_str] = mode_images
+
+                    if args.verbose:
+                        print(f"  Rendered {len(mode_images)} {mode_str} frames")
+                else:
+                    # Single mode rendering
+                    mode_rendered = pipeline.render_all(
+                        modes=[mode_str],
+                        mesh_color=config.render.mesh_color,
+                        bg_color=config.render.bg_color
+                    )
+                    rendered.update(mode_rendered)
+
+                    if args.verbose:
+                        for mode, images in mode_rendered.items():
+                            print(f"  Rendered {len(images)} {mode} frames")
 
         # Export
         if args.verbose:
