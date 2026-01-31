@@ -219,6 +219,41 @@ class Renderer:
 
         return color
 
+    def render_depth_raw(
+        self,
+        camera: Camera
+    ) -> NDArray[np.float32]:
+        """
+        Render raw depth buffer (linear depth values).
+
+        Args:
+            camera: Camera to render from
+
+        Returns:
+            Depth buffer, shape (height, width), dtype float32
+            Values are linear depth in world units, 0 for background
+        """
+        try:
+            import pyribbit as pyrender
+        except ImportError:
+            raise ImportError("pyribbit is required")
+
+        # Create scene
+        pr_scene = self._create_pyrender_scene()
+
+        # Add camera
+        pr_camera = pyrender.PerspectiveCamera(
+            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
+            aspectRatio=self.width / self.height
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        # Render
+        renderer = self._get_pyrender_renderer()
+        _, depth = renderer.render(pr_scene)
+
+        return depth.astype(np.float32)
+
     def render_depth(
         self,
         camera: Camera,

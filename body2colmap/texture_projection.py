@@ -773,6 +773,113 @@ class VertexColorProjector:
                 elif blend_mode == "replace":
                     self._vertex_colors[vi] = face_color
 
+    def project_view_direct(
+        self,
+        image: NDArray[np.uint8],
+        depth_buffer: NDArray[np.float32],
+        camera: 'Camera',
+        blend_mode: str = "best_angle",
+        depth_tolerance: float = 0.02
+    ) -> None:
+        """
+        Project colors directly to vertices using depth buffer visibility.
+
+        This method avoids face_id buffers entirely, eliminating errors from
+        anti-aliasing. Instead, it:
+        1. Projects each vertex to screen coordinates
+        2. Checks visibility using depth buffer comparison
+        3. Samples color directly at the projected pixel
+
+        Args:
+            image: Source image, shape (H, W, C), RGBA uint8
+            depth_buffer: Depth buffer from same camera, shape (H, W)
+            camera: Camera that captured the image
+            blend_mode: "best_angle", "average", or "replace"
+            depth_tolerance: Tolerance for depth comparison (relative)
+        """
+        h, w = depth_buffer.shape
+
+        # Compute vertex normals for view-angle weighting
+        vertex_normals = self._compute_vertex_normals()
+
+        # View direction for each vertex
+        view_dirs = camera.position - self.vertices
+        view_dists = np.linalg.norm(view_dirs, axis=1, keepdims=True)
+        view_dirs_normalized = view_dirs / np.maximum(view_dists, 1e-8)
+
+        # Dot product (view angle quality)
+        dots = np.sum(view_dirs_normalized * vertex_normals, axis=1)
+
+        # Project all vertices to screen coordinates
+        projected = camera.project(self.vertices)  # Shape: (N, 2)
+
+        # Get depth of each vertex in camera space
+        # Transform vertices to camera space
+        w2c = camera.get_w2c()
+        vertices_h = np.hstack([self.vertices, np.ones((self.num_vertices, 1))])
+        vertices_cam = (w2c @ vertices_h.T).T[:, :3]
+        vertex_depths = -vertices_cam[:, 2]  # Negate because camera looks down -Z
+
+        for vi in range(self.num_vertices):
+            px, py = projected[vi]
+            px_int, py_int = int(round(px)), int(round(py))
+
+            # Check if in frame
+            if px_int < 0 or px_int >= w or py_int < 0 or py_int >= h:
+                continue
+
+            # Check if vertex is facing camera (backface culling)
+            if dots[vi] < 0:
+                continue
+
+            # Check visibility using depth buffer
+            rendered_depth = depth_buffer[py_int, px_int]
+            if rendered_depth == 0:  # Background
+                continue
+
+            vertex_depth = vertex_depths[vi]
+
+            # Allow small tolerance for depth comparison
+            if vertex_depth > rendered_depth * (1 + depth_tolerance):
+                continue  # Vertex is behind rendered surface
+
+            # Sample color from image
+            color = image[py_int, px_int].astype(np.float32)
+
+            # Skip background pixels
+            if color[:3].min() > 240 or (len(color) > 3 and color[3] < 10):
+                continue
+
+            # Apply color based on blend mode
+            dot = dots[vi]
+            if blend_mode == "best_angle":
+                if dot > self._vertex_best_angle[vi]:
+                    self._vertex_best_angle[vi] = dot
+                    self._vertex_colors[vi] = color
+            elif blend_mode == "average":
+                self._vertex_colors[vi] += color
+                self._vertex_weights[vi] += 1
+            elif blend_mode == "replace":
+                self._vertex_colors[vi] = color
+
+    def _compute_vertex_normals(self) -> NDArray[np.float32]:
+        """Compute vertex normals by averaging adjacent face normals."""
+        vertex_normals = np.zeros((self.num_vertices, 3), dtype=np.float32)
+        vertex_counts = np.zeros(self.num_vertices, dtype=np.float32)
+
+        for fi in range(self.num_faces):
+            for vi in self.faces[fi]:
+                vertex_normals[vi] += self.face_normals[fi]
+                vertex_counts[vi] += 1
+
+        # Normalize
+        vertex_counts = np.maximum(vertex_counts, 1)[:, np.newaxis]
+        vertex_normals = vertex_normals / vertex_counts
+        lengths = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+        vertex_normals = vertex_normals / np.maximum(lengths, 1e-8)
+
+        return vertex_normals
+
     def get_vertex_colors(self) -> NDArray[np.uint8]:
         """
         Get the accumulated vertex colors.

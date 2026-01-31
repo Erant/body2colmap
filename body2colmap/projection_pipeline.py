@@ -597,13 +597,14 @@ class ProjectionPipeline:
             self.scene.faces
         )
 
-        # Process each view
+        # Process each view using direct depth-based projection
+        # This avoids face_id buffer issues from anti-aliasing
         for camera, image in zip(self.circular_cameras, images):
-            # Render face IDs for this camera view
-            face_ids = renderer.render_face_ids(camera)
+            # Render depth buffer for visibility testing
+            depth_buffer = renderer.render_depth_raw(camera)
 
-            # Project onto vertex colors
-            projector.project_view(image, camera, face_ids, blend_mode)
+            # Project directly to vertices using depth visibility
+            projector.project_view_direct(image, depth_buffer, camera, blend_mode)
 
         # Get and store vertex colors
         self.vertex_colors = projector.get_vertex_colors()
