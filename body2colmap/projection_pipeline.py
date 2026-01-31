@@ -589,22 +589,17 @@ class ProjectionPipeline:
                 f"number of cameras ({len(self.circular_cameras)})"
             )
 
-        renderer = self._get_renderer()
-
         # Create vertex color projector
         projector = tex_proj.VertexColorProjector(
             self.scene.vertices,
             self.scene.faces
         )
 
-        # Process each view using direct depth-based projection
-        # This avoids face_id buffer issues from anti-aliasing
+        # Process each view using raycast visibility testing
+        # This casts rays from camera to each vertex and checks if the ray
+        # hits a face containing that vertex (exact geometric intersection)
         for camera, image in zip(self.circular_cameras, images):
-            # Render depth buffer for visibility testing
-            depth_buffer = renderer.render_depth_raw(camera)
-
-            # Project directly to vertices using depth visibility
-            projector.project_view_direct(image, depth_buffer, camera, blend_mode)
+            projector.project_view_raycast(image, camera, blend_mode)
 
         # Get and store vertex colors
         self.vertex_colors = projector.get_vertex_colors()

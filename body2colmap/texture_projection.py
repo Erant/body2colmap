@@ -888,6 +888,114 @@ class VertexColorProjector:
 
         return vertex_normals
 
+    def _build_vertex_to_faces(self) -> List[set]:
+        """Build mapping from vertex index to set of face indices containing it."""
+        vertex_to_faces = [set() for _ in range(self.num_vertices)]
+        for fi, face in enumerate(self.faces):
+            for vi in face:
+                vertex_to_faces[vi].add(fi)
+        return vertex_to_faces
+
+    def project_view_raycast(
+        self,
+        image: NDArray[np.uint8],
+        camera: 'Camera',
+        blend_mode: str = "best_angle"
+    ) -> None:
+        """
+        Project colors to vertices using raycast visibility testing.
+
+        For each vertex, casts a ray from the camera and checks if the first
+        intersection is a face containing that vertex. This is more accurate
+        than depth buffer comparison as it uses exact geometric intersection.
+
+        Args:
+            image: Source image, shape (H, W, C), RGBA uint8
+            camera: Camera that captured the image
+            blend_mode: "best_angle", "average", or "replace"
+        """
+        import trimesh
+
+        h, w = image.shape[:2]
+
+        # Build trimesh for ray intersection
+        mesh = trimesh.Trimesh(vertices=self.vertices, faces=self.faces, process=False)
+        intersector = trimesh.ray.ray_triangle.RayMeshIntersector(mesh)
+
+        # Build vertex-to-faces mapping
+        vertex_to_faces = self._build_vertex_to_faces()
+
+        # Compute vertex normals for view-angle weighting
+        vertex_normals = self._compute_vertex_normals()
+
+        # Ray origins (all from camera position)
+        ray_origins = np.tile(camera.position, (self.num_vertices, 1))
+
+        # Ray directions (toward each vertex)
+        ray_directions = self.vertices - camera.position
+        ray_lengths = np.linalg.norm(ray_directions, axis=1, keepdims=True)
+        ray_directions_normalized = ray_directions / np.maximum(ray_lengths, 1e-8)
+
+        # Compute view angles (dot product with vertex normal)
+        dots = np.sum(ray_directions_normalized * (-vertex_normals), axis=1)
+        # Note: negate because ray points toward vertex, normal points outward
+
+        # Cast all rays at once
+        hit_faces, ray_indices, hit_points = intersector.intersects_id(
+            ray_origins,
+            ray_directions_normalized,
+            return_locations=True,
+            multiple_hits=False
+        )
+
+        # Build a mapping from ray index to hit face
+        ray_to_hit_face = {}
+        for i, ray_idx in enumerate(ray_indices):
+            ray_to_hit_face[ray_idx] = hit_faces[i]
+
+        # Project vertices to get screen coordinates for color sampling
+        projected = camera.project(self.vertices)
+
+        # Process each vertex
+        for vi in range(self.num_vertices):
+            # Check if ray hit anything
+            if vi not in ray_to_hit_face:
+                continue  # Ray missed mesh entirely
+
+            hit_face = ray_to_hit_face[vi]
+
+            # Check if the hit face contains our target vertex
+            if hit_face not in vertex_to_faces[vi]:
+                continue  # Ray hit a different face first - vertex is occluded
+
+            # Vertex is visible! Sample color from image
+            px, py = projected[vi]
+            px_int, py_int = int(round(px)), int(round(py))
+
+            # Bounds check
+            if not (0 <= px_int < w and 0 <= py_int < h):
+                continue
+
+            # X-flip for source image coordinate mismatch
+            px_flipped = w - 1 - px_int
+            color = image[py_int, px_flipped].astype(np.float32)
+
+            # Skip background pixels
+            if color[:3].min() > 240 or (len(color) > 3 and color[3] < 10):
+                continue
+
+            # Apply color based on blend mode
+            dot = dots[vi]
+            if blend_mode == "best_angle":
+                if dot > self._vertex_best_angle[vi]:
+                    self._vertex_best_angle[vi] = dot
+                    self._vertex_colors[vi] = color
+            elif blend_mode == "average":
+                self._vertex_colors[vi] += color
+                self._vertex_weights[vi] += 1
+            elif blend_mode == "replace":
+                self._vertex_colors[vi] = color
+
     def get_vertex_colors(self) -> NDArray[np.uint8]:
         """
         Get the accumulated vertex colors.
