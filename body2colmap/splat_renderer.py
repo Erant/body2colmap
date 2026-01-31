@@ -134,12 +134,9 @@ class SplatRenderer:
         # Shape: (N, K, 3) where K = (sh_degree + 1)^2
         sh_coeffs = self._tensors['sh_coeffs']  # (N, K, 3)
 
-        # Background color tensor - shape (H, W, 3)
-        bg = torch.tensor(bg_color, dtype=torch.float32, device=self.device)
-        backgrounds = bg.expand(self.height, self.width, 3).contiguous()
-
         # Call gsplat rasterization
         # gsplat evaluates SH internally when sh_degree is provided
+        # Don't pass backgrounds - we'll composite with alpha afterwards
         render_colors, render_alphas, meta = rasterization(
             means=means,
             quats=quats,
@@ -150,14 +147,17 @@ class SplatRenderer:
             Ks=K,
             width=self.width,
             height=self.height,
-            backgrounds=backgrounds,
             sh_degree=self.scene.sh_degree,  # Let gsplat handle SH evaluation
         )
 
-        # Convert to numpy RGBA
+        # Convert to numpy
         # render_colors: (1, H, W, 3), render_alphas: (1, H, W, 1)
         rgb = render_colors[0].detach().cpu().numpy()  # (H, W, 3)
         alpha = render_alphas[0, ..., 0].detach().cpu().numpy()  # (H, W)
+
+        # Composite with background color using alpha
+        bg = np.array(bg_color, dtype=np.float32)
+        rgb = rgb * alpha[..., np.newaxis] + bg * (1.0 - alpha[..., np.newaxis])
 
         # Clamp and convert to uint8
         rgb = np.clip(rgb * 255, 0, 255).astype(np.uint8)
