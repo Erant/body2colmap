@@ -108,11 +108,22 @@ class SplatRenderer:
             )
 
         # Get camera matrices
-        # CRITICAL: use get_w2c() NOT get_colmap_extrinsics()
-        # gsplat uses OpenGL convention, same as our world coords
-        viewmat = torch.from_numpy(
-            camera.get_w2c().astype(np.float32)
-        ).to(self.device).unsqueeze(0)  # (1, 4, 4)
+        # gsplat uses OpenCV convention (camera looks down +Z, Y down)
+        # Our world coords are OpenGL (camera looks down -Z, Y up)
+        # Apply 180° X rotation to convert: multiply w2c by opengl_to_opencv
+        w2c = camera.get_w2c()
+
+        # OpenGL to OpenCV conversion (180° rotation around X)
+        opengl_to_opencv = np.array([
+            [1.0,  0.0,  0.0, 0.0],
+            [0.0, -1.0,  0.0, 0.0],
+            [0.0,  0.0, -1.0, 0.0],
+            [0.0,  0.0,  0.0, 1.0],
+        ], dtype=np.float32)
+
+        # Apply conversion: new_w2c = opengl_to_opencv @ w2c
+        viewmat_cv = opengl_to_opencv @ w2c
+        viewmat = torch.from_numpy(viewmat_cv).to(self.device).unsqueeze(0)  # (1, 4, 4)
 
         K = torch.tensor([
             [camera.fx, 0.0, camera.cx],
