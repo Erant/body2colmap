@@ -352,18 +352,18 @@ class TextureProjector:
                 if uv1[0] < 0.5: uv1 = (uv1[0] + 1.0, uv1[1])
                 if uv2[0] < 0.5: uv2 = (uv2[0] + 1.0, uv2[1])
 
-            # Convert UV to atlas coordinates
+            # Convert UV to atlas coordinates (no modulo - allow extended coords for seam)
             def uv_to_atlas(uv):
-                ax = int(uv[0] % 1.0 * (self.atlas_width - 1))
+                ax = int(uv[0] * (self.atlas_width - 1))
                 ay = int((1 - uv[1]) * (self.atlas_height - 1))
-                return np.clip(ax, 0, self.atlas_width - 1), np.clip(ay, 0, self.atlas_height - 1)
+                return ax, np.clip(ay, 0, self.atlas_height - 1)
 
             p0 = uv_to_atlas(uv0)
             p1 = uv_to_atlas(uv1)
             p2 = uv_to_atlas(uv2)
 
-            # Rasterize triangle in atlas
-            atlas_pixels = self._rasterize_triangle(p0, p1, p2)
+            # Rasterize triangle in atlas (handles x wrapping for seam triangles)
+            atlas_pixels = self._rasterize_triangle_with_wrap(p0, p1, p2)
 
             # Apply color to atlas pixels
             if blend_mode == "best_angle":
@@ -383,11 +383,12 @@ class TextureProjector:
                     self._atlas_accum[ay, ax] += face_color
                     self._atlas_weights[ay, ax] += 1
 
-    def _rasterize_triangle(self, p0, p1, p2):
+    def _rasterize_triangle_with_wrap(self, p0, p1, p2):
         """
-        Rasterize a triangle and return list of (x, y) pixels inside.
+        Rasterize a triangle with x-coordinate wrapping for UV seam handling.
 
-        Uses scanline algorithm for filled triangle rasterization.
+        Uses scanline algorithm. X coordinates may extend beyond atlas width
+        for seam-crossing triangles; they are wrapped using modulo.
         """
         # Sort vertices by y coordinate
         pts = sorted([p0, p1, p2], key=lambda p: p[1])
@@ -398,9 +399,12 @@ class TextureProjector:
         def add_scanline(y, x_start, x_end):
             if x_start > x_end:
                 x_start, x_end = x_end, x_start
-            for x in range(max(0, x_start), min(self.atlas_width, x_end + 1)):
+            # Don't clamp x range - iterate and wrap each x coordinate
+            for x in range(x_start, x_end + 1):
                 if 0 <= y < self.atlas_height:
-                    pixels.append((x, y))
+                    # Wrap x coordinate for seam handling
+                    wrapped_x = x % self.atlas_width
+                    pixels.append((wrapped_x, y))
 
         # Handle degenerate triangles
         if y0 == y2:
