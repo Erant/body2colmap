@@ -2,7 +2,7 @@
 High-level pipeline orchestrating all components.
 
 This module provides the OrbitPipeline class which ties together:
-- Scene loading
+- Scene loading (mesh or Gaussian splat)
 - Orbit path generation
 - Rendering
 - Export to COLMAP and images
@@ -11,7 +11,7 @@ This is the main API for users of the library.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -114,6 +114,56 @@ class OrbitPipeline:
         scene = Scene.from_sam3d_output(output_dict, include_skeleton)
         return cls(scene, render_size)
 
+    @classmethod
+    def from_ply_file(
+        cls,
+        filepath: str,
+        render_size: Tuple[int, int] = (512, 512)
+    ) -> "OrbitPipeline":
+        """
+        Create pipeline from Gaussian Splat PLY file.
+
+        Args:
+            filepath: Path to .ply file
+            render_size: (width, height) for rendering
+
+        Returns:
+            OrbitPipeline instance with SplatScene
+
+        Note:
+            Requires gsplat dependencies. Install with:
+            pip install body2colmap[splat]
+        """
+        from .splat_scene import SplatScene
+        scene = SplatScene.from_ply(filepath)
+        return cls(scene, render_size)
+
+    def _is_splat_scene(self) -> bool:
+        """Check if scene is a SplatScene (vs mesh Scene)."""
+        # Import here to avoid circular imports and allow optional dependency
+        try:
+            from .splat_scene import SplatScene
+            return isinstance(self.scene, SplatScene)
+        except ImportError:
+            return False
+
+    def _get_renderer(self):
+        """
+        Get or create appropriate renderer for scene type.
+
+        Returns mesh Renderer for Scene, SplatRenderer for SplatScene.
+        """
+        if self._renderer is not None:
+            return self._renderer
+
+        if self._is_splat_scene():
+            from .splat_renderer import SplatRenderer
+            self._renderer = SplatRenderer(self.scene, self.render_size)
+        else:
+            self._renderer = Renderer(self.scene, self.render_size)
+
+        return self._renderer
+
     def set_orbit_params(
         self,
         pattern: str = "helical",
@@ -213,7 +263,9 @@ class OrbitPipeline:
         Render all frames for specified modes.
 
         Args:
-            modes: List of render modes ("mesh", "depth", "skeleton")
+            modes: List of render modes
+                - For mesh scenes: "mesh", "depth", "skeleton"
+                - For splat scenes: "splat"
             **render_kwargs: Mode-specific rendering options:
                 - mesh_color: RGB tuple (0-1) for mesh
                 - bg_color: RGB tuple (0-1) for background
@@ -230,9 +282,9 @@ class OrbitPipeline:
         if self.cameras is None:
             raise RuntimeError("Cameras not set. Call set_orbit_params() first.")
 
-        # Create renderer if needed
-        if self._renderer is None:
-            self._renderer = Renderer(self.scene, self.render_size)
+        # Get appropriate renderer for scene type
+        renderer = self._get_renderer()
+        is_splat = self._is_splat_scene()
 
         results = {}
 
@@ -241,20 +293,34 @@ class OrbitPipeline:
 
             # Render each frame
             for i, camera in enumerate(self.cameras):
-                if mode == "mesh":
-                    image = self._renderer.render_mesh(
+                if mode == "splat":
+                    # Splat rendering (only valid for SplatScene)
+                    if not is_splat:
+                        raise ValueError("'splat' mode only valid for SplatScene")
+                    image = renderer.render(
+                        camera,
+                        bg_color=render_kwargs.get('bg_color', (1.0, 1.0, 1.0))
+                    )
+                elif mode == "mesh":
+                    if is_splat:
+                        raise ValueError("'mesh' mode not valid for SplatScene, use 'splat'")
+                    image = renderer.render_mesh(
                         camera,
                         mesh_color=render_kwargs.get('mesh_color'),
                         bg_color=render_kwargs.get('bg_color', (1.0, 1.0, 1.0))
                     )
                 elif mode == "depth":
-                    image = self._renderer.render_depth(
+                    if is_splat:
+                        raise ValueError("'depth' mode not yet supported for SplatScene")
+                    image = renderer.render_depth(
                         camera,
                         normalize=render_kwargs.get('normalize_depth', True),
                         colormap=render_kwargs.get('depth_colormap')
                     )
                 elif mode == "skeleton":
-                    image = self._renderer.render_skeleton(
+                    if is_splat:
+                        raise ValueError("'skeleton' mode not valid for SplatScene")
+                    image = renderer.render_skeleton(
                         camera,
                         joint_radius=render_kwargs.get('joint_radius', 0.015),
                         bone_radius=render_kwargs.get('bone_radius', 0.008)
@@ -287,17 +353,20 @@ class OrbitPipeline:
 
         Raises:
             RuntimeError: If cameras haven't been set (call set_orbit_params first)
+            ValueError: If used with SplatScene (composites not supported)
         """
         if self.cameras is None:
             raise RuntimeError("Cameras not set. Call set_orbit_params() first.")
 
-        # Create renderer if needed
-        if self._renderer is None:
-            self._renderer = Renderer(self.scene, self.render_size)
+        if self._is_splat_scene():
+            raise ValueError("Composite rendering not supported for SplatScene")
+
+        # Create renderer if needed (mesh renderer for composites)
+        renderer = self._get_renderer()
 
         images = []
         for camera in self.cameras:
-            image = self._renderer.render_composite(camera, composite_modes)
+            image = renderer.render_composite(camera, composite_modes)
             images.append(image)
 
         return images

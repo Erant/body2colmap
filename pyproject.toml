@@ -47,6 +47,10 @@ yaml = [
 viz = [
     "matplotlib>=3.3.0",
 ]
+splat = [
+    "gsplat>=1.0.0",
+    "plyfile>=0.8.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/yourusername/body2colmap"

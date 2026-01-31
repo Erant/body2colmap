@@ -354,7 +354,10 @@ class Config:
 # This file configures the multi-view rendering and COLMAP export pipeline.
 # Command-line arguments override values specified here.
 
-# Input SAM-3D-Body .npz file (required)
+# Input file (required)
+# Supported formats:
+#   .npz - SAM-3D-Body mesh output (supports mesh, depth, skeleton modes)
+#   .ply - Gaussian Splat file (renders splat directly)
 input_file: "path/to/input.npz"
 
 # Rendering configuration
@@ -368,7 +371,8 @@ render:
   # Background color [R, G, B] in range 0-1
   bg_color: [1.0, 1.0, 1.0]
 
-  # Render modes: mesh, depth, skeleton, or combinations (mesh+skeleton, depth+skeleton)
+  # Render modes (for .npz): mesh, depth, skeleton, or combinations (mesh+skeleton, depth+skeleton)
+  # For .ply files, "splat" mode is automatically used
   modes: ["mesh"]
 
 # Camera configuration
@@ -451,7 +455,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="body2colmap",
-        description="Generate multi-view training data for Gaussian Splatting from SAM-3D-Body output",
+        description="Generate multi-view training data for Gaussian Splatting from SAM-3D-Body output (.npz) or re-render existing Gaussian Splats (.ply)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog="Configuration file (YAML) can be used to set all options. Command-line arguments override config file values."
     )
@@ -466,7 +470,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "input",
         nargs='?',
-        help="Path to .npz file from SAM-3D-Body (required if not in config)"
+        help="Path to input file: .npz (SAM-3D-Body mesh) or .ply (Gaussian Splat)"
     )
 
     parser.add_argument(
@@ -505,7 +509,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--render-modes",
         type=str,
         metavar="MODE[,MODE...]",
-        help="Comma-separated render modes: mesh, depth, skeleton, mesh+skeleton, depth+skeleton"
+        help="Comma-separated render modes: mesh, depth, skeleton, mesh+skeleton, depth+skeleton (for .npz); splat mode auto-selected for .ply"
     )
     render_group.add_argument(
         "--mesh-color",
