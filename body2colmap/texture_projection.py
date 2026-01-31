@@ -352,7 +352,8 @@ class TextureProjector:
             if len(non_bg_pixels) == 0:
                 continue  # Skip this face if all pixels are background
 
-            face_color = non_bg_pixels.mean(axis=0)
+            # Use median instead of mean for robustness against edge pixel outliers
+            face_color = np.median(non_bg_pixels, axis=0)
 
             # Get UV coordinates for this face's vertices
             uv0, uv1, uv2 = self.face_uvs[face_id]  # Each is (2,)
