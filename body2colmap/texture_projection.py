@@ -682,6 +682,15 @@ class VertexColorProjector:
         # Pre-compute face normals for view-angle weighting
         self._precompute_face_normals()
 
+        # Pre-compute vertex normals (used for view-angle weighting)
+        self._vertex_normals = self._compute_vertex_normals()
+
+        # Pre-compute vertex-to-faces mapping for raycast visibility
+        self._vertex_to_faces = self._build_vertex_to_faces()
+
+        # Lazily initialized trimesh intersector (created on first raycast call)
+        self._intersector = None
+
         # Initialize vertex color accumulator
         self._vertex_colors = np.zeros((self.num_vertices, 4), dtype=np.float32)
         self._vertex_weights = np.zeros(self.num_vertices, dtype=np.float32)
@@ -896,6 +905,14 @@ class VertexColorProjector:
                 vertex_to_faces[vi].add(fi)
         return vertex_to_faces
 
+    def _get_intersector(self):
+        """Get or create the ray-mesh intersector (lazy initialization)."""
+        if self._intersector is None:
+            import trimesh
+            mesh = trimesh.Trimesh(vertices=self.vertices, faces=self.faces, process=False)
+            self._intersector = trimesh.ray.ray_triangle.RayMeshIntersector(mesh)
+        return self._intersector
+
     def project_view_raycast(
         self,
         image: NDArray[np.uint8],
@@ -914,58 +931,46 @@ class VertexColorProjector:
             camera: Camera that captured the image
             blend_mode: "best_angle", "average", or "replace"
         """
-        import trimesh
-
         h, w = image.shape[:2]
 
-        # Build trimesh for ray intersection
-        mesh = trimesh.Trimesh(vertices=self.vertices, faces=self.faces, process=False)
-        intersector = trimesh.ray.ray_triangle.RayMeshIntersector(mesh)
+        # Get cached intersector (created once, reused across views)
+        intersector = self._get_intersector()
 
-        # Build vertex-to-faces mapping
-        vertex_to_faces = self._build_vertex_to_faces()
-
-        # Compute vertex normals for view-angle weighting
-        vertex_normals = self._compute_vertex_normals()
-
-        # Ray origins (all from camera position)
-        ray_origins = np.tile(camera.position, (self.num_vertices, 1))
-
-        # Ray directions (toward each vertex)
-        ray_directions = self.vertices - camera.position
+        # Ray directions (toward each vertex) - camera position broadcast efficiently
+        ray_directions = self.vertices - camera.position  # Broadcasting handles this
         ray_lengths = np.linalg.norm(ray_directions, axis=1, keepdims=True)
         ray_directions_normalized = ray_directions / np.maximum(ray_lengths, 1e-8)
 
-        # Compute view angles (dot product with vertex normal)
-        dots = np.sum(ray_directions_normalized * (-vertex_normals), axis=1)
-        # Note: negate because ray points toward vertex, normal points outward
+        # Compute view angles using cached vertex normals
+        # Negate because ray points toward vertex, normal points outward
+        dots = np.sum(ray_directions_normalized * (-self._vertex_normals), axis=1)
 
-        # Cast all rays at once
-        hit_faces, ray_indices, hit_points = intersector.intersects_id(
-            ray_origins,
+        # Cast all rays at once - use camera position directly, trimesh will broadcast
+        # Don't request hit_points since we don't use them
+        hit_faces, ray_indices = intersector.intersects_id(
+            np.broadcast_to(camera.position, (self.num_vertices, 3)).copy(),
             ray_directions_normalized,
-            return_locations=True,
+            return_locations=False,
             multiple_hits=False
         )
 
-        # Build a mapping from ray index to hit face
-        ray_to_hit_face = {}
-        for i, ray_idx in enumerate(ray_indices):
-            ray_to_hit_face[ray_idx] = hit_faces[i]
+        # Build a mapping from ray index to hit face using numpy for speed
+        ray_to_hit_face = np.full(self.num_vertices, -1, dtype=np.int32)
+        ray_to_hit_face[ray_indices] = hit_faces
 
         # Project vertices to get screen coordinates for color sampling
         projected = camera.project(self.vertices)
 
         # Process each vertex
         for vi in range(self.num_vertices):
-            # Check if ray hit anything
-            if vi not in ray_to_hit_face:
-                continue  # Ray missed mesh entirely
-
             hit_face = ray_to_hit_face[vi]
 
-            # Check if the hit face contains our target vertex
-            if hit_face not in vertex_to_faces[vi]:
+            # Check if ray hit anything
+            if hit_face < 0:
+                continue  # Ray missed mesh entirely
+
+            # Check if the hit face contains our target vertex (use cached mapping)
+            if hit_face not in self._vertex_to_faces[vi]:
                 continue  # Ray hit a different face first - vertex is occluded
 
             # Vertex is visible! Sample color from image
