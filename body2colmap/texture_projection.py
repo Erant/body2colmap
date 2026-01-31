@@ -832,24 +832,25 @@ class VertexColorProjector:
             if dots[vi] < -0.1:
                 continue
 
-            # Check visibility using depth buffer
-            rendered_depth = depth_buffer[py_int, px_int]
-            if rendered_depth == 0:  # Background
-                continue
-
-            vertex_depth = vertex_depths[vi]
-
-            # Allow generous tolerance for depth comparison (10% by default)
-            # Accept if vertex is approximately at or in front of rendered surface
-            if vertex_depth > rendered_depth * (1 + depth_tolerance):
-                continue  # Vertex is significantly behind rendered surface
-
-            # Sample color from image
+            # Sample color from image first
             color = image[py_int, px_int].astype(np.float32)
 
-            # Skip background pixels
-            if color[:3].min() > 240 or (len(color) > 3 and color[3] < 10):
+            # Skip background pixels in source image
+            is_bg = color[:3].min() > 240 or (len(color) > 3 and color[3] < 10)
+            if is_bg:
                 continue
+
+            # Check visibility using depth buffer
+            rendered_depth = depth_buffer[py_int, px_int]
+            vertex_depth = vertex_depths[vi]
+
+            # If depth buffer shows geometry, check if vertex is approximately at surface
+            if rendered_depth > 0:
+                # Allow generous tolerance (10% by default)
+                if vertex_depth > rendered_depth * (1 + depth_tolerance):
+                    continue  # Vertex is significantly behind rendered surface
+            # If depth buffer is 0 (background) but source image has content,
+            # allow the sample - diffusion may have altered silhouette slightly
 
             # Apply color based on blend mode
             dot = dots[vi]
