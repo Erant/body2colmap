@@ -685,11 +685,8 @@ class VertexColorProjector:
         # Pre-compute vertex normals (used for view-angle weighting)
         self._vertex_normals = self._compute_vertex_normals()
 
-        # Pre-compute vertex-to-faces mapping for raycast visibility
+        # Pre-compute vertex-to-faces mapping for visibility checking
         self._vertex_to_faces = self._build_vertex_to_faces()
-
-        # Lazily initialized trimesh intersector (created on first raycast call)
-        self._intersector = None
 
         # Initialize vertex color accumulator
         self._vertex_colors = np.zeros((self.num_vertices, 4), dtype=np.float32)
@@ -905,87 +902,71 @@ class VertexColorProjector:
                 vertex_to_faces[vi].add(fi)
         return vertex_to_faces
 
-    def _get_intersector(self):
-        """Get or create the ray-mesh intersector (lazy initialization)."""
-        if self._intersector is None:
-            import trimesh
-            mesh = trimesh.Trimesh(vertices=self.vertices, faces=self.faces, process=False)
-            self._intersector = trimesh.ray.ray_triangle.RayMeshIntersector(mesh)
-        return self._intersector
-
-    def project_view_raycast(
+    def project_view_gpu(
         self,
         image: NDArray[np.uint8],
+        face_ids: NDArray[np.int32],
         camera: 'Camera',
         blend_mode: str = "best_angle"
     ) -> None:
         """
-        Project colors to vertices using raycast visibility testing.
+        Project colors to vertices using GPU-rendered face ID visibility.
 
-        For each vertex, casts a ray from the camera and checks if the first
-        intersection is a face containing that vertex. This is more accurate
-        than depth buffer comparison as it uses exact geometric intersection.
+        Uses the face ID buffer (rendered by GPU) as a form of hardware-accelerated
+        raycasting. For each vertex, checks if the face ID at its projected pixel
+        is one of the faces containing that vertex.
+
+        This is much faster than CPU raycasting because the GPU already did the
+        ray-triangle intersection during face ID rendering.
 
         Args:
             image: Source image, shape (H, W, C), RGBA uint8
+            face_ids: Face ID buffer from renderer, shape (H, W), -1 for background
             camera: Camera that captured the image
             blend_mode: "best_angle", "average", or "replace"
         """
-        h, w = image.shape[:2]
+        h, w = face_ids.shape
 
-        # Get cached intersector (created once, reused across views)
-        intersector = self._get_intersector()
-
-        # Ray directions (toward each vertex) - camera position broadcast efficiently
-        ray_directions = self.vertices - camera.position  # Broadcasting handles this
-        ray_lengths = np.linalg.norm(ray_directions, axis=1, keepdims=True)
-        ray_directions_normalized = ray_directions / np.maximum(ray_lengths, 1e-8)
+        # Compute view directions for angle weighting
+        view_dirs = self.vertices - camera.position
+        view_lengths = np.linalg.norm(view_dirs, axis=1, keepdims=True)
+        view_dirs_normalized = view_dirs / np.maximum(view_lengths, 1e-8)
 
         # Compute view angles using cached vertex normals
-        # Negate because ray points toward vertex, normal points outward
-        dots = np.sum(ray_directions_normalized * (-self._vertex_normals), axis=1)
+        # Negate view_dirs because we want camera-to-vertex, normal points outward
+        dots = np.sum((-view_dirs_normalized) * self._vertex_normals, axis=1)
 
-        # Cast all rays at once - use camera position directly, trimesh will broadcast
-        # Don't request hit_points since we don't use them
-        hit_faces, ray_indices = intersector.intersects_id(
-            np.broadcast_to(camera.position, (self.num_vertices, 3)).copy(),
-            ray_directions_normalized,
-            return_locations=False,
-            multiple_hits=False
-        )
-
-        # Build a mapping from ray index to hit face using numpy for speed
-        ray_to_hit_face = np.full(self.num_vertices, -1, dtype=np.int32)
-        ray_to_hit_face[ray_indices] = hit_faces
-
-        # Project vertices to get screen coordinates for color sampling
+        # Project all vertices to screen coordinates
         projected = camera.project(self.vertices)
 
-        # Process each vertex
-        for vi in range(self.num_vertices):
-            hit_face = ray_to_hit_face[vi]
+        # Vectorized bounds check
+        px_arr = np.round(projected[:, 0]).astype(np.int32)
+        py_arr = np.round(projected[:, 1]).astype(np.int32)
 
-            # Check if ray hit anything
+        in_bounds = (px_arr >= 0) & (px_arr < w) & (py_arr >= 0) & (py_arr < h)
+
+        # X-flip for source image coordinate mismatch
+        px_flipped = w - 1 - px_arr
+
+        # Process vertices that are in bounds
+        for vi in np.where(in_bounds)[0]:
+            px, py = px_arr[vi], py_arr[vi]
+
+            # Get face ID at projected location
+            hit_face = face_ids[py, px]
+
+            # Skip background pixels in face ID buffer
             if hit_face < 0:
-                continue  # Ray missed mesh entirely
-
-            # Check if the hit face contains our target vertex (use cached mapping)
-            if hit_face not in self._vertex_to_faces[vi]:
-                continue  # Ray hit a different face first - vertex is occluded
-
-            # Vertex is visible! Sample color from image
-            px, py = projected[vi]
-            px_int, py_int = int(round(px)), int(round(py))
-
-            # Bounds check
-            if not (0 <= px_int < w and 0 <= py_int < h):
                 continue
 
-            # X-flip for source image coordinate mismatch
-            px_flipped = w - 1 - px_int
-            color = image[py_int, px_flipped].astype(np.float32)
+            # Check if this face contains our vertex (visibility test)
+            if hit_face not in self._vertex_to_faces[vi]:
+                continue  # A different face is in front - vertex is occluded
 
-            # Skip background pixels
+            # Vertex is visible! Sample color from source image (with X-flip)
+            color = image[py, px_flipped[vi]].astype(np.float32)
+
+            # Skip background pixels in source image
             if color[:3].min() > 240 or (len(color) > 3 and color[3] < 10):
                 continue
 

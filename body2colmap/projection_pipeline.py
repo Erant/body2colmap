@@ -589,17 +589,22 @@ class ProjectionPipeline:
                 f"number of cameras ({len(self.circular_cameras)})"
             )
 
+        renderer = self._get_renderer()
+
         # Create vertex color projector
         projector = tex_proj.VertexColorProjector(
             self.scene.vertices,
             self.scene.faces
         )
 
-        # Process each view using raycast visibility testing
-        # This casts rays from camera to each vertex and checks if the ray
-        # hits a face containing that vertex (exact geometric intersection)
+        # Process each view using GPU-accelerated face ID visibility
+        # The face ID buffer is essentially GPU-accelerated raycasting
         for camera, image in zip(self.circular_cameras, images):
-            projector.project_view_raycast(image, camera, blend_mode)
+            # Render face IDs (GPU does ray-triangle intersection)
+            face_ids = renderer.render_face_ids(camera)
+
+            # Project using face ID visibility check
+            projector.project_view_gpu(image, face_ids, camera, blend_mode)
 
         # Get and store vertex colors
         self.vertex_colors = projector.get_vertex_colors()
