@@ -222,7 +222,7 @@ class ColmapExporter:
     @classmethod
     def from_scene_and_cameras(
         cls,
-        scene: Scene,
+        scene,  # Scene or SplatScene (duck-typed)
         cameras: List[Camera],
         image_names: List[str],
         n_pointcloud_samples: int = 50000
@@ -230,18 +230,18 @@ class ColmapExporter:
         """
         Create exporter from Scene and cameras.
 
-        Automatically samples point cloud from scene mesh.
+        Automatically samples point cloud from scene.
 
         Args:
-            scene: Scene to export point cloud from
+            scene: Scene or SplatScene with get_point_cloud() method
             cameras: List of cameras
             image_names: List of image filenames
-            n_pointcloud_samples: Number of points to sample from mesh
+            n_pointcloud_samples: Number of points to sample
 
         Returns:
             ColmapExporter instance
         """
-        # Sample point cloud from mesh
+        # Sample point cloud from scene (works for both Scene and SplatScene)
         points, colors = scene.get_point_cloud(n_samples=n_pointcloud_samples)
 
         return cls(
