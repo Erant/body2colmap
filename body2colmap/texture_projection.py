@@ -399,6 +399,10 @@ class TextureProjector:
         def add_scanline(y, x_start, x_end):
             if x_start > x_end:
                 x_start, x_end = x_end, x_start
+            # Expand by 1 pixel on each side for conservative rasterization
+            # This ensures triangle edges are fully covered
+            x_start -= 1
+            x_end += 1
             # Don't clamp x range - iterate and wrap each x coordinate
             for x in range(x_start, x_end + 1):
                 if 0 <= y < self.atlas_height:
@@ -414,7 +418,8 @@ class TextureProjector:
             add_scanline(y0, x_min, x_max)
             return pixels
 
-        for y in range(max(0, y0), min(self.atlas_height, y2 + 1)):
+        # Expand y range by 1 pixel for conservative rasterization
+        for y in range(max(0, y0 - 1), min(self.atlas_height, y2 + 2)):
             # Compute x intersections with triangle edges
             if y < y1:
                 # Upper part: edges (p0, p1) and (p0, p2)
@@ -490,9 +495,17 @@ class TextureProjector:
             np.add.at(self._atlas_accum, (atlas_y, atlas_x), pixel_colors)
             np.add.at(self._atlas_weights, (atlas_y, atlas_x), 1)
 
-    def get_atlas(self) -> NDArray[np.uint8]:
+    def get_atlas(self, dilate_iterations: int = 8) -> NDArray[np.uint8]:
         """
-        Get the accumulated texture atlas.
+        Get the accumulated texture atlas with optional dilation.
+
+        Dilation fills gaps between triangles by expanding painted regions
+        into unpainted neighboring pixels. This is essential for proper
+        texture sampling at triangle edges.
+
+        Args:
+            dilate_iterations: Number of dilation passes (default 8).
+                              Higher values fill larger gaps but are slower.
 
         Returns:
             RGBA texture atlas, shape (atlas_height, atlas_width, 4), dtype uint8
@@ -505,7 +518,72 @@ class TextureProjector:
             for c in range(4):
                 atlas[:, :, c][mask] /= self._atlas_weights[mask]
 
-        return np.clip(atlas, 0, 255).astype(np.uint8)
+        # Convert to uint8 first
+        atlas = np.clip(atlas, 0, 255).astype(np.uint8)
+
+        # Dilate to fill gaps
+        if dilate_iterations > 0:
+            atlas = self._dilate_atlas(atlas, dilate_iterations)
+
+        return atlas
+
+    def _dilate_atlas(self, atlas: NDArray[np.uint8], iterations: int) -> NDArray[np.uint8]:
+        """
+        Dilate painted regions to fill gaps between triangles.
+
+        Uses vectorized 4-neighbor expansion for performance.
+        Empty pixels take the average color of their painted neighbors.
+        """
+        result = atlas.astype(np.float32)
+
+        for _ in range(iterations):
+            # Find painted pixels (has some color or alpha)
+            painted = (result[:, :, 3] > 0) | (result[:, :, :3].sum(axis=2) > 0)
+
+            if painted.all():
+                break
+
+            # Create shifted versions for 4-neighbor access
+            # Use roll to handle edges (wrapping is fine for our purposes)
+            up = np.roll(result, -1, axis=0)
+            down = np.roll(result, 1, axis=0)
+            left = np.roll(result, -1, axis=1)
+            right = np.roll(result, 1, axis=1)
+
+            up_painted = np.roll(painted, -1, axis=0)
+            down_painted = np.roll(painted, 1, axis=0)
+            left_painted = np.roll(painted, -1, axis=1)
+            right_painted = np.roll(painted, 1, axis=1)
+
+            # Sum of neighbor colors (only painted neighbors)
+            neighbor_sum = np.zeros_like(result)
+            neighbor_count = np.zeros((result.shape[0], result.shape[1]), dtype=np.float32)
+
+            for neighbor, neighbor_mask in [(up, up_painted), (down, down_painted),
+                                             (left, left_painted), (right, right_painted)]:
+                mask_3d = neighbor_mask[:, :, np.newaxis]
+                neighbor_sum += neighbor * mask_3d
+                neighbor_count += neighbor_mask.astype(np.float32)
+
+            # Compute average where we have neighbors
+            has_neighbors = neighbor_count > 0
+            empty = ~painted
+
+            # Only update empty pixels that have painted neighbors
+            update_mask = empty & has_neighbors
+
+            if not update_mask.any():
+                break
+
+            # Compute average color from neighbors
+            for c in range(4):
+                result[:, :, c] = np.where(
+                    update_mask,
+                    neighbor_sum[:, :, c] / np.maximum(neighbor_count, 1),
+                    result[:, :, c]
+                )
+
+        return np.clip(result, 0, 255).astype(np.uint8)
 
     def reset(self) -> None:
         """Reset the atlas accumulator for a new projection pass."""
