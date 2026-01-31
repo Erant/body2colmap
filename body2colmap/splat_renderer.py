@@ -134,10 +134,9 @@ class SplatRenderer:
         # Shape: (N, K, 3) where K = (sh_degree + 1)^2
         sh_coeffs = self._tensors['sh_coeffs']  # (N, K, 3)
 
-        # Background color tensor - needs shape (C, H, W, 3) for batch of C images
-        # We render 1 image at a time, so shape is (1, H, W, 3)
+        # Background color tensor - shape (H, W, 3)
         bg = torch.tensor(bg_color, dtype=torch.float32, device=self.device)
-        backgrounds = bg.expand(1, self.height, self.width, 3).contiguous()
+        backgrounds = bg.expand(self.height, self.width, 3).contiguous()
 
         # Call gsplat rasterization
         # gsplat evaluates SH internally when sh_degree is provided
