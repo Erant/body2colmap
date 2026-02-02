@@ -38,6 +38,7 @@ class PathConfig:
     pattern: str = "helical"  # "circular", "sinusoidal", "helical"
     n_frames: int = 120
     radius: Optional[float] = None  # None = auto-compute
+    framing: str = "full"  # "full", "torso", "bust", "head"
 
     # Circular-specific
     elevation_deg: float = 0.0
@@ -172,6 +173,8 @@ class Config:
         if args.amplitude is not None:
             config.path.helical_amplitude_deg = args.amplitude
             config.path.sinusoidal_amplitude_deg = args.amplitude
+        if args.framing:
+            config.path.framing = args.framing
 
         # Skeleton overrides
         if args.skeleton:
@@ -245,6 +248,7 @@ class Config:
             pattern=path_data.get('pattern', 'helical'),
             n_frames=path_data.get('n_frames', 120),
             radius=path_data.get('radius'),
+            framing=path_data.get('framing', 'full'),
             elevation_deg=path_data.get('elevation_deg', 0.0),
             sinusoidal_amplitude_deg=path_data.get('sinusoidal_amplitude_deg', 30.0),
             sinusoidal_cycles=path_data.get('sinusoidal_cycles', 2),
@@ -315,6 +319,7 @@ class Config:
                 'pattern': self.path.pattern,
                 'n_frames': self.path.n_frames,
                 'radius': self.path.radius,
+                'framing': self.path.framing,
                 'elevation_deg': self.path.elevation_deg,
                 'sinusoidal_amplitude_deg': self.path.sinusoidal_amplitude_deg,
                 'sinusoidal_cycles': self.path.sinusoidal_cycles,
@@ -399,6 +404,13 @@ path:
 
   # Orbit radius in meters (null = auto-compute from mesh bounds)
   radius: null
+
+  # Framing preset: full, torso, bust, head
+  # - full: Entire body (default)
+  # - torso: Waist up (requires skeleton data)
+  # - bust: Shoulders and head (requires skeleton data)
+  # - head: Head only (requires skeleton data)
+  framing: "full"
 
   # Circular mode: base elevation angle in degrees
   elevation_deg: 0.0
@@ -567,6 +579,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=float,
         metavar="DEGREES",
         help="Elevation amplitude in degrees (helical/sinusoidal)"
+    )
+    path_group.add_argument(
+        "--framing",
+        choices=["full", "torso", "bust", "head"],
+        help="Body framing preset: full (entire body), torso (waist up), "
+             "bust (shoulders and head), head (head only). "
+             "Non-full presets require skeleton data."
     )
 
     # Skeleton options

@@ -694,3 +694,72 @@ def get_bone_colors_openpose_style(format_name: str) -> Dict[Tuple[int, int], Tu
         default_color = (0.0, 1.0, 0.0)  # Green
         bones = get_skeleton_bones(format_name)
         return {bone: default_color for bone in bones}
+
+
+# =============================================================================
+# Framing Presets - Y-coordinate thresholding for partial body framing
+# =============================================================================
+
+# Valid framing preset names
+FRAMING_PRESETS = ["full", "torso", "bust", "head"]
+
+
+def get_framing_y_threshold(joints: NDArray[np.float32], preset: str) -> Optional[float]:
+    """
+    Get Y-coordinate threshold for a framing preset.
+
+    Uses skeleton joint positions to determine height thresholds for filtering
+    mesh vertices. For partial body framing (torso, bust, head), vertices with
+    Y >= threshold are included in the framing bounding box.
+
+    Args:
+        joints: MHR70 skeleton joints, shape (70, 3)
+        preset: Framing preset name:
+            - "full": No filtering (returns None)
+            - "torso": Waist up (threshold at hip level)
+            - "bust": Shoulders and head (threshold at upper chest)
+            - "head": Head only (threshold at neck level)
+
+    Returns:
+        Y threshold value (include vertices where Y >= threshold)
+        None for "full" preset (no filtering needed)
+
+    Raises:
+        ValueError: If preset is unknown
+    """
+    if preset == "full":
+        return None
+
+    if preset not in FRAMING_PRESETS:
+        raise ValueError(
+            f"Unknown framing preset: '{preset}'. "
+            f"Valid options: {', '.join(FRAMING_PRESETS)}"
+        )
+
+    # Extract key Y coordinates from MHR70 joints
+    # Using indices from MHR70_JOINTS dict
+    left_hip_y = joints[9, 1]    # left_hip
+    right_hip_y = joints[10, 1]  # right_hip
+    left_shoulder_y = joints[5, 1]   # left_shoulder
+    right_shoulder_y = joints[6, 1]  # right_shoulder
+    neck_y = joints[69, 1]       # neck
+
+    hip_y = (left_hip_y + right_hip_y) / 2.0
+    shoulder_y = (left_shoulder_y + right_shoulder_y) / 2.0
+    torso_height = shoulder_y - hip_y
+
+    if preset == "torso":
+        # Waist up: cut at hip level
+        return float(hip_y)
+
+    elif preset == "bust":
+        # Shoulders + head: cut below shoulders to include upper chest
+        # Use 25% below shoulder line (into upper chest area)
+        return float(shoulder_y - 0.25 * torso_height)
+
+    elif preset == "head":
+        # Head only: cut at neck
+        return float(neck_y)
+
+    # Should not reach here due to earlier validation
+    return None

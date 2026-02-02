@@ -215,6 +215,79 @@ class Scene:
         min_corner, max_corner = self.get_bounds()
         return (min_corner + max_corner) / 2.0
 
+    def get_framing_bounds(
+        self,
+        preset: str = "full"
+    ) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """
+        Get bounding box for a framing preset using mesh vertex filtering.
+
+        For partial body presets (torso, bust, head), filters mesh vertices
+        by Y coordinate (height) based on skeleton joint positions, then
+        computes the bounding box of the filtered vertices.
+
+        This provides accurate visual bounds for the selected body region
+        without requiring heuristic padding.
+
+        Args:
+            preset: Framing preset name:
+                - "full": Entire body (uses all mesh vertices)
+                - "torso": Waist up (Y >= hip level)
+                - "bust": Shoulders and head (Y >= upper chest)
+                - "head": Head only (Y >= neck level)
+
+        Returns:
+            Tuple of (min_corner, max_corner) arrays, each shape (3,)
+
+        Raises:
+            ValueError: If preset requires skeleton but none is loaded,
+                       or if skeleton format is not MHR70
+        """
+        from .skeleton import get_framing_y_threshold, FRAMING_PRESETS
+
+        # Validate preset
+        if preset not in FRAMING_PRESETS:
+            raise ValueError(
+                f"Unknown framing preset: '{preset}'. "
+                f"Valid options: {', '.join(FRAMING_PRESETS)}"
+            )
+
+        # Full body - use all mesh vertices
+        if preset == "full":
+            return self.get_bounds()
+
+        # Partial framing requires skeleton data
+        if self.skeleton_joints is None:
+            raise ValueError(
+                f"Framing preset '{preset}' requires skeleton data. "
+                "Load with include_skeleton=True or use --framing full"
+            )
+
+        if self.skeleton_format != "mhr70":
+            raise ValueError(
+                f"Framing presets only supported for MHR70 skeleton format, "
+                f"got: {self.skeleton_format}"
+            )
+
+        # Get Y threshold from skeleton
+        y_threshold = get_framing_y_threshold(self.skeleton_joints, preset)
+
+        # Filter mesh vertices by height
+        mask = self.vertices[:, 1] >= y_threshold
+        filtered_vertices = self.vertices[mask]
+
+        if len(filtered_vertices) == 0:
+            raise ValueError(
+                f"No vertices found above Y threshold for '{preset}' framing. "
+                "This may indicate a problem with the skeleton data."
+            )
+
+        # Compute bbox from filtered vertices
+        min_corner = np.min(filtered_vertices, axis=0)
+        max_corner = np.max(filtered_vertices, axis=0)
+
+        return min_corner.astype(np.float32), max_corner.astype(np.float32)
+
     def get_bounding_sphere_radius(self) -> float:
         """
         Get radius of bounding sphere centered at centroid.

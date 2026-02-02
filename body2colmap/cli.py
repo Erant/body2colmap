@@ -72,10 +72,14 @@ def main(argv: Optional[list] = None) -> int:
             is_splat = True
         elif input_ext == '.npz':
             # SAM-3D-Body NPZ file
+            # Enable skeleton loading if:
+            # - Skeleton rendering is requested, OR
+            # - Non-full framing preset is used (requires skeleton for Y-threshold)
+            needs_skeleton = config.skeleton.enabled or config.path.framing != "full"
             pipeline = OrbitPipeline.from_npz_file(
                 config.input_file,
                 render_size=config.render.resolution,
-                include_skeleton=config.skeleton.enabled
+                include_skeleton=needs_skeleton
             )
             is_splat = False
         else:
@@ -90,7 +94,8 @@ def main(argv: Optional[list] = None) -> int:
 
         # Build orbit kwargs based on pattern
         orbit_kwargs = {
-            'fill_ratio': config.camera.fill_ratio
+            'fill_ratio': config.camera.fill_ratio,
+            'framing': config.path.framing
         }
 
         if config.path.pattern == "circular":

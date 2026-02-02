@@ -169,6 +169,7 @@ class OrbitPipeline:
         pattern: str = "helical",
         n_frames: int = 120,
         radius: Optional[float] = None,
+        framing: str = "full",
         **kwargs
     ) -> "OrbitPipeline":
         """
@@ -179,6 +180,9 @@ class OrbitPipeline:
             n_frames: Number of frames to generate
             radius: Orbit radius (distance from target)
                    If None, auto-computed to frame scene
+            framing: Body framing preset ("full", "torso", "bust", "head")
+                    Non-full presets use skeleton joints to determine Y threshold
+                    and filter mesh vertices for accurate framing bounds.
             **kwargs: Pattern-specific parameters:
                 - circular: elevation_deg
                 - sinusoidal: amplitude_deg, n_cycles
@@ -187,19 +191,24 @@ class OrbitPipeline:
         Returns:
             self (for method chaining)
         """
+        # Get framing bounds based on preset
+        # For partial body presets, this filters mesh vertices by Y coordinate
+        framing_bounds = self.scene.get_framing_bounds(preset=framing)
+
+        # Compute orbit center (look-at target) from framing region
+        target = (framing_bounds[0] + framing_bounds[1]) / 2.0
+
         # Auto-compute radius if not provided
         if radius is None:
             fill_ratio = kwargs.pop('fill_ratio', 0.8)
             radius = compute_auto_orbit_radius(
-                bounds=self.scene.get_bounds(),
+                bounds=framing_bounds,
                 render_size=self.render_size,
                 focal_length=self.focal_length,
                 fill_ratio=fill_ratio
             )
 
         # Create orbit path generator
-        # Use bbox center instead of centroid to avoid bias from vertex density
-        target = self.scene.get_bbox_center()
         orbit = OrbitPath(target=target, radius=radius)
 
         # Create camera template with correct intrinsics
