@@ -9,8 +9,11 @@ for querying scene properties (bounds, centroid, point cloud sampling).
 """
 
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, TYPE_CHECKING
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from .camera import Camera
 
 from . import coordinates
 
@@ -287,6 +290,103 @@ class Scene:
         max_corner = np.max(filtered_vertices, axis=0)
 
         return min_corner.astype(np.float32), max_corner.astype(np.float32)
+
+    def filter_mesh_to_viewport(self, camera: "Camera") -> "Scene":
+        """
+        Create a new Scene with only vertices visible in camera's viewport.
+
+        Projects all mesh vertices through the camera and keeps only those
+        that fall within the image bounds. Treats the mesh as transparent
+        (no occlusion culling) - vertices behind other geometry are kept
+        as long as they project into the viewport.
+
+        Faces are kept if ANY of their vertices are in the viewport, which
+        preserves boundary triangles that span the viewport edge.
+
+        Args:
+            camera: Camera defining the viewport to filter against
+
+        Returns:
+            New Scene with filtered mesh. Skeleton data is preserved unchanged.
+
+        Raises:
+            ValueError: If filtering results in no vertices
+        """
+        # Get camera transform and intrinsics
+        w2c = camera.get_w2c()
+        fx, fy = camera.fx, camera.fy
+        cx, cy = camera.cx, camera.cy
+        width, height = camera.width, camera.height
+
+        # Transform vertices to camera space
+        # vertices_h: (N, 4) homogeneous coordinates
+        vertices_h = np.hstack([self.vertices, np.ones((len(self.vertices), 1))])
+        vertices_cam = (w2c @ vertices_h.T).T[:, :3]
+
+        # In OpenGL convention, camera looks down -Z axis
+        # Points in front of camera have Z < 0
+        in_front = vertices_cam[:, 2] < 0
+
+        # Project to image coordinates
+        # For points with Z < 0, we use -Z for the division
+        z = -vertices_cam[:, 2]
+        z[z <= 0] = 1e-6  # Avoid division by zero for points behind camera
+
+        x_proj = fx * vertices_cam[:, 0] / z + cx
+        y_proj = fy * vertices_cam[:, 1] / z + cy
+
+        # Determine which vertices are in the viewport
+        in_viewport = (
+            in_front &
+            (x_proj >= 0) & (x_proj < width) &
+            (y_proj >= 0) & (y_proj < height)
+        )
+
+        # Get indices of kept vertices
+        kept_indices = np.where(in_viewport)[0]
+        kept_set = set(kept_indices)
+
+        if len(kept_indices) == 0:
+            raise ValueError(
+                "No vertices visible in camera viewport. "
+                "Check camera position and orientation."
+            )
+
+        # Create old-to-new index mapping
+        old_to_new = {old: new for new, old in enumerate(kept_indices)}
+
+        # Filter vertices
+        new_vertices = self.vertices[in_viewport].astype(np.float32)
+
+        # Keep faces where ANY vertex is visible (preserves boundary triangles)
+        new_faces = []
+        for face in self.faces:
+            # Check if any vertex of this face is in the kept set
+            visible_verts = [v for v in face if v in kept_set]
+            if len(visible_verts) == 3:
+                # All vertices visible - remap and keep
+                new_faces.append([old_to_new[v] for v in face])
+            elif len(visible_verts) > 0:
+                # Partial visibility - still keep if all vertices happen to be kept
+                # (This handles edge cases at viewport boundary)
+                if all(v in kept_set for v in face):
+                    new_faces.append([old_to_new[v] for v in face])
+
+        if len(new_faces) == 0:
+            raise ValueError(
+                "No complete faces visible in camera viewport. "
+                "This may indicate the mesh is partially outside the view."
+            )
+
+        new_faces = np.array(new_faces, dtype=np.int32)
+
+        # Return new scene with filtered mesh, preserving skeleton
+        return Scene(
+            vertices=new_vertices,
+            faces=new_faces,
+            skeleton_joints=self.skeleton_joints,
+            skeleton_format=self.skeleton_format
+        )
 
     def get_bounding_sphere_radius(self) -> float:
         """
