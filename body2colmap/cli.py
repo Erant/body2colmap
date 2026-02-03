@@ -119,6 +119,15 @@ def main(argv: Optional[list] = None) -> int:
         if args.verbose:
             print(f"  Generated {len(pipeline.cameras)} camera positions")
 
+        # Apply viewport cropping if requested
+        if config.path.crop_to_viewport and pipeline.cameras:
+            if args.verbose:
+                original_verts = len(pipeline.scene.vertices)
+            pipeline.scene = pipeline.scene.filter_mesh_to_viewport(pipeline.cameras[0])
+            if args.verbose:
+                new_verts = len(pipeline.scene.vertices)
+                print(f"  Cropped mesh to viewport: {original_verts} -> {new_verts} vertices")
+
         # Render
         if args.verbose:
             print("\n[3/4] Rendering frames...")

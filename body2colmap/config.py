@@ -39,6 +39,7 @@ class PathConfig:
     n_frames: int = 120
     radius: Optional[float] = None  # None = auto-compute
     framing: str = "full"  # "full", "torso", "bust", "head"
+    crop_to_viewport: bool = False  # Filter mesh to first camera's viewport
 
     # Circular-specific
     elevation_deg: float = 0.0
@@ -175,6 +176,8 @@ class Config:
             config.path.sinusoidal_amplitude_deg = args.amplitude
         if args.framing:
             config.path.framing = args.framing
+        if args.crop_to_viewport:
+            config.path.crop_to_viewport = True
 
         # Skeleton overrides
         if args.skeleton:
@@ -249,6 +252,7 @@ class Config:
             n_frames=path_data.get('n_frames', 120),
             radius=path_data.get('radius'),
             framing=path_data.get('framing', 'full'),
+            crop_to_viewport=path_data.get('crop_to_viewport', False),
             elevation_deg=path_data.get('elevation_deg', 0.0),
             sinusoidal_amplitude_deg=path_data.get('sinusoidal_amplitude_deg', 30.0),
             sinusoidal_cycles=path_data.get('sinusoidal_cycles', 2),
@@ -320,6 +324,7 @@ class Config:
                 'n_frames': self.path.n_frames,
                 'radius': self.path.radius,
                 'framing': self.path.framing,
+                'crop_to_viewport': self.path.crop_to_viewport,
                 'elevation_deg': self.path.elevation_deg,
                 'sinusoidal_amplitude_deg': self.path.sinusoidal_amplitude_deg,
                 'sinusoidal_cycles': self.path.sinusoidal_cycles,
@@ -411,6 +416,12 @@ path:
   # - bust: Shoulders and head (requires skeleton data)
   # - head: Head only (requires skeleton data)
   framing: "full"
+
+  # Crop mesh to initial viewport
+  # When true, removes vertices not visible in the first camera's viewport.
+  # Useful when you only want to render partial views and don't want
+  # hidden geometry appearing as the camera orbits.
+  crop_to_viewport: false
 
   # Circular mode: base elevation angle in degrees
   elevation_deg: 0.0
@@ -586,6 +597,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Body framing preset: full (entire body), torso (waist up), "
              "bust (shoulders and head), head (head only). "
              "Non-full presets require skeleton data."
+    )
+    path_group.add_argument(
+        "--crop-to-viewport",
+        action="store_true",
+        help="Filter mesh to keep only vertices visible in the first camera's "
+             "viewport. Vertices outside the initial view won't appear when "
+             "the camera orbits around."
     )
 
     # Skeleton options
