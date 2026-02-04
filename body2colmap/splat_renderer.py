@@ -179,6 +179,137 @@ class SplatRenderer:
 
         return rgba
 
+    def render_depth(
+        self,
+        camera: Camera,
+        normalize: bool = True,
+        colormap: Optional[str] = None,
+        expected_depth: bool = True
+    ) -> NDArray[np.uint8]:
+        """
+        Render depth map from Gaussian splats.
+
+        Uses gsplat's native depth rendering mode. Unlike mesh depth (single surface),
+        splat depth is volume-based, considering all Gaussians along each ray weighted
+        by their opacity.
+
+        Args:
+            camera: Camera object (same interface as mesh Renderer)
+            normalize: If True, normalize depth to 0-1 range for visualization
+            colormap: Optional colormap name ("viridis", "plasma", etc.)
+                     If None, returns grayscale depth
+            expected_depth: If True, use expected depth (ED): sum(w*z)/sum(w)
+                           If False, use accumulated depth (D): sum(w*z)
+                           Expected depth is usually more intuitive.
+
+        Returns:
+            RGBA image (height, width, 4), dtype uint8
+            Alpha comes from accumulated opacity during rasterization.
+        """
+        self._ensure_tensors()
+        torch = self._torch
+
+        try:
+            from gsplat import rasterization
+        except ImportError:
+            raise ImportError(
+                "gsplat is required for splat rendering. "
+                "Install with: pip install gsplat"
+            )
+
+        # Get camera matrices (same setup as render())
+        w2c = camera.get_w2c()
+
+        # OpenGL to OpenCV conversion (180° rotation around X)
+        opengl_to_opencv = np.array([
+            [1.0,  0.0,  0.0, 0.0],
+            [0.0, -1.0,  0.0, 0.0],
+            [0.0,  0.0, -1.0, 0.0],
+            [0.0,  0.0,  0.0, 1.0],
+        ], dtype=np.float32)
+
+        viewmat_cv = opengl_to_opencv @ w2c
+        viewmat = torch.from_numpy(viewmat_cv).to(self.device).unsqueeze(0)
+
+        K = torch.tensor([
+            [camera.fx, 0.0, camera.cx],
+            [0.0, camera.fy, camera.cy],
+            [0.0, 0.0, 1.0]
+        ], dtype=torch.float32, device=self.device).unsqueeze(0)
+
+        # Prepare Gaussian parameters
+        means = self._tensors['means']
+        quats = self._tensors['quats']
+        scales = torch.exp(self._tensors['scales'])
+        opacities = torch.sigmoid(self._tensors['opacities'])
+        sh_coeffs = self._tensors['sh_coeffs']
+
+        # Select depth mode
+        render_mode = "ED" if expected_depth else "D"
+
+        # Render depth using gsplat
+        render_depths, render_alphas, meta = rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=sh_coeffs,
+            viewmats=viewmat,
+            Ks=K,
+            width=self.width,
+            height=self.height,
+            sh_degree=self.scene.sh_degree,
+            render_mode=render_mode,
+        )
+
+        # Convert to numpy
+        # render_depths: (1, H, W, 1), render_alphas: (1, H, W, 1)
+        depth = render_depths[0, ..., 0].detach().cpu().numpy()  # (H, W)
+        alpha = render_alphas[0, ..., 0].detach().cpu().numpy()  # (H, W)
+
+        # Create alpha mask (convert 0-1 opacity to 0-255)
+        alpha_mask = (alpha * 255).astype(np.uint8)
+
+        # Normalize depth if requested
+        if normalize:
+            # Use alpha > threshold to identify valid pixels
+            valid_mask = alpha > 0.01
+            valid_depth = depth[valid_mask]
+            if len(valid_depth) > 0:
+                min_depth = valid_depth.min()
+                max_depth = valid_depth.max()
+                depth_range = max_depth - min_depth
+                if depth_range > 1e-6:
+                    depth_normalized = np.zeros_like(depth)
+                    # Invert so closer = white (1.0), farther = black (0.0)
+                    depth_normalized[valid_mask] = 1.0 - (depth[valid_mask] - min_depth) / depth_range
+                else:
+                    depth_normalized = np.ones_like(depth) * 0.5
+            else:
+                depth_normalized = np.zeros_like(depth)
+        else:
+            depth_normalized = depth
+
+        # Apply colormap if requested
+        if colormap is not None:
+            try:
+                import matplotlib.cm as cm
+            except ImportError:
+                raise ImportError("matplotlib is required for colormaps")
+
+            cmap = cm.get_cmap(colormap)
+            depth_colored = cmap(depth_normalized)[:, :, :3]  # RGB
+            depth_colored = (depth_colored * 255).astype(np.uint8)
+        else:
+            # Grayscale
+            depth_gray = (depth_normalized * 255).astype(np.uint8)
+            depth_colored = np.stack([depth_gray] * 3, axis=-1)
+
+        # Combine with alpha
+        rgba = np.dstack([depth_colored, alpha_mask])
+
+        return rgba
+
     def __del__(self):
         """Clean up tensors."""
         self._tensors = None

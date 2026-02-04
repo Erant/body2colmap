@@ -319,8 +319,6 @@ class OrbitPipeline:
                         bg_color=render_kwargs.get('bg_color', (1.0, 1.0, 1.0))
                     )
                 elif mode == "depth":
-                    if is_splat:
-                        raise ValueError("'depth' mode not yet supported for SplatScene")
                     image = renderer.render_depth(
                         camera,
                         normalize=render_kwargs.get('normalize_depth', True),
