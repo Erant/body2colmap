@@ -548,15 +548,19 @@ def train(
     }
 
     # DefaultStrategy for densification
+    # absgrad=True is required: it uses a backward hook to capture absolute
+    # gradients on means2d, which works correctly even when gsplat squeezes
+    # the C=1 batch dimension.
     strategy = DefaultStrategy(
         refine_start_iter=refine_start,
         refine_stop_iter=refine_stop,
         refine_every=refine_every,
         grow_grad2d=grow_grad2d,
         prune_opa=prune_opacity,
+        absgrad=True,
         verbose=verbose,
     )
-    strategy_state = strategy.initialize_state()
+    strategy_state = strategy.initialize_state(scene_scale=scene_scale)
 
     # Current SH degree (progressively increased)
     current_sh_degree = 0
@@ -606,18 +610,10 @@ def train(
             height=height,
             sh_degree=current_sh_degree,
             backgrounds=bg,  # (3,) — no batch dim needed
+            absgrad=True,
         )
-        # renders: (1, H, W, 3), render_alphas: (1, H, W, 1)
-        rendered = renders[0]  # (H, W, 3)
-
-        # gsplat squeezes C=1 batch dim from info tensors, but
-        # DefaultStrategy expects (C, N, ...) shapes.
-        # Strategy: keep original means2d for gradient capture (it's in
-        # the compute graph), unsqueeze radii now, then after backward
-        # unsqueeze means2d and transfer the captured gradient.
-        needs_unsqueeze = "means2d" in info and info["means2d"].ndim == 2
-        if "radii" in info and info["radii"].ndim == 1:
-            info["radii"] = info["radii"].unsqueeze(0)
+        # renders shape depends on gsplat version; get the image out
+        rendered = renders[0] if renders.ndim == 4 else renders  # (H, W, 3)
 
         # Loss
         if gt_alpha is not None:
@@ -640,8 +636,7 @@ def train(
         else:
             loss = l1_loss
 
-        # pre_backward: retain_grad() on the ORIGINAL means2d (still in
-        # the compute graph so backward will populate .grad)
+        # Densification: pre_backward installs absgrad hook on means2d
         strategy.step_pre_backward(
             params=params,
             optimizers=optimizers,
@@ -650,22 +645,12 @@ def train(
             info=info,
         )
 
-        # Backward (retain_grad on original means2d captures grads)
+        # Backward (absgrad hook captures absolute gradients on means2d)
         loss.backward()
 
         final_loss_val = loss.item()
 
-        # Now unsqueeze means2d and transfer .grad for post_backward
-        if needs_unsqueeze:
-            grad = info["means2d"].grad
-            absgrad = getattr(info["means2d"], "absgrad", None)
-            info["means2d"] = info["means2d"].unsqueeze(0)
-            if grad is not None:
-                info["means2d"].grad = grad.unsqueeze(0)
-            if absgrad is not None:
-                info["means2d"].absgrad = absgrad.unsqueeze(0)
-
-        # Densification: post_backward uses captured grads for grow/prune
+        # Densification: post_backward uses captured absgrads for grow/prune
         strategy.step_post_backward(
             params=params,
             optimizers=optimizers,
