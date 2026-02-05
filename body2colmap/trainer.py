@@ -420,16 +420,6 @@ class SplatTrainer:
             c2w = torch.tensor(
                 self.dataset.camtoworlds[idx], dtype=torch.float32, device=self.device
             )
-            # body2colmap exports cameras with OpenGL→OpenCV rotation baked in.
-            # We need to undo this so points (in OpenGL world) align with cameras.
-            # Apply OpenCV→OpenGL rotation (180° around X) to c2w.
-            opencv_to_opengl = torch.tensor([
-                [1.0,  0.0,  0.0, 0.0],
-                [0.0, -1.0,  0.0, 0.0],
-                [0.0,  0.0, -1.0, 0.0],
-                [0.0,  0.0,  0.0, 1.0],
-            ], dtype=torch.float32, device=self.device)
-            c2w = c2w @ opencv_to_opengl
             vmats.append(torch.linalg.inv(c2w))
             ks.append(
                 torch.tensor(self.dataset.Ks[idx], dtype=torch.float32, device=self.device)
@@ -563,6 +553,19 @@ class SplatTrainer:
         self._init_splats()
         self._init_optimizers()
         self._init_strategy()
+
+        # Debug: print K matrix and image dimensions
+        K0 = self.dataset.Ks[0]
+        img_size = self.dataset.image_sizes[0]
+        rgb_test, _ = self._load_image(0)
+        actual_h, actual_w = rgb_test.shape[:2]
+        print(f"  [intrinsics] K matrix for image 0:")
+        print(f"    fx={K0[0,0]:.1f}  fy={K0[1,1]:.1f}")
+        print(f"    cx={K0[0,2]:.1f}  cy={K0[1,2]:.1f}")
+        print(f"  [intrinsics] COLMAP image size: {img_size[0]}x{img_size[1]} (WxH)")
+        print(f"  [intrinsics] Actual loaded size: {actual_w}x{actual_h} (WxH)")
+        if img_size[0] != actual_w or img_size[1] != actual_h:
+            print(f"  [intrinsics] WARNING: Size mismatch! K matrix may be wrong.")
 
         # Check alpha values on first image (diagnostic)
         rgb, alpha = self._load_image(0)
