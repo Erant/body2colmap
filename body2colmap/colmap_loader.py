@@ -67,21 +67,32 @@ def _parse_cameras_txt(path: Path) -> dict:
 def _parse_images_txt(path: Path) -> list:
     """Parse images.txt → list of (image_id, qw,qx,qy,qz, tx,ty,tz, cam_id, name).
 
-    images.txt alternates: pose line, then points2D line (which we skip).
+    COLMAP images.txt alternates: pose line (10 fields), then an optional
+    points2D line.  Our own exporter writes an empty line for points2D,
+    but after stripping blanks those vanish.  So instead of relying on
+    alternation we identify pose lines by having exactly 10 fields where
+    the last field contains a filename extension.
     """
     images = []
     with open(path) as f:
-        lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
-    # Every other line is the pose, the alternate is 2D points
-    for i in range(0, len(lines), 2):
-        parts = lines[i].split()
-        image_id = int(parts[0])
-        qw, qx, qy, qz = (float(parts[j]) for j in range(1, 5))
-        tx, ty, tz = (float(parts[j]) for j in range(5, 8))
-        cam_id = int(parts[8])
-        name = parts[9]
-        images.append((image_id, np.array([qw, qx, qy, qz]),
-                        np.array([tx, ty, tz]), cam_id, name))
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            # Pose lines have exactly 10 fields; points2D lines don't.
+            if len(parts) != 10:
+                continue
+            # Extra sanity: last field should look like a filename
+            if "." not in parts[9]:
+                continue
+            image_id = int(parts[0])
+            qw, qx, qy, qz = (float(parts[j]) for j in range(1, 5))
+            tx, ty, tz = (float(parts[j]) for j in range(5, 8))
+            cam_id = int(parts[8])
+            name = parts[9]
+            images.append((image_id, np.array([qw, qx, qy, qz]),
+                            np.array([tx, ty, tz]), cam_id, name))
     return images
 
 
