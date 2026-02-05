@@ -605,7 +605,7 @@ def train(
             width=width,
             height=height,
             sh_degree=current_sh_degree,
-            backgrounds=bg[None, None, None, :].expand(1, height, width, 3),  # (1, H, W, 3)
+            backgrounds=bg,  # (3,) — no batch dim needed
         )
         # renders: (1, H, W, 3), render_alphas: (1, H, W, 1)
         rendered = renders[0]  # (H, W, 3)
