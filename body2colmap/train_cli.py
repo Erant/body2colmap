@@ -1,0 +1,203 @@
+"""
+CLI entry point for training 3D Gaussian Splats from COLMAP data.
+
+Usage::
+
+    body2colmap-train ./my_colmap_output -o ./trained_splat
+    body2colmap-train ./dataset --max-steps 15000 --sh-degree 2
+
+The input directory should contain the standard COLMAP layout::
+
+    data_dir/
+    ├── sparse/0/
+    │   ├── cameras.txt
+    │   ├── images.txt
+    │   └── points3D.txt
+    └── images/
+        └── *.png
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Optional
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="body2colmap-train",
+        description="Train 3D Gaussian Splats from a COLMAP dataset using gsplat.",
+    )
+
+    # Positional
+    p.add_argument(
+        "data_dir",
+        type=str,
+        help="Path to COLMAP dataset (contains sparse/0/ and images/).",
+    )
+
+    # Output
+    p.add_argument(
+        "-o", "--output",
+        type=str,
+        default=None,
+        help="Output directory for trained splat.  Defaults to <data_dir>/trained/.",
+    )
+    p.add_argument(
+        "--images-dir",
+        type=str,
+        default=None,
+        help="Explicit image directory override (auto-detected by default).",
+    )
+
+    # Training
+    p.add_argument("--max-steps", type=int, default=30_000, help="Training iterations.")
+    p.add_argument("--batch-size", type=int, default=1, help="Images per step.")
+    p.add_argument("--sh-degree", type=int, default=3, help="Spherical harmonics degree.")
+    p.add_argument("--ssim-lambda", type=float, default=0.2, help="SSIM loss weight.")
+    p.add_argument(
+        "--strategy",
+        choices=["default", "mcmc"],
+        default="default",
+        help="Densification strategy.",
+    )
+    p.add_argument("--device", type=str, default="cuda", help="Device (cuda / cpu).")
+    p.add_argument(
+        "--no-absgrad",
+        action="store_true",
+        help="Disable absolute-value gradient accumulation.",
+    )
+
+    # Densification
+    p.add_argument("--refine-start", type=int, default=None)
+    p.add_argument("--refine-stop", type=int, default=None)
+    p.add_argument("--refine-every", type=int, default=None)
+    p.add_argument("--grow-grad2d", type=float, default=None)
+
+    # Checkpointing
+    p.add_argument(
+        "--save-steps",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Steps at which to save intermediate checkpoints.",
+    )
+
+    return p
+
+
+def _print_progress(step: int, max_steps: int, loss: float) -> None:
+    pct = step / max_steps * 100
+    print(f"  [{step:>6d}/{max_steps}] ({pct:5.1f}%%)  loss={loss:.5f}", flush=True)
+
+
+def main(argv: Optional[list] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    # Resolve output dir
+    data_dir = Path(args.data_dir)
+    if not data_dir.exists():
+        print(f"Error: data directory does not exist: {data_dir}", file=sys.stderr)
+        return 1
+
+    output_dir = Path(args.output) if args.output else data_dir / "trained"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Lazy-import heavy deps so --help stays fast
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        print("Error: PyTorch is required.  pip install torch", file=sys.stderr)
+        return 1
+
+    try:
+        import gsplat  # noqa: F401
+    except ImportError:
+        print("Error: gsplat is required.  pip install gsplat", file=sys.stderr)
+        return 1
+
+    from .trainer import SplatTrainer, TrainConfig
+
+    # Build config
+    cfg = TrainConfig(
+        max_steps=args.max_steps,
+        batch_size=args.batch_size,
+        sh_degree=args.sh_degree,
+        ssim_lambda=args.ssim_lambda,
+        strategy=args.strategy,
+        absgrad=not args.no_absgrad,
+        device=args.device,
+    )
+
+    # Apply optional densification overrides
+    if args.refine_start is not None:
+        cfg.refine_start = args.refine_start
+    if args.refine_stop is not None:
+        cfg.refine_stop = args.refine_stop
+    if args.refine_every is not None:
+        cfg.refine_every = args.refine_every
+    if args.grow_grad2d is not None:
+        cfg.grow_grad2d = args.grow_grad2d
+    if args.save_steps is not None:
+        cfg.save_steps = args.save_steps
+
+    # Print banner
+    print("=" * 60)
+    print("body2colmap-train :: Gaussian Splat Trainer (gsplat)")
+    print("=" * 60)
+    print(f"  Data:       {data_dir}")
+    print(f"  Output:     {output_dir}")
+    print(f"  Steps:      {cfg.max_steps}")
+    print(f"  SH degree:  {cfg.sh_degree}")
+    print(f"  Strategy:   {cfg.strategy}")
+    print(f"  Device:     {cfg.device}")
+    print("=" * 60)
+
+    try:
+        trainer = SplatTrainer(str(data_dir), config=cfg, images_dir=args.images_dir)
+
+        n_images = len(trainer.dataset.image_paths)
+        n_points = len(trainer.dataset.points)
+        print(f"\n  Loaded {n_images} images, {n_points} initial points")
+        print(f"  Scene scale: {trainer.dataset.scene_scale:.3f}")
+        print()
+
+        # Train
+        result = trainer.train(progress_cb=_print_progress)
+
+        # Summary
+        print()
+        print("-" * 60)
+        print(f"  Training complete: {result.n_gaussians} Gaussians")
+        print(f"  Visible (count>0): {(result.view_count > 0).sum().item()}")
+        avg = result.avg_grad_norm
+        print(f"  Avg grad norm:     min={avg.min():.6f}  max={avg.max():.6f}"
+              f"  mean={avg[avg > 0].mean():.6f}")
+        print("-" * 60)
+
+        # Save PLY
+        ply_path = output_dir / "point_cloud.ply"
+        result.save_ply(str(ply_path))
+        print(f"\n  PLY  -> {ply_path}")
+
+        # Save checkpoint (includes statistics)
+        ckpt_path = output_dir / "checkpoint.pt"
+        result.save_checkpoint(str(ckpt_path))
+        print(f"  CKPT -> {ckpt_path}")
+
+        print(f"\nDone.")
+        return 0
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

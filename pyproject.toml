@@ -51,6 +51,12 @@ splat = [
     "gsplat>=1.0.0",
     "plyfile>=0.8.0",
 ]
+train = [
+    "gsplat>=1.0.0",
+    "plyfile>=0.8.0",
+    "torch>=2.0.0",
+    "fused-ssim>=0.1.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/yourusername/body2colmap"
@@ -60,6 +66,7 @@ Issues = "https://github.com/yourusername/body2colmap/issues"
 
 [project.scripts]
 body2colmap = "body2colmap.cli:main"
+body2colmap-train = "body2colmap.train_cli:main"
 
 [tool.setuptools]
 packages = ["body2colmap"]
@@ -128,5 +135,7 @@ module = [
     "pyrender.*",
     "trimesh.*",
     "cv2.*",
+    "gsplat.*",
+    "fused_ssim.*",
 ]
 ignore_missing_imports = true
