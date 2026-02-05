@@ -214,6 +214,7 @@ def _quat_to_rotation(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
 def load_colmap_dataset(
     colmap_dir: str,
     device: str = "cuda",
+    verbose: bool = True,
 ) -> ColmapDataset:
     """
     Load a full COLMAP dataset for training.
@@ -233,6 +234,7 @@ def load_colmap_dataset(
     Args:
         colmap_dir: Path to COLMAP dataset root
         device: torch device
+        verbose: Print loading diagnostics
 
     Returns:
         ColmapDataset with all data loaded as tensors
@@ -337,9 +339,8 @@ def load_colmap_dataset(
     points = torch.from_numpy(points_np).to(device)
     colors = torch.from_numpy(colors_np).to(device)
 
-    # Print diagnostics (once at start)
-    print(f"Loaded {len(rgb_list)} images, {len(points)} initial points")
-    if rgb_list:
+    if verbose and rgb_list:
+        print(f"Loaded {len(rgb_list)} images, {len(points)} initial points")
         print(f"Image size: {width_list[0]}x{height_list[0]}")
         if width_list[0] != cameras[colmap_images[0].camera_id].width:
             print(
@@ -348,14 +349,17 @@ def load_colmap_dataset(
                 f"{cameras[colmap_images[0].camera_id].height}"
                 f" → actual {width_list[0]}x{height_list[0]}"
             )
-    if alpha_list[0] is not None:
-        a = alpha_list[0]
-        print(f"Alpha: min={a.min().item():.3f} max={a.max().item():.3f} mean={a.mean().item():.3f}")
-    sample_K = K_list[0]
-    print(
-        f"K: fx={sample_K[0,0].item():.1f} fy={sample_K[1,1].item():.1f} "
-        f"cx={sample_K[0,2].item():.1f} cy={sample_K[1,2].item():.1f}"
-    )
+        if alpha_list[0] is not None:
+            a = alpha_list[0]
+            print(
+                f"Alpha: min={a.min().item():.3f} "
+                f"max={a.max().item():.3f} mean={a.mean().item():.3f}"
+            )
+        sample_K = K_list[0]
+        print(
+            f"K: fx={sample_K[0,0].item():.1f} fy={sample_K[1,1].item():.1f} "
+            f"cx={sample_K[0,2].item():.1f} cy={sample_K[1,2].item():.1f}"
+        )
 
     return ColmapDataset(
         c2w_matrices=c2w_matrices,
@@ -509,8 +513,10 @@ def train(
     from gsplat.strategy import DefaultStrategy
 
     # Load data
-    dataset = load_colmap_dataset(colmap_dir, device=device)
+    dataset = load_colmap_dataset(colmap_dir, device=device, verbose=verbose)
 
+    if dataset.n_images == 0:
+        raise ValueError("No images found in COLMAP dataset")
     if dataset.n_points == 0:
         raise ValueError("No initial points in points3D.txt — cannot initialize Gaussians")
 
@@ -547,10 +553,7 @@ def train(
         ),
     }
 
-    # DefaultStrategy for densification
-    # absgrad=True is required: it uses a backward hook to capture absolute
-    # gradients on means2d, which works correctly even when gsplat squeezes
-    # the C=1 batch dimension.
+    # DefaultStrategy for densification (absgrad=True required for C=1 compat)
     strategy = DefaultStrategy(
         refine_start_iter=refine_start,
         refine_stop_iter=refine_stop,
@@ -612,17 +615,7 @@ def train(
             backgrounds=bg,  # (3,) — no batch dim needed
             absgrad=True,
         )
-        # renders shape depends on gsplat version; get the image out
         rendered = renders[0] if renders.ndim == 4 else renders  # (H, W, 3)
-
-        # gsplat squeezes C=1 batch dim from info tensors:
-        #   radii:  expected [C, N, 2] → squeezed to [N, 2] (ndim=2)
-        #   means2d: expected [C, N, 2] → squeezed to [N, 2] (ndim=2)
-        # DefaultStrategy._update_state needs the C dimension:
-        #   sel = (info["radii"] > 0.0).all(dim=-1)  → must be [C, N] for torch.where(sel)[1]
-        # So we unsqueeze the batch dim back.
-        if "radii" in info and info["radii"].ndim == 2:
-            info["radii"] = info["radii"].unsqueeze(0)
 
         # Loss
         if gt_alpha is not None:
@@ -645,7 +638,7 @@ def train(
         else:
             loss = l1_loss
 
-        # Densification: pre_backward installs absgrad hook on means2d
+        # Densification
         strategy.step_pre_backward(
             params=params,
             optimizers=optimizers,
@@ -654,20 +647,21 @@ def train(
             info=info,
         )
 
-        # Backward (absgrad hook captures absolute gradients on means2d)
         loss.backward()
-
         final_loss_val = loss.item()
 
-        # means2d also squeezed: [C, N, 2] → [N, 2]. Unsqueeze back and
-        # transfer .absgrad (captured by backward hook) to the new tensor.
+        # gsplat squeezes C=1 batch dim from info tensors:
+        #   radii:  [C, N, 2] → [N, 2],  means2d: [C, N, 2] → [N, 2]
+        # DefaultStrategy._update_state needs the C dim for torch.where(sel)[1].
+        # means2d unsqueeze must happen after backward so absgrad hook fires first.
+        if "radii" in info and info["radii"].ndim == 2:
+            info["radii"] = info["radii"].unsqueeze(0)
         if "means2d" in info and info["means2d"].ndim == 2:
             absgrad_val = getattr(info["means2d"], "absgrad", None)
             info["means2d"] = info["means2d"].unsqueeze(0)
             if absgrad_val is not None:
                 info["means2d"].absgrad = absgrad_val.unsqueeze(0)
 
-        # Densification: post_backward uses captured absgrads for grow/prune
         strategy.step_post_backward(
             params=params,
             optimizers=optimizers,
@@ -690,10 +684,11 @@ def train(
                 f"gaussians={n_gs}"
             )
 
-    # Collect results
-    grad2d = strategy_state.get("grad2d", torch.zeros(len(params["means"])))
+    # Collect training statistics from strategy state
+    n_final = len(params["means"])
+    grad2d = strategy_state.get("grad2d", torch.zeros(n_final, device=device))
     view_count = strategy_state.get(
-        "count", torch.zeros(len(params["means"]), dtype=torch.int32)
+        "count", torch.zeros(n_final, device=device)
     )
 
     # Save PLY
@@ -708,11 +703,11 @@ def train(
         opacities=params["opacities"].detach(),
         sh0=params["sh0"].detach(),
         sh_rest=params["sh_rest"].detach(),
-        grad2d=grad2d if isinstance(grad2d, Tensor) else None,
-        view_count=view_count if isinstance(view_count, Tensor) else None,
+        grad2d=grad2d,
+        view_count=view_count,
     )
     if verbose:
-        print(f"Saved {len(params['means'])} Gaussians to {ply_path}")
+        print(f"Saved {n_final} Gaussians to {ply_path}")
 
     return TrainResult(
         means=params["means"].detach().cpu(),
@@ -721,10 +716,10 @@ def train(
         opacities=params["opacities"].detach().cpu(),
         sh0=params["sh0"].detach().cpu(),
         sh_rest=params["sh_rest"].detach().cpu(),
-        grad2d=grad2d.detach().cpu() if isinstance(grad2d, Tensor) else torch.tensor(grad2d),
-        view_count=view_count.detach().cpu() if isinstance(view_count, Tensor) else torch.tensor(view_count),
+        grad2d=grad2d.detach().cpu(),
+        view_count=view_count.detach().cpu(),
         final_loss=final_loss_val,
-        n_gaussians=len(params["means"]),
+        n_gaussians=n_final,
         sh_degree=sh_degree,
     )
 
