@@ -92,6 +92,10 @@ class TrainConfig:
     # Device
     device: str = "cuda"
 
+    # Debug
+    debug_save_images: bool = False  # save GT vs rendered images during training
+    debug_save_every: int = 500  # save debug images every N steps
+
 
 # ---------------------------------------------------------------------------
 # Training result
@@ -482,11 +486,54 @@ class SplatTrainer:
         )
         return renders, alphas, info
 
+    def _save_debug_images(
+        self,
+        step: int,
+        renders: Tensor,
+        pixels: Tensor,
+        gt_alphas: Optional[Tensor],
+        output_dir: Optional[Path] = None,
+    ) -> None:
+        """Save GT vs rendered comparison images for debugging."""
+        import cv2  # type: ignore
+
+        if output_dir is not None:
+            debug_dir = output_dir / "debug"
+        else:
+            debug_dir = Path("debug_images")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        # Take first image in batch
+        render_np = (renders[0].detach().cpu().numpy() * 255).astype(np.uint8)
+        gt_np = (pixels[0].detach().cpu().numpy() * 255).astype(np.uint8)
+
+        # Convert RGB to BGR for cv2
+        render_bgr = cv2.cvtColor(render_np, cv2.COLOR_RGB2BGR)
+        gt_bgr = cv2.cvtColor(gt_np, cv2.COLOR_RGB2BGR)
+
+        # Create side-by-side comparison
+        h, w = render_bgr.shape[:2]
+        comparison = np.zeros((h, w * 2 + 10, 3), dtype=np.uint8)
+        comparison[:, :w] = gt_bgr
+        comparison[:, w + 10:] = render_bgr
+
+        # Add labels
+        cv2.putText(comparison, "GT", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(comparison, "Rendered", (w + 20, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        # Save
+        cv2.imwrite(str(debug_dir / f"step_{step:06d}.png"), comparison)
+
+        # Also save alpha mask if present
+        if gt_alphas is not None:
+            alpha_np = (gt_alphas[0, :, :, 0].detach().cpu().numpy() * 255).astype(np.uint8)
+            cv2.imwrite(str(debug_dir / f"step_{step:06d}_alpha.png"), alpha_np)
+
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
 
-    def train(self, progress_cb=None) -> TrainResult:
+    def train(self, progress_cb=None, output_dir: Optional[Path] = None) -> TrainResult:
         """Run the full training loop.
 
         Args:
@@ -605,6 +652,10 @@ class SplatTrainer:
                 opt.zero_grad(set_to_none=True)
 
             last_loss = loss.item()
+
+            # Debug: save GT vs rendered comparison images
+            if self.cfg.debug_save_images and step % self.cfg.debug_save_every == 0:
+                self._save_debug_images(step, renders, pixels, gt_alphas, output_dir)
 
             # Progress
             if progress_cb and step % 100 == 0:

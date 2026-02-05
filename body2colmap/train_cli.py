@@ -109,6 +109,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print debug information about cameras and point cloud.",
     )
+    p.add_argument(
+        "--debug-images",
+        action="store_true",
+        help="Save GT vs rendered comparison images during training to output/debug/.",
+    )
 
     return p
 
@@ -166,6 +171,7 @@ def main(argv: Optional[list] = None) -> int:
         device=args.device,
         ignore_alpha=args.no_alpha,
         invert_alpha=args.invert_alpha,
+        debug_save_images=args.debug_images,
     )
 
     # Apply optional densification overrides
@@ -271,7 +277,7 @@ def main(argv: Optional[list] = None) -> int:
             print()
 
         # Train
-        result = trainer.train(progress_cb=_print_progress)
+        result = trainer.train(progress_cb=_print_progress, output_dir=output_dir)
 
         # Summary
         print()
