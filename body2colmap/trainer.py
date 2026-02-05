@@ -565,7 +565,11 @@ class SplatTrainer:
             # Loss — mask by ground-truth alpha so transparent regions
             # don't contribute to the reconstruction objective.
             if gt_alphas is not None:
-                l1 = (torch.abs(renders - pixels) * gt_alphas).sum() / gt_alphas.sum().clamp(min=1)
+                # Expand alpha to RGB channels for proper normalization
+                # Without this, the loss would be 3× too large (sum over 3 channels
+                # but normalized by sum over 1 channel)
+                alpha_rgb = gt_alphas.expand_as(renders)  # (B, H, W, 3)
+                l1 = (torch.abs(renders - pixels) * alpha_rgb).sum() / alpha_rgb.sum().clamp(min=1)
             else:
                 l1 = F.l1_loss(renders, pixels)
 
