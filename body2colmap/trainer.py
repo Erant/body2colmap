@@ -975,6 +975,10 @@ def _export_view_renders(
                 sh_degree=0, backgrounds=bg,
             )
             rendered = renders[0] if renders.ndim == 4 else renders
+            # Per-view normalize to full [0,1] range for visibility
+            r_min, r_max = rendered.min(), rendered.max()
+            if r_max > r_min:
+                rendered = (rendered - r_min) / (r_max - r_min)
             _save(rendered, dirs["grad2d"] / f"{name}_grad2d.png")
 
         if "scale" in dirs:
