@@ -434,7 +434,8 @@ class SplatTrainer:
         """Run the full training loop.
 
         Args:
-            progress_cb: Optional callback ``fn(step, max_steps, loss)``
+            progress_cb: Optional callback
+                ``fn(step, max_steps, loss, *, it_per_sec, n_gaussians)``
                 called every 100 steps for progress reporting.
 
         Returns:
@@ -506,7 +507,11 @@ class SplatTrainer:
 
             # Progress
             if progress_cb and step % 100 == 0:
-                progress_cb(step, max_steps, last_loss)
+                elapsed = time.time() - t0
+                it_s = (step + 1) / elapsed if elapsed > 0 else 0.0
+                n_gs = len(self.splats["means"])
+                progress_cb(step, max_steps, last_loss,
+                            it_per_sec=it_s, n_gaussians=n_gs)
 
         elapsed = time.time() - t0
 

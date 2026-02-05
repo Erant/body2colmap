@@ -94,9 +94,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _print_progress(step: int, max_steps: int, loss: float) -> None:
+def _print_progress(
+    step: int, max_steps: int, loss: float,
+    *, it_per_sec: float = 0.0, n_gaussians: int = 0,
+) -> None:
     pct = step / max_steps * 100
-    print(f"  [{step:>6d}/{max_steps}] ({pct:5.1f}%%)  loss={loss:.5f}", flush=True)
+    print(
+        f"  [{step:>6d}/{max_steps}] ({pct:5.1f}%%)"
+        f"  loss={loss:.5f}"
+        f"  {it_per_sec:.1f} it/s"
+        f"  {n_gaussians:,} gaussians",
+        flush=True,
+    )
 
 
 def main(argv: Optional[list] = None) -> int:
