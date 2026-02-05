@@ -824,12 +824,9 @@ def _ssim(
 # ---------------------------------------------------------------------------
 
 
-def _heatmap(t: Tensor) -> Tensor:
-    """Map values in [0, 1] to a blue-cyan-green-yellow-red heatmap. Returns (N, 3) RGB."""
-    r = torch.clamp(2.0 * t - 0.5, 0.0, 1.0)
-    g = torch.clamp(2.0 * torch.minimum(t, 1.0 - t), 0.0, 1.0)
-    b = torch.clamp(1.5 - 2.0 * t, 0.0, 1.0)
-    return torch.stack([r, g, b], dim=-1)
+def _grad2d_to_rgb(t: Tensor) -> Tensor:
+    """Map grad2d values in [0, 1] to grayscale RGB. 0=black (low grad), 1=white (high grad)."""
+    return t.unsqueeze(-1).expand(-1, 3)
 
 
 @torch.no_grad()
@@ -864,8 +861,8 @@ def _export_grad2d_images(
     g = torch.log1p(g)
     g = g / g.max()
 
-    # Map to heatmap RGB and encode as SH DC
-    colors_rgb = _heatmap(g)  # (N, 3)
+    # Map to grayscale RGB (black=low grad, white=high grad) and encode as SH DC
+    colors_rgb = _grad2d_to_rgb(g)  # (N, 3)
     C0 = 0.28209479177387814
     colors_sh = ((colors_rgb - 0.5) / C0).unsqueeze(1)  # (N, 1, 3)
 
