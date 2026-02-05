@@ -610,6 +610,15 @@ def train(
         # renders: (1, H, W, 3), render_alphas: (1, H, W, 1)
         rendered = renders[0]  # (H, W, 3)
 
+        # gsplat squeezes C=1 batch dim from info tensors, but
+        # DefaultStrategy expects (C, N, ...).  Restore the dim
+        # BEFORE pre_backward so the gradient hook is on the
+        # unsqueezed tensor and grads flow correctly.
+        if "means2d" in info and info["means2d"].ndim == 2:
+            info["means2d"] = info["means2d"].unsqueeze(0)
+        if "radii" in info and info["radii"].ndim == 1:
+            info["radii"] = info["radii"].unsqueeze(0)
+
         # Loss
         if gt_alpha is not None:
             # Alpha-weighted L1: expand alpha to 3 channels for correct normalization
