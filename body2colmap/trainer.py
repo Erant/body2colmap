@@ -421,8 +421,20 @@ class SplatTrainer:
                 self.dataset.camtoworlds[idx], dtype=torch.float32, device=self.device
             )
             vmats.append(torch.linalg.inv(c2w))
+
+            # Scale K matrix if actual image size differs from COLMAP size
+            K = self.dataset.Ks[idx].copy()
+            colmap_w, colmap_h = self.dataset.image_sizes[idx]
+            actual_h, actual_w = rgb.shape[:2]
+            if actual_w != colmap_w or actual_h != colmap_h:
+                scale_x = actual_w / colmap_w
+                scale_y = actual_h / colmap_h
+                K[0, 0] *= scale_x  # fx
+                K[0, 2] *= scale_x  # cx
+                K[1, 1] *= scale_y  # fy
+                K[1, 2] *= scale_y  # cy
             ks.append(
-                torch.tensor(self.dataset.Ks[idx], dtype=torch.float32, device=self.device)
+                torch.tensor(K, dtype=torch.float32, device=self.device)
             )
 
         pixels = torch.stack(imgs)       # (B, H, W, 3)
@@ -555,17 +567,25 @@ class SplatTrainer:
         self._init_strategy()
 
         # Debug: print K matrix and image dimensions
-        K0 = self.dataset.Ks[0]
+        K0 = self.dataset.Ks[0].copy()
         img_size = self.dataset.image_sizes[0]
         rgb_test, _ = self._load_image(0)
         actual_h, actual_w = rgb_test.shape[:2]
-        print(f"  [intrinsics] K matrix for image 0:")
+        print(f"  [intrinsics] COLMAP K matrix for image 0:")
         print(f"    fx={K0[0,0]:.1f}  fy={K0[1,1]:.1f}")
         print(f"    cx={K0[0,2]:.1f}  cy={K0[1,2]:.1f}")
         print(f"  [intrinsics] COLMAP image size: {img_size[0]}x{img_size[1]} (WxH)")
         print(f"  [intrinsics] Actual loaded size: {actual_w}x{actual_h} (WxH)")
         if img_size[0] != actual_w or img_size[1] != actual_h:
-            print(f"  [intrinsics] WARNING: Size mismatch! K matrix may be wrong.")
+            scale_x = actual_w / img_size[0]
+            scale_y = actual_h / img_size[1]
+            K0[0, 0] *= scale_x
+            K0[0, 2] *= scale_x
+            K0[1, 1] *= scale_y
+            K0[1, 2] *= scale_y
+            print(f"  [intrinsics] Scaled K matrix (auto-adjusted):")
+            print(f"    fx={K0[0,0]:.1f}  fy={K0[1,1]:.1f}")
+            print(f"    cx={K0[0,2]:.1f}  cy={K0[1,2]:.1f}")
 
         # Check alpha values on first image (diagnostic)
         rgb, alpha = self._load_image(0)
