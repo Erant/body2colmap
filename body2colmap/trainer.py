@@ -611,11 +611,11 @@ def train(
         rendered = renders[0]  # (H, W, 3)
 
         # gsplat squeezes C=1 batch dim from info tensors, but
-        # DefaultStrategy expects (C, N, ...).  Restore the dim
-        # BEFORE pre_backward so the gradient hook is on the
-        # unsqueezed tensor and grads flow correctly.
-        if "means2d" in info and info["means2d"].ndim == 2:
-            info["means2d"] = info["means2d"].unsqueeze(0)
+        # DefaultStrategy expects (C, N, ...) shapes.
+        # Strategy: keep original means2d for gradient capture (it's in
+        # the compute graph), unsqueeze radii now, then after backward
+        # unsqueeze means2d and transfer the captured gradient.
+        needs_unsqueeze = "means2d" in info and info["means2d"].ndim == 2
         if "radii" in info and info["radii"].ndim == 1:
             info["radii"] = info["radii"].unsqueeze(0)
 
@@ -640,7 +640,8 @@ def train(
         else:
             loss = l1_loss
 
-        # Densification: pre_backward sets up gradient hooks on means2d
+        # pre_backward: retain_grad() on the ORIGINAL means2d (still in
+        # the compute graph so backward will populate .grad)
         strategy.step_pre_backward(
             params=params,
             optimizers=optimizers,
@@ -649,10 +650,20 @@ def train(
             info=info,
         )
 
-        # Backward (gradient hooks from pre_backward capture means2d grads)
+        # Backward (retain_grad on original means2d captures grads)
         loss.backward()
 
         final_loss_val = loss.item()
+
+        # Now unsqueeze means2d and transfer .grad for post_backward
+        if needs_unsqueeze:
+            grad = info["means2d"].grad
+            absgrad = getattr(info["means2d"], "absgrad", None)
+            info["means2d"] = info["means2d"].unsqueeze(0)
+            if grad is not None:
+                info["means2d"].grad = grad.unsqueeze(0)
+            if absgrad is not None:
+                info["means2d"].absgrad = absgrad.unsqueeze(0)
 
         # Densification: post_backward uses captured grads for grow/prune
         strategy.step_post_backward(
