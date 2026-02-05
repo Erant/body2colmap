@@ -100,9 +100,9 @@ def main(argv: Optional[list] = None) -> int:
         help="Export per-view depth renders to DIR (grayscale, near=dark far=bright)",
     )
     parser.add_argument(
-        "--export-grad2d",
+        "--export-confidence",
         metavar="DIR",
-        help="Export per-view grad2d masks to DIR (default strategy only)",
+        help="Export per-view confidence maps to DIR (bright=high grad norm=uncertain)",
     )
     parser.add_argument(
         "--export-scale",
@@ -149,7 +149,7 @@ def main(argv: Optional[list] = None) -> int:
             noise_lr=args.noise_lr,
             export_rgb_dir=args.export_rgb,
             export_depth_dir=args.export_depth,
-            export_grad2d_dir=args.export_grad2d,
+            export_confidence_dir=args.export_confidence,
             export_scale_dir=args.export_scale,
             export_error_dir=args.export_error,
             verbose=not args.quiet,

@@ -92,9 +92,9 @@ class TrainResult:
     sh0: Tensor  # (N, 1, 3) DC spherical harmonic
     sh_rest: Tensor  # (N, K, 3) higher-order SH
 
-    # Per-Gaussian statistics (DefaultStrategy only; None for MCMC)
-    grad2d: Optional[Tensor]  # gradient accumulator
-    view_count: Optional[Tensor]  # how many views each Gaussian was seen in
+    # Per-Gaussian confidence: mean position gradient norm over training.
+    # High value = views disagree about this Gaussian's position = low confidence.
+    confidence: Tensor  # (N,) mean grad norm
 
     # Training metrics
     final_loss: float
@@ -486,7 +486,7 @@ def train(
     noise_lr: float = 5e5,
     export_rgb_dir: Optional[str] = None,
     export_depth_dir: Optional[str] = None,
-    export_grad2d_dir: Optional[str] = None,
+    export_confidence_dir: Optional[str] = None,
     export_scale_dir: Optional[str] = None,
     export_error_dir: Optional[str] = None,
     verbose: bool = True,
@@ -520,7 +520,7 @@ def train(
         noise_lr: Noise learning rate for MCMC position perturbation (mcmc only)
         export_rgb_dir: If set, export per-view RGB renders here
         export_depth_dir: If set, export per-view depth renders here (grayscale)
-        export_grad2d_dir: If set, export per-view grad2d masks here (default strategy only)
+        export_confidence_dir: If set, export per-view confidence maps here (bright=uncertain)
         export_scale_dir: If set, export per-view scale magnitude renders here (grayscale)
         export_error_dir: If set, export per-view |rendered - GT| error maps (grayscale)
         verbose: Print training progress
@@ -609,6 +609,12 @@ def train(
     # Current SH degree (progressively increased)
     current_sh_degree = 0
 
+    # Per-Gaussian gradient norm accumulator for confidence estimation.
+    # High mean grad norm → views disagree about this Gaussian → low confidence.
+    n_init = len(params["means"])
+    grad_norm_accum = torch.zeros(n_init, device=device)
+    grad_norm_count = torch.zeros(n_init, device=device)
+
     # Training loop
     final_loss_val = 0.0
     for step in range(max_steps):
@@ -693,6 +699,11 @@ def train(
         loss.backward()
         final_loss_val = loss.item()
 
+        # Accumulate position gradient norms for confidence estimation
+        if params["means"].grad is not None:
+            grad_norm_accum += params["means"].grad.norm(dim=-1)
+            grad_norm_count += 1
+
         if use_default:
             # gsplat squeezes C=1 batch dim from info tensors:
             #   radii:  [C, N, 2] → [N, 2],  means2d: [C, N, 2] → [N, 2]
@@ -716,6 +727,17 @@ def train(
                 lr=optimizers["means"].param_groups[0]["lr"],
             )
 
+        # Resize grad_norm accumulators if densification changed Gaussian count
+        n_now = len(params["means"])
+        if n_now != len(grad_norm_accum):
+            if n_now > len(grad_norm_accum):
+                pad = n_now - len(grad_norm_accum)
+                grad_norm_accum = torch.cat([grad_norm_accum, torch.zeros(pad, device=device)])
+                grad_norm_count = torch.cat([grad_norm_count, torch.zeros(pad, device=device)])
+            else:
+                grad_norm_accum = grad_norm_accum[:n_now]
+                grad_norm_count = grad_norm_count[:n_now]
+
         # Optimizer step
         for opt in optimizers.values():
             opt.step()
@@ -730,16 +752,11 @@ def train(
                 f"gaussians={n_gs}"
             )
 
-    # Collect training statistics from strategy state
+    # Compute per-Gaussian confidence: mean position gradient norm.
+    # High value = views disagree about where this Gaussian should be = low confidence.
     n_final = len(params["means"])
-    if use_default:
-        grad2d = strategy_state.get("grad2d", torch.zeros(n_final, device=device))
-        view_count = strategy_state.get(
-            "count", torch.zeros(n_final, device=device)
-        )
-    else:
-        grad2d = None
-        view_count = None
+    safe_count = grad_norm_count.clamp(min=1)
+    confidence = grad_norm_accum / safe_count  # (N,) mean grad norm per Gaussian
 
     # Save PLY
     output_path = Path(output_dir)
@@ -753,20 +770,13 @@ def train(
         opacities=params["opacities"].detach(),
         sh0=params["sh0"].detach(),
         sh_rest=params["sh_rest"].detach(),
-        grad2d=grad2d,
-        view_count=view_count,
+        confidence=confidence,
     )
     if verbose:
         print(f"Saved {n_final} Gaussians to {ply_path}")
 
     # Export per-view renders if requested
-    effective_grad2d_dir = export_grad2d_dir
-    if export_grad2d_dir and not use_default:
-        if verbose:
-            print("Warning: --export-grad2d only available with default strategy, skipping")
-        effective_grad2d_dir = None
-
-    any_export = (export_rgb_dir or export_depth_dir or effective_grad2d_dir
+    any_export = (export_rgb_dir or export_depth_dir or export_confidence_dir
                   or export_scale_dir or export_error_dir)
     if any_export:
         _export_view_renders(
@@ -778,8 +788,8 @@ def train(
             verbose=verbose,
             rgb_dir=export_rgb_dir,
             depth_dir=export_depth_dir,
-            grad2d_dir=effective_grad2d_dir,
-            grad2d=grad2d,
+            confidence_dir=export_confidence_dir,
+            confidence=confidence,
             scale_dir=export_scale_dir,
             error_dir=export_error_dir,
         )
@@ -791,8 +801,7 @@ def train(
         opacities=params["opacities"].detach().cpu(),
         sh0=params["sh0"].detach().cpu(),
         sh_rest=params["sh_rest"].detach().cpu(),
-        grad2d=grad2d.detach().cpu() if grad2d is not None else None,
-        view_count=view_count.detach().cpu() if view_count is not None else None,
+        confidence=confidence.detach().cpu(),
         final_loss=final_loss_val,
         n_gaussians=n_final,
         sh_degree=sh_degree,
@@ -843,7 +852,7 @@ def _ssim(
 
 
 # ---------------------------------------------------------------------------
-# Per-view image export (RGB, depth, grad2d, scale)
+# Per-view image export (RGB, depth, confidence, scale, error)
 # ---------------------------------------------------------------------------
 
 
@@ -864,18 +873,19 @@ def _export_view_renders(
     verbose: bool,
     rgb_dir: Optional[str] = None,
     depth_dir: Optional[str] = None,
-    grad2d_dir: Optional[str] = None,
-    grad2d: Optional[Tensor] = None,
+    confidence_dir: Optional[str] = None,
+    confidence: Optional[Tensor] = None,
     scale_dir: Optional[str] = None,
     error_dir: Optional[str] = None,
 ) -> None:
-    """Render all training views and export RGB, depth, grad2d, scale, and/or error images.
+    """Render all training views and export RGB, depth, confidence, scale, and/or error images.
 
     Args:
         rgb_dir: If set, save RGB renders (full SH) as <name>.png
         depth_dir: If set, save depth renders (per-view normalized, grayscale) as <name>_depth.png
-        grad2d_dir: If set, save grad2d masks (log-scaled grayscale) as <name>_grad2d.png
-        grad2d: Per-Gaussian grad2d values (required if grad2d_dir is set)
+        confidence_dir: If set, save per-Gaussian confidence maps as <name>_confidence.png
+            (bright = high mean grad norm = low confidence / multi-view disagreement)
+        confidence: Per-Gaussian mean grad norm values (required if confidence_dir is set)
         scale_dir: If set, save per-Gaussian scale magnitude renders (grayscale) as <name>_scale.png
         error_dir: If set, save per-view |rendered - GT| error maps as <name>_error.png
     """
@@ -893,16 +903,16 @@ def _export_view_renders(
         p = Path(depth_dir)
         p.mkdir(parents=True, exist_ok=True)
         dirs["depth"] = p
-    if grad2d_dir and grad2d is not None:
-        g = grad2d.clamp(min=0)
-        if g.max() > 0:
-            g = torch.log1p(g) / torch.log1p(g).max()
-            grad2d_sh = _scalar_to_sh_dc(g)
-            p = Path(grad2d_dir)
+    if confidence_dir and confidence is not None:
+        c = confidence.clamp(min=0)
+        if c.max() > 0:
+            c = torch.log1p(c) / torch.log1p(c).max()
+            confidence_sh = _scalar_to_sh_dc(c)
+            p = Path(confidence_dir)
             p.mkdir(parents=True, exist_ok=True)
-            dirs["grad2d"] = p
+            dirs["confidence"] = p
         elif verbose:
-            print("No nonzero grad2d values, skipping grad2d export")
+            print("No nonzero confidence values, skipping confidence export")
     if scale_dir:
         # Per-Gaussian mean scale magnitude (log-space → linear), log-normalized to [0,1]
         scale_mag = torch.exp(params["scales"]).mean(dim=-1)  # (N,) mean across 3 axes
@@ -1000,10 +1010,10 @@ def _export_view_renders(
             rendered = renders[0] if renders.ndim == 4 else renders
             _save(rendered, dirs["depth"] / f"{name}_depth.png")
 
-        if "grad2d" in dirs:
+        if "confidence" in dirs:
             renders, _, _ = rasterization(
                 means=means, quats=quats, scales=scales_act,
-                opacities=opacities_act, colors=grad2d_sh,
+                opacities=opacities_act, colors=confidence_sh,
                 viewmats=viewmat.unsqueeze(0), Ks=K.unsqueeze(0),
                 width=width, height=height,
                 sh_degree=0, backgrounds=bg,
@@ -1013,7 +1023,7 @@ def _export_view_renders(
             r_min, r_max = rendered.min(), rendered.max()
             if r_max > r_min:
                 rendered = (rendered - r_min) / (r_max - r_min)
-            _save(rendered, dirs["grad2d"] / f"{name}_grad2d.png")
+            _save(rendered, dirs["confidence"] / f"{name}_confidence.png")
 
         if "scale" in dirs:
             renders, _, _ = rasterization(
@@ -1044,8 +1054,7 @@ def save_ply(
     opacities: Tensor,
     sh0: Tensor,
     sh_rest: Tensor,
-    grad2d: Optional[Tensor] = None,
-    view_count: Optional[Tensor] = None,
+    confidence: Optional[Tensor] = None,
 ) -> None:
     """
     Save trained Gaussians as PLY file in standard 3DGS format.
@@ -1057,8 +1066,7 @@ def save_ply(
         opacity             - Logit-space opacity
         f_dc_0, f_dc_1, f_dc_2    - DC spherical harmonic (RGB)
         f_rest_*            - Higher-order SH coefficients
-        grad2d              - Accumulated 2D gradient (from DefaultStrategy)
-        view_count          - Number of views each Gaussian was observed in
+        confidence          - Mean position gradient norm (high = low confidence)
 
     Args:
         filepath: Output path
@@ -1068,8 +1076,7 @@ def save_ply(
         opacities: (N,) logit-space
         sh0: (N, 1, 3) DC SH
         sh_rest: (N, K, 3) higher-order SH
-        grad2d: (N,) gradient accumulator from DefaultStrategy
-        view_count: (N,) per-Gaussian observation count
+        confidence: (N,) mean position grad norm per Gaussian
     """
     try:
         from plyfile import PlyData, PlyElement
@@ -1116,9 +1123,8 @@ def save_ply(
         ("rot_2", "f4"),
         ("rot_3", "f4"),
     ]
-    # Training statistics (for renderer use)
-    dtype_fields.append(("grad2d", "f4"))
-    dtype_fields.append(("view_count", "u4"))
+    # Per-Gaussian confidence (mean position grad norm; high = uncertain)
+    dtype_fields.append(("confidence", "f4"))
 
     arr = np.zeros(N, dtype=dtype_fields)
     arr["x"] = means_np[:, 0]
@@ -1147,11 +1153,8 @@ def save_ply(
     arr["rot_2"] = quats_np[:, 2]
     arr["rot_3"] = quats_np[:, 3]
 
-    # Training statistics
-    if grad2d is not None:
-        arr["grad2d"] = grad2d.cpu().numpy()
-    if view_count is not None:
-        arr["view_count"] = view_count.cpu().numpy().astype(np.uint32)
+    if confidence is not None:
+        arr["confidence"] = confidence.cpu().numpy()
 
     el = PlyElement.describe(arr, "vertex")
     PlyData([el]).write(str(filepath))
