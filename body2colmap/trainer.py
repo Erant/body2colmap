@@ -420,6 +420,16 @@ class SplatTrainer:
             c2w = torch.tensor(
                 self.dataset.camtoworlds[idx], dtype=torch.float32, device=self.device
             )
+            # body2colmap exports cameras with OpenGL→OpenCV rotation baked in.
+            # We need to undo this so points (in OpenGL world) align with cameras.
+            # Apply OpenCV→OpenGL rotation (180° around X) to c2w.
+            opencv_to_opengl = torch.tensor([
+                [1.0,  0.0,  0.0, 0.0],
+                [0.0, -1.0,  0.0, 0.0],
+                [0.0,  0.0, -1.0, 0.0],
+                [0.0,  0.0,  0.0, 1.0],
+            ], dtype=torch.float32, device=self.device)
+            c2w = c2w @ opencv_to_opengl
             vmats.append(torch.linalg.inv(c2w))
             ks.append(
                 torch.tensor(self.dataset.Ks[idx], dtype=torch.float32, device=self.device)
