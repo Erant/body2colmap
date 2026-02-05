@@ -483,6 +483,8 @@ def train(
     prune_opacity: float = 0.005,
     cap_max: int = 1_000_000,
     noise_lr: float = 5e5,
+    export_rgb_dir: Optional[str] = None,
+    export_depth_dir: Optional[str] = None,
     export_grad2d_dir: Optional[str] = None,
     verbose: bool = True,
 ) -> TrainResult:
@@ -512,7 +514,9 @@ def train(
         prune_opacity: Opacity threshold for pruning
         cap_max: Maximum number of Gaussians (mcmc only)
         noise_lr: Noise learning rate for MCMC position perturbation (mcmc only)
-        export_grad2d_dir: If set, export per-view grad2d heatmaps here (default only)
+        export_rgb_dir: If set, export per-view RGB renders here
+        export_depth_dir: If set, export per-view depth renders here (grayscale)
+        export_grad2d_dir: If set, export per-view grad2d masks here (default strategy only)
         verbose: Print training progress
 
     Returns:
@@ -745,21 +749,26 @@ def train(
     if verbose:
         print(f"Saved {n_final} Gaussians to {ply_path}")
 
-    # Export grad2d heatmaps if requested
-    if export_grad2d_dir is not None:
-        if not use_default:
-            if verbose:
-                print("Warning: --export-grad2d only available with default strategy, skipping")
-        elif grad2d is not None:
-            _export_grad2d_images(
-                dataset=dataset,
-                params=params,
-                grad2d=grad2d,
-                output_dir=export_grad2d_dir,
-                bg=bg,
-                device=device,
-                verbose=verbose,
-            )
+    # Export per-view renders if requested
+    effective_grad2d_dir = export_grad2d_dir
+    if export_grad2d_dir and not use_default:
+        if verbose:
+            print("Warning: --export-grad2d only available with default strategy, skipping")
+        effective_grad2d_dir = None
+
+    if export_rgb_dir or export_depth_dir or effective_grad2d_dir:
+        _export_view_renders(
+            dataset=dataset,
+            params=params,
+            sh_degree=sh_degree,
+            bg=bg,
+            device=device,
+            verbose=verbose,
+            rgb_dir=export_rgb_dir,
+            depth_dir=export_depth_dir,
+            grad2d_dir=effective_grad2d_dir,
+            grad2d=grad2d,
+        )
 
     return TrainResult(
         means=params["means"].detach().cpu(),
@@ -820,84 +829,135 @@ def _ssim(
 
 
 # ---------------------------------------------------------------------------
-# Grad2D visualization
+# Per-view image export (RGB, depth, grad2d)
 # ---------------------------------------------------------------------------
 
 
-def _grad2d_to_rgb(t: Tensor) -> Tensor:
-    """Map grad2d values in [0, 1] to grayscale RGB. 0=black (low grad), 1=white (high grad)."""
-    return t.unsqueeze(-1).expand(-1, 3)
+def _scalar_to_sh_dc(values: Tensor) -> Tensor:
+    """Convert (N,) scalar values in [0,1] to SH DC coefficients (N, 1, 3)."""
+    C0 = 0.28209479177387814
+    rgb = values.unsqueeze(-1).expand(-1, 3)  # grayscale (N, 3)
+    return ((rgb - 0.5) / C0).unsqueeze(1)  # (N, 1, 3)
 
 
 @torch.no_grad()
-def _export_grad2d_images(
+def _export_view_renders(
     dataset: ColmapDataset,
     params: Dict[str, Tensor],
-    grad2d: Tensor,
-    output_dir: str,
+    sh_degree: int,
     bg: Tensor,
     device: str,
     verbose: bool,
+    rgb_dir: Optional[str] = None,
+    depth_dir: Optional[str] = None,
+    grad2d_dir: Optional[str] = None,
+    grad2d: Optional[Tensor] = None,
 ) -> None:
-    """Render per-view grad2d heatmaps and save as images.
+    """Render all training views and export RGB, depth, and/or grad2d images.
 
-    Each Gaussian is colored by its accumulated 2D gradient magnitude
-    (log-scaled, then mapped to a blue-to-red heatmap). The result is
-    rasterized from every training view and saved as PNG.
+    Args:
+        rgb_dir: If set, save RGB renders (full SH) as <name>.png
+        depth_dir: If set, save depth renders (per-view normalized, grayscale) as <name>_depth.png
+        grad2d_dir: If set, save grad2d masks (log-scaled grayscale) as <name>_grad2d.png
+        grad2d: Per-Gaussian grad2d values (required if grad2d_dir is set)
     """
     import cv2
 
     from gsplat import rasterization
 
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    # Set up output directories for requested channels
+    dirs: Dict[str, Path] = {}
+    if rgb_dir:
+        p = Path(rgb_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        dirs["rgb"] = p
+    if depth_dir:
+        p = Path(depth_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        dirs["depth"] = p
+    if grad2d_dir and grad2d is not None:
+        g = grad2d.clamp(min=0)
+        if g.max() > 0:
+            g = torch.log1p(g) / torch.log1p(g).max()
+            grad2d_sh = _scalar_to_sh_dc(g)
+            p = Path(grad2d_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            dirs["grad2d"] = p
+        elif verbose:
+            print("No nonzero grad2d values, skipping grad2d export")
 
-    # Log-scale normalization for better dynamic range
-    g = grad2d.clamp(min=0)
-    if g.max() == 0:
-        if verbose:
-            print("No nonzero grad2d values, skipping export")
+    if not dirs:
         return
-    g = torch.log1p(g)
-    g = g / g.max()
 
-    # Map to grayscale RGB (black=low grad, white=high grad) and encode as SH DC
-    colors_rgb = _grad2d_to_rgb(g)  # (N, 3)
-    C0 = 0.28209479177387814
-    colors_sh = ((colors_rgb - 0.5) / C0).unsqueeze(1)  # (N, 1, 3)
-
+    channels = ", ".join(dirs.keys())
     if verbose:
-        print(f"Exporting grad2d heatmaps for {dataset.n_images} views...")
+        print(f"Exporting {channels} for {dataset.n_images} views...")
+
+    # Precompute SH colors for RGB
+    colors_sh = torch.cat([params["sh0"], params["sh_rest"]], dim=1)
+    means = params["means"]
+    quats = params["quats"]
+    scales_act = torch.exp(params["scales"])
+    opacities_act = torch.sigmoid(params["opacities"])
+
+    def _save(img_tensor: Tensor, path: Path) -> None:
+        img_np = (img_tensor.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        cv2.imwrite(str(path), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
 
     for idx in range(dataset.n_images):
         viewmat = torch.linalg.inv(dataset.c2w_matrices[idx])
         K = dataset.K_matrices[idx]
         width = dataset.widths[idx]
         height = dataset.heights[idx]
-
-        renders, _, _ = rasterization(
-            means=params["means"],
-            quats=params["quats"],
-            scales=torch.exp(params["scales"]),
-            opacities=torch.sigmoid(params["opacities"]),
-            colors=colors_sh,
-            viewmats=viewmat.unsqueeze(0),
-            Ks=K.unsqueeze(0),
-            width=width,
-            height=height,
-            sh_degree=0,
-            backgrounds=bg,
-        )
-        rendered = renders[0] if renders.ndim == 4 else renders
-
-        img_np = (rendered.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
-        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-
         name = Path(dataset.image_names[idx]).stem
-        cv2.imwrite(str(out_path / f"{name}_grad2d.png"), img_bgr)
+
+        if "rgb" in dirs:
+            renders, _, _ = rasterization(
+                means=means, quats=quats, scales=scales_act,
+                opacities=opacities_act, colors=colors_sh,
+                viewmats=viewmat.unsqueeze(0), Ks=K.unsqueeze(0),
+                width=width, height=height,
+                sh_degree=sh_degree, backgrounds=bg,
+            )
+            rendered = renders[0] if renders.ndim == 4 else renders
+            _save(rendered, dirs["rgb"] / f"{name}.png")
+
+        if "depth" in dirs:
+            # Per-Gaussian camera-space depth (view-dependent)
+            means_h = torch.cat([means, torch.ones(len(means), 1, device=device)], dim=-1)
+            depths = (viewmat @ means_h.T).T[:, 2]  # z in camera space
+            # Normalize visible range to [0, 1] (near=dark, far=bright)
+            valid = depths > 0
+            if valid.any():
+                d_min, d_max = depths[valid].min(), depths[valid].max()
+                depths_norm = ((depths - d_min) / (d_max - d_min).clamp(min=1e-6)).clamp(0, 1)
+            else:
+                depths_norm = torch.zeros_like(depths)
+            depth_sh = _scalar_to_sh_dc(depths_norm)
+            renders, _, _ = rasterization(
+                means=means, quats=quats, scales=scales_act,
+                opacities=opacities_act, colors=depth_sh,
+                viewmats=viewmat.unsqueeze(0), Ks=K.unsqueeze(0),
+                width=width, height=height,
+                sh_degree=0, backgrounds=bg,
+            )
+            rendered = renders[0] if renders.ndim == 4 else renders
+            _save(rendered, dirs["depth"] / f"{name}_depth.png")
+
+        if "grad2d" in dirs:
+            renders, _, _ = rasterization(
+                means=means, quats=quats, scales=scales_act,
+                opacities=opacities_act, colors=grad2d_sh,
+                viewmats=viewmat.unsqueeze(0), Ks=K.unsqueeze(0),
+                width=width, height=height,
+                sh_degree=0, backgrounds=bg,
+            )
+            rendered = renders[0] if renders.ndim == 4 else renders
+            _save(rendered, dirs["grad2d"] / f"{name}_grad2d.png")
 
     if verbose:
-        print(f"Saved {dataset.n_images} grad2d images to {out_path}")
+        for channel, d in dirs.items():
+            print(f"Saved {dataset.n_images} {channel} images to {d}")
 
 
 # ---------------------------------------------------------------------------

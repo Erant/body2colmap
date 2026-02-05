@@ -84,9 +84,19 @@ def main(argv: Optional[list] = None) -> int:
         help="Noise learning rate for MCMC position perturbation (mcmc only, default: 5e5)",
     )
     parser.add_argument(
+        "--export-rgb",
+        metavar="DIR",
+        help="Export per-view RGB renders to DIR",
+    )
+    parser.add_argument(
+        "--export-depth",
+        metavar="DIR",
+        help="Export per-view depth renders to DIR (grayscale, near=dark far=bright)",
+    )
+    parser.add_argument(
         "--export-grad2d",
         metavar="DIR",
-        help="Export per-view grad2d heatmaps to DIR (default strategy only)",
+        help="Export per-view grad2d masks to DIR (default strategy only)",
     )
     parser.add_argument(
         "--quiet",
@@ -120,6 +130,8 @@ def main(argv: Optional[list] = None) -> int:
             strategy_type=args.strategy,
             cap_max=args.cap_max,
             noise_lr=args.noise_lr,
+            export_rgb_dir=args.export_rgb,
+            export_depth_dir=args.export_depth,
             export_grad2d_dir=args.export_grad2d,
             verbose=not args.quiet,
         )
