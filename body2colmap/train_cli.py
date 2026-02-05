@@ -91,6 +91,19 @@ def _build_parser() -> argparse.ArgumentParser:
              "for the first training view after training completes.",
     )
 
+    # Debugging
+    p.add_argument(
+        "--no-alpha",
+        action="store_true",
+        help="Ignore alpha channel in images (treat as fully opaque). "
+             "Useful for debugging training issues.",
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print debug information about cameras and point cloud.",
+    )
+
     return p
 
 
@@ -145,6 +158,7 @@ def main(argv: Optional[list] = None) -> int:
         strategy=args.strategy,
         absgrad=not args.no_absgrad,
         device=args.device,
+        ignore_alpha=args.no_alpha,
     )
 
     # Apply optional densification overrides
@@ -178,7 +192,73 @@ def main(argv: Optional[list] = None) -> int:
         n_points = len(trainer.dataset.points)
         print(f"\n  Loaded {n_images} images, {n_points} initial points")
         print(f"  Scene scale: {trainer.dataset.scene_scale:.3f}")
+        if args.no_alpha:
+            print(f"  Alpha:       DISABLED (--no-alpha)")
         print()
+
+        # Debug output
+        if args.debug:
+            import numpy as np
+            print("-" * 60)
+            print("DEBUG: Camera and Point Cloud Information")
+            print("-" * 60)
+
+            # Point cloud stats
+            pts = trainer.dataset.points
+            pts_min = pts.min(axis=0)
+            pts_max = pts.max(axis=0)
+            pts_center = (pts_min + pts_max) / 2
+            print(f"  Point cloud bounds:")
+            print(f"    min:    [{pts_min[0]:8.3f}, {pts_min[1]:8.3f}, {pts_min[2]:8.3f}]")
+            print(f"    max:    [{pts_max[0]:8.3f}, {pts_max[1]:8.3f}, {pts_max[2]:8.3f}]")
+            print(f"    center: [{pts_center[0]:8.3f}, {pts_center[1]:8.3f}, {pts_center[2]:8.3f}]")
+
+            # Camera positions (first 5 and last)
+            c2ws = trainer.dataset.camtoworlds
+            cam_positions = c2ws[:, :3, 3]  # (N, 3)
+            print(f"\n  Camera positions (first 5):")
+            for i in range(min(5, len(cam_positions))):
+                pos = cam_positions[i]
+                print(f"    [{i:3d}]: [{pos[0]:8.3f}, {pos[1]:8.3f}, {pos[2]:8.3f}]")
+            if len(cam_positions) > 5:
+                pos = cam_positions[-1]
+                print(f"    [{len(cam_positions)-1:3d}]: [{pos[0]:8.3f}, {pos[1]:8.3f}, {pos[2]:8.3f}]")
+
+            # Check if cameras are looking at points
+            cam_center = cam_positions.mean(axis=0)
+            print(f"\n  Camera centroid: [{cam_center[0]:.3f}, {cam_center[1]:.3f}, {cam_center[2]:.3f}]")
+
+            # Distance from camera center to point cloud center
+            dist_to_pts = np.linalg.norm(cam_center - pts_center)
+            print(f"  Distance (cam center -> point center): {dist_to_pts:.3f}")
+
+            # Average camera-to-point distance
+            avg_cam_dist = np.linalg.norm(cam_positions - pts_center, axis=1).mean()
+            print(f"  Average camera distance to point center: {avg_cam_dist:.3f}")
+
+            # Check camera forward directions
+            print(f"\n  Camera forward directions (first 3):")
+            for i in range(min(3, len(c2ws))):
+                # Forward is -Z in camera space, which is -column 2 of rotation
+                fwd = -c2ws[i, :3, 2]
+                fwd = fwd / np.linalg.norm(fwd)
+                print(f"    [{i:3d}]: [{fwd[0]:6.3f}, {fwd[1]:6.3f}, {fwd[2]:6.3f}]")
+
+            # Check if first camera is looking toward point cloud
+            c0_pos = cam_positions[0]
+            c0_fwd = -c2ws[0, :3, 2]
+            c0_fwd = c0_fwd / np.linalg.norm(c0_fwd)
+            to_pts = pts_center - c0_pos
+            to_pts = to_pts / np.linalg.norm(to_pts)
+            dot = np.dot(c0_fwd, to_pts)
+            print(f"\n  Camera[0] forward · direction_to_points = {dot:.3f}")
+            if dot < 0:
+                print("  WARNING: Camera[0] is looking AWAY from point cloud!")
+            elif dot < 0.5:
+                print("  WARNING: Camera[0] is not directly facing point cloud")
+
+            print("-" * 60)
+            print()
 
         # Train
         result = trainer.train(progress_cb=_print_progress)

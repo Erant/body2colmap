@@ -82,6 +82,7 @@ class TrainConfig:
     near_plane: float = 0.01
     far_plane: float = 1e10
     bg_color: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # background for alpha compositing
+    ignore_alpha: bool = False  # if True, treat all images as opaque (for debugging)
 
     # Checkpointing / evaluation
     eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
@@ -360,7 +361,7 @@ class SplatTrainer:
         if img is None:
             raise FileNotFoundError(f"Cannot read image: {path}")
 
-        if img.ndim == 3 and img.shape[2] == 4:
+        if img.ndim == 3 and img.shape[2] == 4 and not self.cfg.ignore_alpha:
             # BGRA → RGBA
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
             rgba = torch.tensor(img, dtype=torch.float32, device=self.device) / 255.0
@@ -368,6 +369,9 @@ class SplatTrainer:
             alpha = rgba[:, :, 3:4]
             return rgb, alpha
         else:
+            # Drop alpha channel if present
+            if img.ndim == 3 and img.shape[2] == 4:
+                img = img[:, :, :3]
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             rgb = torch.tensor(img, dtype=torch.float32, device=self.device) / 255.0
             return rgb, None
@@ -499,6 +503,22 @@ class SplatTrainer:
         self._init_splats()
         self._init_optimizers()
         self._init_strategy()
+
+        # Check alpha values on first image (diagnostic)
+        rgb, alpha = self._load_image(0)
+        if alpha is not None:
+            alpha_mean = alpha.mean().item()
+            alpha_min = alpha.min().item()
+            alpha_max = alpha.max().item()
+            opaque_frac = (alpha > 0.5).float().mean().item()
+            print(f"  [alpha check] mean={alpha_mean:.3f} min={alpha_min:.3f} "
+                  f"max={alpha_max:.3f} opaque={opaque_frac*100:.1f}%")
+            if alpha_mean < 0.01:
+                print("  [alpha check] WARNING: alpha is mostly zero - "
+                      "images may be fully transparent or alpha is inverted!")
+            elif alpha_mean > 0.99:
+                print("  [alpha check] WARNING: alpha is mostly one - "
+                      "no transparency in images")
 
         max_steps = self.cfg.max_steps
         t0 = time.time()
