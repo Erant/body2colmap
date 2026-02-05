@@ -511,14 +511,34 @@ class SplatTrainer:
             alpha_min = alpha.min().item()
             alpha_max = alpha.max().item()
             opaque_frac = (alpha > 0.5).float().mean().item()
-            print(f"  [alpha check] mean={alpha_mean:.3f} min={alpha_min:.3f} "
-                  f"max={alpha_max:.3f} opaque={opaque_frac*100:.1f}%")
-            if alpha_mean < 0.01:
-                print("  [alpha check] WARNING: alpha is mostly zero - "
-                      "images may be fully transparent or alpha is inverted!")
-            elif alpha_mean > 0.99:
-                print("  [alpha check] WARNING: alpha is mostly one - "
-                      "no transparency in images")
+            transparent_frac = (alpha < 0.5).float().mean().item()
+            print(f"  [alpha] mean={alpha_mean:.3f} min={alpha_min:.3f} "
+                  f"max={alpha_max:.3f}")
+            print(f"  [alpha] opaque (>0.5): {opaque_frac*100:.1f}%  "
+                  f"transparent (<0.5): {transparent_frac*100:.1f}%")
+
+            # Check RGB values in transparent vs opaque regions
+            opaque_mask = alpha > 0.5
+            transp_mask = alpha < 0.5
+            if opaque_mask.any():
+                rgb_opaque_mean = rgb[opaque_mask.expand_as(rgb)].mean().item()
+                print(f"  [alpha] RGB mean in opaque regions: {rgb_opaque_mean:.3f}")
+            if transp_mask.any():
+                rgb_transp_mean = rgb[transp_mask.expand_as(rgb)].mean().item()
+                print(f"  [alpha] RGB mean in transparent regions: {rgb_transp_mean:.3f}")
+
+            if alpha_mean < 0.05:
+                print("  [alpha] WARNING: alpha is mostly zero - "
+                      "images may be inverted! Try --no-alpha")
+            elif alpha_mean > 0.95:
+                print("  [alpha] NOTE: alpha is mostly one - "
+                      "images have minimal transparency")
+            elif opaque_frac < 0.3:
+                # Small figure in large transparent background - check if alpha might be inverted
+                print("  [alpha] NOTE: small opaque region - "
+                      "if training fails, try --no-alpha")
+        else:
+            print("  [alpha] Images are opaque (no alpha channel or --no-alpha)")
 
         max_steps = self.cfg.max_steps
         t0 = time.time()

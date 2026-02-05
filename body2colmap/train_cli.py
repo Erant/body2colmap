@@ -237,16 +237,17 @@ def main(argv: Optional[list] = None) -> int:
             print(f"  Average camera distance to point center: {avg_cam_dist:.3f}")
 
             # Check camera forward directions
-            print(f"\n  Camera forward directions (first 3):")
+            # Note: COLMAP uses OpenCV convention where camera looks down +Z
+            # So forward in world space is +column 2 of c2w rotation
+            print(f"\n  Camera forward directions (first 3, +Z = COLMAP/OpenCV):")
             for i in range(min(3, len(c2ws))):
-                # Forward is -Z in camera space, which is -column 2 of rotation
-                fwd = -c2ws[i, :3, 2]
+                fwd = c2ws[i, :3, 2]  # +Z for OpenCV convention
                 fwd = fwd / np.linalg.norm(fwd)
                 print(f"    [{i:3d}]: [{fwd[0]:6.3f}, {fwd[1]:6.3f}, {fwd[2]:6.3f}]")
 
             # Check if first camera is looking toward point cloud
             c0_pos = cam_positions[0]
-            c0_fwd = -c2ws[0, :3, 2]
+            c0_fwd = c2ws[0, :3, 2]  # +Z for OpenCV convention
             c0_fwd = c0_fwd / np.linalg.norm(c0_fwd)
             to_pts = pts_center - c0_pos
             to_pts = to_pts / np.linalg.norm(to_pts)
