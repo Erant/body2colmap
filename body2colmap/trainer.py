@@ -83,6 +83,7 @@ class TrainConfig:
     far_plane: float = 1e10
     bg_color: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # background for alpha compositing
     ignore_alpha: bool = False  # if True, treat all images as opaque (for debugging)
+    invert_alpha: bool = False  # if True, use (1 - alpha) instead of alpha
 
     # Checkpointing / evaluation
     eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
@@ -367,6 +368,8 @@ class SplatTrainer:
             rgba = torch.tensor(img, dtype=torch.float32, device=self.device) / 255.0
             rgb = rgba[:, :, :3]
             alpha = rgba[:, :, 3:4]
+            if self.cfg.invert_alpha:
+                alpha = 1.0 - alpha
             return rgb, alpha
         else:
             # Drop alpha channel if present

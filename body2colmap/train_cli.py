@@ -99,6 +99,12 @@ def _build_parser() -> argparse.ArgumentParser:
              "Useful for debugging training issues.",
     )
     p.add_argument(
+        "--invert-alpha",
+        action="store_true",
+        help="Invert alpha channel (use 1-alpha). "
+             "Try this if training produces noise with normal alpha.",
+    )
+    p.add_argument(
         "--debug",
         action="store_true",
         help="Print debug information about cameras and point cloud.",
@@ -159,6 +165,7 @@ def main(argv: Optional[list] = None) -> int:
         absgrad=not args.no_absgrad,
         device=args.device,
         ignore_alpha=args.no_alpha,
+        invert_alpha=args.invert_alpha,
     )
 
     # Apply optional densification overrides
@@ -194,6 +201,8 @@ def main(argv: Optional[list] = None) -> int:
         print(f"  Scene scale: {trainer.dataset.scene_scale:.3f}")
         if args.no_alpha:
             print(f"  Alpha:       DISABLED (--no-alpha)")
+        elif args.invert_alpha:
+            print(f"  Alpha:       INVERTED (--invert-alpha)")
         print()
 
         # Debug output
