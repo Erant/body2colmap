@@ -2,7 +2,8 @@
 3D Gaussian Splat trainer using gsplat.
 
 Reads a standard COLMAP dataset (cameras.txt, images.txt, points3D.txt + images/)
-and trains 3D Gaussians using gsplat's rasterization() and DefaultStrategy.
+and trains 3D Gaussians using gsplat's rasterization() with either DefaultStrategy
+(gradient-based densification) or MCMCStrategy (stochastic relocation/sampling).
 
 Supports RGBA images with alpha-masked loss (transparent background).
 Auto-scales K matrix when actual image size differs from COLMAP's recorded size.
@@ -91,9 +92,9 @@ class TrainResult:
     sh0: Tensor  # (N, 1, 3) DC spherical harmonic
     sh_rest: Tensor  # (N, K, 3) higher-order SH
 
-    # Per-Gaussian statistics from DefaultStrategy
-    grad2d: Tensor  # gradient accumulator
-    view_count: Tensor  # how many views each Gaussian was seen in
+    # Per-Gaussian statistics (DefaultStrategy only; None for MCMC)
+    grad2d: Optional[Tensor]  # gradient accumulator
+    view_count: Optional[Tensor]  # how many views each Gaussian was seen in
 
     # Training metrics
     final_loss: float
@@ -467,6 +468,7 @@ def train(
     device: str = "cuda",
     bg_color: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     ssim_lambda: float = 0.2,
+    strategy_type: str = "default",
     lr_means_base: float = 1.6e-4,
     lr_scales: float = 5e-3,
     lr_quats: float = 1e-3,
@@ -479,6 +481,9 @@ def train(
     refine_every: int = 100,
     grow_grad2d: float = 0.0002,
     prune_opacity: float = 0.005,
+    cap_max: int = 1_000_000,
+    noise_lr: float = 5e5,
+    export_grad2d_dir: Optional[str] = None,
     verbose: bool = True,
 ) -> TrainResult:
     """
@@ -492,6 +497,7 @@ def train(
         device: Torch device
         bg_color: Background color (R, G, B) in [0, 1]
         ssim_lambda: Weight for SSIM loss (L1 weight = 1 - ssim_lambda)
+        strategy_type: "default" (gradient densification) or "mcmc" (stochastic)
         lr_means_base: Base learning rate for positions (scaled by scene_scale)
         lr_scales: Learning rate for scales
         lr_quats: Learning rate for quaternions
@@ -502,15 +508,21 @@ def train(
         refine_start: Step to start densification
         refine_stop: Step to stop densification
         refine_every: Densification interval
-        grow_grad2d: Gradient threshold for densification
+        grow_grad2d: Gradient threshold for densification (default only)
         prune_opacity: Opacity threshold for pruning
+        cap_max: Maximum number of Gaussians (mcmc only)
+        noise_lr: Noise learning rate for MCMC position perturbation (mcmc only)
+        export_grad2d_dir: If set, export per-view grad2d heatmaps here (default only)
         verbose: Print training progress
 
     Returns:
         TrainResult with trained parameters and statistics
     """
     from gsplat import rasterization
-    from gsplat.strategy import DefaultStrategy
+
+    use_default = strategy_type == "default"
+    if strategy_type not in ("default", "mcmc"):
+        raise ValueError(f"Unknown strategy: {strategy_type!r}. Use 'default' or 'mcmc'.")
 
     # Load data
     dataset = load_colmap_dataset(colmap_dir, device=device, verbose=verbose)
@@ -553,17 +565,36 @@ def train(
         ),
     }
 
-    # DefaultStrategy for densification (absgrad=True required for C=1 compat)
-    strategy = DefaultStrategy(
-        refine_start_iter=refine_start,
-        refine_stop_iter=refine_stop,
-        refine_every=refine_every,
-        grow_grad2d=grow_grad2d,
-        prune_opa=prune_opacity,
-        absgrad=True,
-        verbose=verbose,
-    )
-    strategy_state = strategy.initialize_state(scene_scale=scene_scale)
+    # Densification strategy
+    if use_default:
+        from gsplat.strategy import DefaultStrategy
+
+        strategy = DefaultStrategy(
+            refine_start_iter=refine_start,
+            refine_stop_iter=refine_stop,
+            refine_every=refine_every,
+            grow_grad2d=grow_grad2d,
+            prune_opa=prune_opacity,
+            absgrad=True,  # required for C=1 compat
+            verbose=verbose,
+        )
+        strategy_state = strategy.initialize_state(scene_scale=scene_scale)
+    else:
+        from gsplat.strategy import MCMCStrategy
+
+        strategy = MCMCStrategy(
+            cap_max=cap_max,
+            noise_lr=noise_lr,
+            refine_start_iter=refine_start,
+            refine_stop_iter=refine_stop,
+            refine_every=refine_every,
+            min_opacity=prune_opacity,
+            verbose=verbose,
+        )
+        strategy_state = strategy.initialize_state()
+
+    if verbose:
+        print(f"Strategy: {strategy_type}")
 
     # Current SH degree (progressively increased)
     current_sh_degree = 0
@@ -613,7 +644,7 @@ def train(
             height=height,
             sh_degree=current_sh_degree,
             backgrounds=bg,  # (3,) — no batch dim needed
-            absgrad=True,
+            absgrad=use_default,  # only DefaultStrategy needs absgrad
         )
         rendered = renders[0] if renders.ndim == 4 else renders  # (H, W, 3)
 
@@ -639,36 +670,37 @@ def train(
             loss = l1_loss
 
         # Densification
-        strategy.step_pre_backward(
-            params=params,
-            optimizers=optimizers,
-            state=strategy_state,
-            step=step,
-            info=info,
-        )
+        if use_default:
+            strategy.step_pre_backward(
+                params=params, optimizers=optimizers,
+                state=strategy_state, step=step, info=info,
+            )
 
         loss.backward()
         final_loss_val = loss.item()
 
-        # gsplat squeezes C=1 batch dim from info tensors:
-        #   radii:  [C, N, 2] → [N, 2],  means2d: [C, N, 2] → [N, 2]
-        # DefaultStrategy._update_state needs the C dim for torch.where(sel)[1].
-        # means2d unsqueeze must happen after backward so absgrad hook fires first.
-        if "radii" in info and info["radii"].ndim == 2:
-            info["radii"] = info["radii"].unsqueeze(0)
-        if "means2d" in info and info["means2d"].ndim == 2:
-            absgrad_val = getattr(info["means2d"], "absgrad", None)
-            info["means2d"] = info["means2d"].unsqueeze(0)
-            if absgrad_val is not None:
-                info["means2d"].absgrad = absgrad_val.unsqueeze(0)
-
-        strategy.step_post_backward(
-            params=params,
-            optimizers=optimizers,
-            state=strategy_state,
-            step=step,
-            info=info,
-        )
+        if use_default:
+            # gsplat squeezes C=1 batch dim from info tensors:
+            #   radii:  [C, N, 2] → [N, 2],  means2d: [C, N, 2] → [N, 2]
+            # DefaultStrategy._update_state needs the C dim for torch.where(sel)[1].
+            # means2d unsqueeze must happen after backward so absgrad hook fires first.
+            if "radii" in info and info["radii"].ndim == 2:
+                info["radii"] = info["radii"].unsqueeze(0)
+            if "means2d" in info and info["means2d"].ndim == 2:
+                absgrad_val = getattr(info["means2d"], "absgrad", None)
+                info["means2d"] = info["means2d"].unsqueeze(0)
+                if absgrad_val is not None:
+                    info["means2d"].absgrad = absgrad_val.unsqueeze(0)
+            strategy.step_post_backward(
+                params=params, optimizers=optimizers,
+                state=strategy_state, step=step, info=info,
+            )
+        else:
+            strategy.step_post_backward(
+                params=params, optimizers=optimizers,
+                state=strategy_state, step=step, info=info,
+                lr=optimizers["means"].param_groups[0]["lr"],
+            )
 
         # Optimizer step
         for opt in optimizers.values():
@@ -686,10 +718,14 @@ def train(
 
     # Collect training statistics from strategy state
     n_final = len(params["means"])
-    grad2d = strategy_state.get("grad2d", torch.zeros(n_final, device=device))
-    view_count = strategy_state.get(
-        "count", torch.zeros(n_final, device=device)
-    )
+    if use_default:
+        grad2d = strategy_state.get("grad2d", torch.zeros(n_final, device=device))
+        view_count = strategy_state.get(
+            "count", torch.zeros(n_final, device=device)
+        )
+    else:
+        grad2d = None
+        view_count = None
 
     # Save PLY
     output_path = Path(output_dir)
@@ -709,6 +745,22 @@ def train(
     if verbose:
         print(f"Saved {n_final} Gaussians to {ply_path}")
 
+    # Export grad2d heatmaps if requested
+    if export_grad2d_dir is not None:
+        if not use_default:
+            if verbose:
+                print("Warning: --export-grad2d only available with default strategy, skipping")
+        elif grad2d is not None:
+            _export_grad2d_images(
+                dataset=dataset,
+                params=params,
+                grad2d=grad2d,
+                output_dir=export_grad2d_dir,
+                bg=bg,
+                device=device,
+                verbose=verbose,
+            )
+
     return TrainResult(
         means=params["means"].detach().cpu(),
         scales=params["scales"].detach().cpu(),
@@ -716,8 +768,8 @@ def train(
         opacities=params["opacities"].detach().cpu(),
         sh0=params["sh0"].detach().cpu(),
         sh_rest=params["sh_rest"].detach().cpu(),
-        grad2d=grad2d.detach().cpu(),
-        view_count=view_count.detach().cpu(),
+        grad2d=grad2d.detach().cpu() if grad2d is not None else None,
+        view_count=view_count.detach().cpu() if view_count is not None else None,
         final_loss=final_loss_val,
         n_gaussians=n_final,
         sh_degree=sh_degree,
@@ -765,6 +817,90 @@ def _ssim(
         (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
     )
     return ssim_map.mean()
+
+
+# ---------------------------------------------------------------------------
+# Grad2D visualization
+# ---------------------------------------------------------------------------
+
+
+def _heatmap(t: Tensor) -> Tensor:
+    """Map values in [0, 1] to a blue-cyan-green-yellow-red heatmap. Returns (N, 3) RGB."""
+    r = torch.clamp(2.0 * t - 0.5, 0.0, 1.0)
+    g = torch.clamp(2.0 * torch.minimum(t, 1.0 - t), 0.0, 1.0)
+    b = torch.clamp(1.5 - 2.0 * t, 0.0, 1.0)
+    return torch.stack([r, g, b], dim=-1)
+
+
+@torch.no_grad()
+def _export_grad2d_images(
+    dataset: ColmapDataset,
+    params: Dict[str, Tensor],
+    grad2d: Tensor,
+    output_dir: str,
+    bg: Tensor,
+    device: str,
+    verbose: bool,
+) -> None:
+    """Render per-view grad2d heatmaps and save as images.
+
+    Each Gaussian is colored by its accumulated 2D gradient magnitude
+    (log-scaled, then mapped to a blue-to-red heatmap). The result is
+    rasterized from every training view and saved as PNG.
+    """
+    import cv2
+
+    from gsplat import rasterization
+
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    # Log-scale normalization for better dynamic range
+    g = grad2d.clamp(min=0)
+    if g.max() == 0:
+        if verbose:
+            print("No nonzero grad2d values, skipping export")
+        return
+    g = torch.log1p(g)
+    g = g / g.max()
+
+    # Map to heatmap RGB and encode as SH DC
+    colors_rgb = _heatmap(g)  # (N, 3)
+    C0 = 0.28209479177387814
+    colors_sh = ((colors_rgb - 0.5) / C0).unsqueeze(1)  # (N, 1, 3)
+
+    if verbose:
+        print(f"Exporting grad2d heatmaps for {dataset.n_images} views...")
+
+    for idx in range(dataset.n_images):
+        viewmat = torch.linalg.inv(dataset.c2w_matrices[idx])
+        K = dataset.K_matrices[idx]
+        width = dataset.widths[idx]
+        height = dataset.heights[idx]
+
+        renders, _, _ = rasterization(
+            means=params["means"],
+            quats=params["quats"],
+            scales=torch.exp(params["scales"]),
+            opacities=torch.sigmoid(params["opacities"]),
+            colors=colors_sh,
+            viewmats=viewmat.unsqueeze(0),
+            Ks=K.unsqueeze(0),
+            width=width,
+            height=height,
+            sh_degree=0,
+            backgrounds=bg,
+        )
+        rendered = renders[0] if renders.ndim == 4 else renders
+
+        img_np = (rendered.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+        name = Path(dataset.image_names[idx]).stem
+        cv2.imwrite(str(out_path / f"{name}_grad2d.png"), img_bgr)
+
+    if verbose:
+        print(f"Saved {dataset.n_images} grad2d images to {out_path}")
 
 
 # ---------------------------------------------------------------------------

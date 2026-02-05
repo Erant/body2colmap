@@ -66,6 +66,29 @@ def main(argv: Optional[list] = None) -> int:
         help="SSIM loss weight; L1 weight = 1 - this (default: 0.2)",
     )
     parser.add_argument(
+        "--strategy",
+        choices=["default", "mcmc"],
+        default="default",
+        help="Densification strategy: 'default' (gradient-based) or 'mcmc' (stochastic) (default: default)",
+    )
+    parser.add_argument(
+        "--cap-max",
+        type=int,
+        default=1_000_000,
+        help="Max number of Gaussians (mcmc strategy only, default: 1000000)",
+    )
+    parser.add_argument(
+        "--noise-lr",
+        type=float,
+        default=5e5,
+        help="Noise learning rate for MCMC position perturbation (mcmc only, default: 5e5)",
+    )
+    parser.add_argument(
+        "--export-grad2d",
+        metavar="DIR",
+        help="Export per-view grad2d heatmaps to DIR (default strategy only)",
+    )
+    parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -94,6 +117,10 @@ def main(argv: Optional[list] = None) -> int:
             device=args.device,
             bg_color=bg_color,
             ssim_lambda=args.ssim_lambda,
+            strategy_type=args.strategy,
+            cap_max=args.cap_max,
+            noise_lr=args.noise_lr,
+            export_grad2d_dir=args.export_grad2d,
             verbose=not args.quiet,
         )
 
