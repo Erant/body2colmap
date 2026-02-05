@@ -251,10 +251,13 @@ class SplatTrainer:
             raise ValueError("Point cloud is empty – cannot initialise Gaussians.")
 
         # Scales: initialise from average nearest-neighbour distance
-        from gsplat.utils import knn  # type: ignore
-
-        dists, _ = knn(points, K=4)  # (N, 4) squared distances
-        avg_dist = dists[:, 1:].mean(dim=-1).sqrt()  # skip self
+        # Compute K=4 nearest neighbours via brute-force cdist (only runs
+        # once at init, so O(N^2) is fine for typical point cloud sizes).
+        with torch.no_grad():
+            dists = torch.cdist(points, points)  # (N, N) pairwise L2
+            # K+1 smallest (includes self at dist 0)
+            topk_dists, _ = dists.topk(4, dim=-1, largest=False)
+            avg_dist = topk_dists[:, 1:].mean(dim=-1)  # skip self
         scales = torch.log(avg_dist.unsqueeze(-1).expand(-1, 3)).float()
 
         # Quaternions: identity
