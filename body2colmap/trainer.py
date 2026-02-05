@@ -615,10 +615,13 @@ def train(
         # renders shape depends on gsplat version; get the image out
         rendered = renders[0] if renders.ndim == 4 else renders  # (H, W, 3)
 
-        # gsplat squeezes C=1 batch dim from info["radii"]: (N,) → need (1, N)
-        # for DefaultStrategy's torch.where(sel)[1] which requires 2D input.
-        # (radii is not in the compute graph, so unsqueeze is safe)
-        if "radii" in info and info["radii"].ndim == 1:
+        # gsplat squeezes C=1 batch dim from info tensors:
+        #   radii:  expected [C, N, 2] → squeezed to [N, 2] (ndim=2)
+        #   means2d: expected [C, N, 2] → squeezed to [N, 2] (ndim=2)
+        # DefaultStrategy._update_state needs the C dimension:
+        #   sel = (info["radii"] > 0.0).all(dim=-1)  → must be [C, N] for torch.where(sel)[1]
+        # So we unsqueeze the batch dim back.
+        if "radii" in info and info["radii"].ndim == 2:
             info["radii"] = info["radii"].unsqueeze(0)
 
         # Loss
@@ -656,8 +659,8 @@ def train(
 
         final_loss_val = loss.item()
 
-        # gsplat squeezes C=1 from means2d too; unsqueeze it and transfer
-        # the .absgrad captured by the backward hook so shapes match radii (1, N).
+        # means2d also squeezed: [C, N, 2] → [N, 2]. Unsqueeze back and
+        # transfer .absgrad (captured by backward hook) to the new tensor.
         if "means2d" in info and info["means2d"].ndim == 2:
             absgrad_val = getattr(info["means2d"], "absgrad", None)
             info["means2d"] = info["means2d"].unsqueeze(0)
