@@ -115,6 +115,9 @@ class TrainResult:
     grad2d: Tensor       # [N]  cumulative 2D gradient norms
     view_count: Tensor   # [N]  number of views each Gaussian was visible in
 
+    # Overall training loss (final step)
+    final_loss: float = 0.0
+
     # Convenience -----------------------------------------------------------
 
     @property
@@ -496,9 +499,11 @@ class SplatTrainer:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
 
+            last_loss = loss.item()
+
             # Progress
             if progress_cb and step % 100 == 0:
-                progress_cb(step, max_steps, loss.item())
+                progress_cb(step, max_steps, last_loss)
 
         elapsed = time.time() - t0
 
@@ -522,6 +527,7 @@ class SplatTrainer:
             sh_degree=self.cfg.sh_degree,
             grad2d=grad2d.detach().cpu(),
             view_count=count.detach().cpu(),
+            final_loss=last_loss,
         )
 
     # ------------------------------------------------------------------

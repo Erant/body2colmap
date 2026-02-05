@@ -178,6 +178,7 @@ def main(argv: Optional[list] = None) -> int:
         print()
         print("-" * 60)
         print(f"  Training complete: {result.n_gaussians} Gaussians")
+        print(f"  Final loss:        {result.final_loss:.6f}")
         print(f"  Visible (count>0): {(result.view_count > 0).sum().item()}")
         avg = result.avg_grad_norm
         print(f"  Avg grad norm:     min={avg.min():.6f}  max={avg.max():.6f}"
