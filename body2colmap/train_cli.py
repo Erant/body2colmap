@@ -110,6 +110,11 @@ def main(argv: Optional[list] = None) -> int:
         help="Export per-view scale magnitude renders to DIR (grayscale, bright=large)",
     )
     parser.add_argument(
+        "--export-error",
+        metavar="DIR",
+        help="Export per-view reconstruction error maps to DIR (grayscale, bright=high error)",
+    )
+    parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -146,6 +151,7 @@ def main(argv: Optional[list] = None) -> int:
             export_depth_dir=args.export_depth,
             export_grad2d_dir=args.export_grad2d,
             export_scale_dir=args.export_scale,
+            export_error_dir=args.export_error,
             verbose=not args.quiet,
         )
 

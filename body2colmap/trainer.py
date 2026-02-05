@@ -488,6 +488,7 @@ def train(
     export_depth_dir: Optional[str] = None,
     export_grad2d_dir: Optional[str] = None,
     export_scale_dir: Optional[str] = None,
+    export_error_dir: Optional[str] = None,
     verbose: bool = True,
 ) -> TrainResult:
     """
@@ -521,6 +522,7 @@ def train(
         export_depth_dir: If set, export per-view depth renders here (grayscale)
         export_grad2d_dir: If set, export per-view grad2d masks here (default strategy only)
         export_scale_dir: If set, export per-view scale magnitude renders here (grayscale)
+        export_error_dir: If set, export per-view |rendered - GT| error maps (grayscale)
         verbose: Print training progress
 
     Returns:
@@ -764,7 +766,9 @@ def train(
             print("Warning: --export-grad2d only available with default strategy, skipping")
         effective_grad2d_dir = None
 
-    if export_rgb_dir or export_depth_dir or effective_grad2d_dir or export_scale_dir:
+    any_export = (export_rgb_dir or export_depth_dir or effective_grad2d_dir
+                  or export_scale_dir or export_error_dir)
+    if any_export:
         _export_view_renders(
             dataset=dataset,
             params=params,
@@ -777,6 +781,7 @@ def train(
             grad2d_dir=effective_grad2d_dir,
             grad2d=grad2d,
             scale_dir=export_scale_dir,
+            error_dir=export_error_dir,
         )
 
     return TrainResult(
@@ -862,8 +867,9 @@ def _export_view_renders(
     grad2d_dir: Optional[str] = None,
     grad2d: Optional[Tensor] = None,
     scale_dir: Optional[str] = None,
+    error_dir: Optional[str] = None,
 ) -> None:
-    """Render all training views and export RGB, depth, grad2d, and/or scale images.
+    """Render all training views and export RGB, depth, grad2d, scale, and/or error images.
 
     Args:
         rgb_dir: If set, save RGB renders (full SH) as <name>.png
@@ -871,6 +877,7 @@ def _export_view_renders(
         grad2d_dir: If set, save grad2d masks (log-scaled grayscale) as <name>_grad2d.png
         grad2d: Per-Gaussian grad2d values (required if grad2d_dir is set)
         scale_dir: If set, save per-Gaussian scale magnitude renders (grayscale) as <name>_scale.png
+        error_dir: If set, save per-view |rendered - GT| error maps as <name>_error.png
     """
     import cv2
 
@@ -907,6 +914,10 @@ def _export_view_renders(
             dirs["scale"] = p
         elif verbose:
             print("No nonzero scale values, skipping scale export")
+    if error_dir:
+        p = Path(error_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        dirs["error"] = p
 
     if not dirs:
         return
@@ -926,6 +937,8 @@ def _export_view_renders(
         img_np = (img_tensor.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
         cv2.imwrite(str(path), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
 
+    need_rgb_render = "rgb" in dirs or "error" in dirs
+
     for idx in range(dataset.n_images):
         viewmat = torch.linalg.inv(dataset.c2w_matrices[idx])
         K = dataset.K_matrices[idx]
@@ -933,7 +946,8 @@ def _export_view_renders(
         height = dataset.heights[idx]
         name = Path(dataset.image_names[idx]).stem
 
-        if "rgb" in dirs:
+        rgb_rendered = None
+        if need_rgb_render:
             renders, _, _ = rasterization(
                 means=means, quats=quats, scales=scales_act,
                 opacities=opacities_act, colors=colors_sh,
@@ -941,8 +955,28 @@ def _export_view_renders(
                 width=width, height=height,
                 sh_degree=sh_degree, backgrounds=bg,
             )
-            rendered = renders[0] if renders.ndim == 4 else renders
-            _save(rendered, dirs["rgb"] / f"{name}.png")
+            rgb_rendered = renders[0] if renders.ndim == 4 else renders
+            if "rgb" in dirs:
+                _save(rgb_rendered, dirs["rgb"] / f"{name}.png")
+
+        if "error" in dirs:
+            # Composite GT over background (same as training loop)
+            gt_rgb = dataset.images[idx].to(device)
+            gt_alpha = dataset.alphas[idx]
+            if gt_alpha is not None:
+                gt_alpha = gt_alpha.to(device)
+                gt_composited = gt_rgb * gt_alpha + bg * (1.0 - gt_alpha)
+            else:
+                gt_composited = gt_rgb
+            # Mean absolute error across channels → grayscale
+            error = (rgb_rendered - gt_composited).abs().mean(dim=-1)  # (H, W)
+            # Per-view normalize to full [0,1] range
+            e_min, e_max = error.min(), error.max()
+            if e_max > e_min:
+                error = (error - e_min) / (e_max - e_min)
+            # Expand to 3-channel grayscale for _save
+            error_rgb = error.unsqueeze(-1).expand(-1, -1, 3)
+            _save(error_rgb, dirs["error"] / f"{name}_error.png")
 
         if "depth" in dirs:
             # Per-Gaussian camera-space depth (view-dependent)
