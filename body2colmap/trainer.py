@@ -481,6 +481,7 @@ def train(
     refine_every: int = 100,
     grow_grad2d: float = 0.0002,
     prune_opacity: float = 0.005,
+    scale_reg_lambda: float = 0.01,
     cap_max: int = 1_000_000,
     noise_lr: float = 5e5,
     export_rgb_dir: Optional[str] = None,
@@ -512,6 +513,7 @@ def train(
         refine_every: Densification interval
         grow_grad2d: Gradient threshold for densification (default only)
         prune_opacity: Opacity threshold for pruning
+        scale_reg_lambda: Scale regularization weight (penalizes oversized Gaussians)
         cap_max: Maximum number of Gaussians (mcmc only)
         noise_lr: Noise learning rate for MCMC position perturbation (mcmc only)
         export_rgb_dir: If set, export per-view RGB renders here
@@ -649,6 +651,7 @@ def train(
             sh_degree=current_sh_degree,
             backgrounds=bg,  # (3,) — no batch dim needed
             absgrad=use_default,  # only DefaultStrategy needs absgrad
+            antialiased=True,
         )
         rendered = renders[0] if renders.ndim == 4 else renders  # (H, W, 3)
 
@@ -672,6 +675,10 @@ def train(
             loss = (1.0 - ssim_lambda) * l1_loss + ssim_lambda * (1.0 - ssim_val)
         else:
             loss = l1_loss
+
+        # Scale regularization: penalize oversized Gaussians to reduce color blotches
+        if scale_reg_lambda > 0:
+            loss = loss + scale_reg_lambda * torch.abs(params["scales"]).mean()
 
         # Densification
         if use_default:

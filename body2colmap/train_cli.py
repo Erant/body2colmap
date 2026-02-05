@@ -66,6 +66,12 @@ def main(argv: Optional[list] = None) -> int:
         help="SSIM loss weight; L1 weight = 1 - this (default: 0.2)",
     )
     parser.add_argument(
+        "--scale-reg",
+        type=float,
+        default=0.01,
+        help="Scale regularization weight to penalize oversized Gaussians (default: 0.01)",
+    )
+    parser.add_argument(
         "--strategy",
         choices=["default", "mcmc"],
         default="default",
@@ -127,6 +133,7 @@ def main(argv: Optional[list] = None) -> int:
             device=args.device,
             bg_color=bg_color,
             ssim_lambda=args.ssim_lambda,
+            scale_reg_lambda=args.scale_reg,
             strategy_type=args.strategy,
             cap_max=args.cap_max,
             noise_lr=args.noise_lr,
