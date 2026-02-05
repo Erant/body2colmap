@@ -81,6 +81,7 @@ class TrainConfig:
     antialiased: bool = False
     near_plane: float = 0.01
     far_plane: float = 1e10
+    bg_color: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # background for alpha compositing
 
     # Checkpointing / evaluation
     eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
@@ -346,32 +347,65 @@ class SplatTrainer:
     # Data loading
     # ------------------------------------------------------------------
 
-    def _load_image(self, idx: int) -> Tensor:
-        """Load a training image as float32 tensor (H, W, 3) in [0, 1]."""
+    def _load_image(self, idx: int) -> Tuple[Tensor, Optional[Tensor]]:
+        """Load a training image.
+
+        Returns:
+            rgb: (H, W, 3) float32 in [0, 1]
+            alpha: (H, W, 1) float32 in [0, 1], or *None* if opaque.
+        """
         import cv2  # type: ignore
         path = str(self.dataset.image_paths[idx])
-        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if img is None:
             raise FileNotFoundError(f"Cannot read image: {path}")
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return torch.tensor(img, dtype=torch.float32, device=self.device) / 255.0
 
-    def _sample_batch(self, step: int) -> Tuple[Tensor, Tensor, Tensor, int, int]:
+        if img.ndim == 3 and img.shape[2] == 4:
+            # BGRA → RGBA
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+            rgba = torch.tensor(img, dtype=torch.float32, device=self.device) / 255.0
+            rgb = rgba[:, :, :3]
+            alpha = rgba[:, :, 3:4]
+            return rgb, alpha
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            rgb = torch.tensor(img, dtype=torch.float32, device=self.device) / 255.0
+            return rgb, None
+
+    def _sample_batch(
+        self, step: int,
+    ) -> Tuple[Tensor, Tensor, Tensor, Optional[Tensor], int, int]:
         """Sample a random batch of training views.
 
         Returns:
             viewmats: (B, 4, 4)
             Ks: (B, 3, 3)
-            pixels: (B, H, W, 3)
+            pixels: (B, H, W, 3) — RGB composited over bg_color
+            alphas: (B, H, W, 1) or *None* if all images are opaque
             width: int
             height: int
         """
         n_images = len(self.dataset.image_paths)
         indices = np.random.choice(n_images, self.cfg.batch_size, replace=False)
 
-        imgs, vmats, ks = [], [], []
+        imgs, masks, vmats, ks = [], [], [], []
+        has_alpha = False
         for idx in indices:
-            imgs.append(self._load_image(idx))
+            rgb, alpha = self._load_image(idx)
+            if alpha is not None:
+                has_alpha = True
+                # Composite ground-truth over bg_color so it matches the
+                # rasteriser output (which also composites over bg_color).
+                bg = torch.tensor(self.cfg.bg_color, dtype=torch.float32,
+                                  device=self.device)
+                rgb = rgb * alpha + bg * (1.0 - alpha)
+                masks.append(alpha)
+            else:
+                masks.append(torch.ones(
+                    rgb.shape[0], rgb.shape[1], 1,
+                    dtype=torch.float32, device=self.device,
+                ))
+            imgs.append(rgb)
             c2w = torch.tensor(
                 self.dataset.camtoworlds[idx], dtype=torch.float32, device=self.device
             )
@@ -383,8 +417,9 @@ class SplatTrainer:
         pixels = torch.stack(imgs)       # (B, H, W, 3)
         viewmats = torch.stack(vmats)    # (B, 4, 4)
         Ks = torch.stack(ks)             # (B, 3, 3)
+        alphas = torch.stack(masks) if has_alpha else None  # (B, H, W, 1) or None
         height, width = pixels.shape[1], pixels.shape[2]
-        return viewmats, Ks, pixels, width, height
+        return viewmats, Ks, pixels, alphas, width, height
 
     # ------------------------------------------------------------------
     # Forward pass
@@ -397,11 +432,24 @@ class SplatTrainer:
         width: int,
         height: int,
         sh_degree: int,
+        backgrounds: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor, Dict[str, Any]]:
-        """Run gsplat rasterisation."""
+        """Run gsplat rasterisation.
+
+        Args:
+            backgrounds: (C, 3) per-camera background colour.  When
+                *None* the configured ``bg_color`` is used for every
+                camera in the batch.
+        """
         from gsplat import rasterization  # type: ignore
 
         colors = torch.cat([self.splats["sh0"], self.splats["shN"]], dim=1)  # (N, K, 3)
+
+        if backgrounds is None:
+            n_cams = viewmats.shape[-3]  # C
+            backgrounds = torch.tensor(
+                self.cfg.bg_color, dtype=torch.float32, device=self.device,
+            ).expand(n_cams, -1)  # (C, 3)
 
         render_mode = "RGB"
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
@@ -421,6 +469,7 @@ class SplatTrainer:
             sh_degree=sh_degree,
             packed=self.cfg.packed,
             absgrad=self.cfg.absgrad,
+            backgrounds=backgrounds,
             render_mode=render_mode,
             rasterize_mode=rasterize_mode,
         )
@@ -459,7 +508,7 @@ class SplatTrainer:
             sh_degree = min(step // self.cfg.sh_degree_interval, self.cfg.sh_degree)
 
             # Sample training batch
-            viewmats, Ks, pixels, width, height = self._sample_batch(step)
+            viewmats, Ks, pixels, gt_alphas, width, height = self._sample_batch(step)
 
             # Forward
             renders, alphas, info = self._rasterize(viewmats, Ks, width, height, sh_degree)
@@ -473,8 +522,13 @@ class SplatTrainer:
                 info=info,
             )
 
-            # Loss
-            l1 = F.l1_loss(renders, pixels)
+            # Loss — mask by ground-truth alpha so transparent regions
+            # don't contribute to the reconstruction objective.
+            if gt_alphas is not None:
+                l1 = (torch.abs(renders - pixels) * gt_alphas).sum() / gt_alphas.sum().clamp(min=1)
+            else:
+                l1 = F.l1_loss(renders, pixels)
+
             if fused_ssim is not None:
                 ssim_val = fused_ssim(
                     renders.permute(0, 3, 1, 2),
