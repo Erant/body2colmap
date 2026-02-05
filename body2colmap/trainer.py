@@ -615,6 +615,12 @@ def train(
         # renders shape depends on gsplat version; get the image out
         rendered = renders[0] if renders.ndim == 4 else renders  # (H, W, 3)
 
+        # gsplat squeezes C=1 batch dim from info["radii"]: (N,) → need (1, N)
+        # for DefaultStrategy's torch.where(sel)[1] which requires 2D input.
+        # (radii is not in the compute graph, so unsqueeze is safe)
+        if "radii" in info and info["radii"].ndim == 1:
+            info["radii"] = info["radii"].unsqueeze(0)
+
         # Loss
         if gt_alpha is not None:
             # Alpha-weighted L1: expand alpha to 3 channels for correct normalization
@@ -649,6 +655,14 @@ def train(
         loss.backward()
 
         final_loss_val = loss.item()
+
+        # gsplat squeezes C=1 from means2d too; unsqueeze it and transfer
+        # the .absgrad captured by the backward hook so shapes match radii (1, N).
+        if "means2d" in info and info["means2d"].ndim == 2:
+            absgrad_val = getattr(info["means2d"], "absgrad", None)
+            info["means2d"] = info["means2d"].unsqueeze(0)
+            if absgrad_val is not None:
+                info["means2d"].absgrad = absgrad_val.unsqueeze(0)
 
         # Densification: post_backward uses captured absgrads for grow/prune
         strategy.step_post_backward(
