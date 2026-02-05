@@ -631,12 +631,7 @@ def train(
         else:
             loss = l1_loss
 
-        # Backward
-        loss.backward()
-
-        final_loss_val = loss.item()
-
-        # Densification strategy
+        # Densification: pre_backward sets up gradient hooks on means2d
         strategy.step_pre_backward(
             params=params,
             optimizers=optimizers,
@@ -645,6 +640,12 @@ def train(
             info=info,
         )
 
+        # Backward (gradient hooks from pre_backward capture means2d grads)
+        loss.backward()
+
+        final_loss_val = loss.item()
+
+        # Densification: post_backward uses captured grads for grow/prune
         strategy.step_post_backward(
             params=params,
             optimizers=optimizers,
