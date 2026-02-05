@@ -141,27 +141,38 @@ def _parse_cameras_txt(filepath: Path) -> Dict[int, ColmapCamera]:
 
 
 def _parse_images_txt(filepath: Path) -> List[ColmapImage]:
-    """Parse images.txt → list of ColmapImage."""
+    """Parse images.txt → list of ColmapImage.
+
+    COLMAP format: two lines per image — an extrinsic line (10+ fields) followed
+    by a points2D line (which may be empty/blank). We identify extrinsic lines by
+    checking that they have at least 10 whitespace-separated fields.
+    """
     images = []
     with open(filepath, "r") as f:
-        lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
-    # images.txt has two lines per image: extrinsics line, then points2D line
-    for i in range(0, len(lines), 2):
-        parts = lines[i].split()
-        images.append(
-            ColmapImage(
-                image_id=int(parts[0]),
-                qw=float(parts[1]),
-                qx=float(parts[2]),
-                qy=float(parts[3]),
-                qz=float(parts[4]),
-                tx=float(parts[5]),
-                ty=float(parts[6]),
-                tz=float(parts[7]),
-                camera_id=int(parts[8]),
-                name=parts[9],
-            )
-        )
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            # Extrinsic lines have at least 10 fields:
+            # IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
+            # Points2D lines have triplets (X Y POINT3D_ID) or are empty
+            if len(parts) >= 10:
+                images.append(
+                    ColmapImage(
+                        image_id=int(parts[0]),
+                        qw=float(parts[1]),
+                        qx=float(parts[2]),
+                        qy=float(parts[3]),
+                        qz=float(parts[4]),
+                        tx=float(parts[5]),
+                        ty=float(parts[6]),
+                        tz=float(parts[7]),
+                        camera_id=int(parts[8]),
+                        name=parts[9],
+                    )
+                )
+            # else: points2D line — skip
     return images
 
 
@@ -594,7 +605,7 @@ def train(
             width=width,
             height=height,
             sh_degree=current_sh_degree,
-            backgrounds=bg.unsqueeze(0),  # (1, 3)
+            backgrounds=bg[None, None, None, :].expand(1, height, width, 3),  # (1, H, W, 3)
         )
         # renders: (1, H, W, 3), render_alphas: (1, H, W, 1)
         rendered = renders[0]  # (H, W, 3)
