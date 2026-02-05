@@ -487,6 +487,7 @@ def train(
     export_rgb_dir: Optional[str] = None,
     export_depth_dir: Optional[str] = None,
     export_grad2d_dir: Optional[str] = None,
+    export_scale_dir: Optional[str] = None,
     verbose: bool = True,
 ) -> TrainResult:
     """
@@ -519,6 +520,7 @@ def train(
         export_rgb_dir: If set, export per-view RGB renders here
         export_depth_dir: If set, export per-view depth renders here (grayscale)
         export_grad2d_dir: If set, export per-view grad2d masks here (default strategy only)
+        export_scale_dir: If set, export per-view scale magnitude renders here (grayscale)
         verbose: Print training progress
 
     Returns:
@@ -651,7 +653,6 @@ def train(
             sh_degree=current_sh_degree,
             backgrounds=bg,  # (3,) — no batch dim needed
             absgrad=use_default,  # only DefaultStrategy needs absgrad
-            antialiased=True,
         )
         rendered = renders[0] if renders.ndim == 4 else renders  # (H, W, 3)
 
@@ -763,7 +764,7 @@ def train(
             print("Warning: --export-grad2d only available with default strategy, skipping")
         effective_grad2d_dir = None
 
-    if export_rgb_dir or export_depth_dir or effective_grad2d_dir:
+    if export_rgb_dir or export_depth_dir or effective_grad2d_dir or export_scale_dir:
         _export_view_renders(
             dataset=dataset,
             params=params,
@@ -775,6 +776,7 @@ def train(
             depth_dir=export_depth_dir,
             grad2d_dir=effective_grad2d_dir,
             grad2d=grad2d,
+            scale_dir=export_scale_dir,
         )
 
     return TrainResult(
@@ -836,7 +838,7 @@ def _ssim(
 
 
 # ---------------------------------------------------------------------------
-# Per-view image export (RGB, depth, grad2d)
+# Per-view image export (RGB, depth, grad2d, scale)
 # ---------------------------------------------------------------------------
 
 
@@ -859,14 +861,16 @@ def _export_view_renders(
     depth_dir: Optional[str] = None,
     grad2d_dir: Optional[str] = None,
     grad2d: Optional[Tensor] = None,
+    scale_dir: Optional[str] = None,
 ) -> None:
-    """Render all training views and export RGB, depth, and/or grad2d images.
+    """Render all training views and export RGB, depth, grad2d, and/or scale images.
 
     Args:
         rgb_dir: If set, save RGB renders (full SH) as <name>.png
         depth_dir: If set, save depth renders (per-view normalized, grayscale) as <name>_depth.png
         grad2d_dir: If set, save grad2d masks (log-scaled grayscale) as <name>_grad2d.png
         grad2d: Per-Gaussian grad2d values (required if grad2d_dir is set)
+        scale_dir: If set, save per-Gaussian scale magnitude renders (grayscale) as <name>_scale.png
     """
     import cv2
 
@@ -892,6 +896,17 @@ def _export_view_renders(
             dirs["grad2d"] = p
         elif verbose:
             print("No nonzero grad2d values, skipping grad2d export")
+    if scale_dir:
+        # Per-Gaussian mean scale magnitude (log-space → linear), log-normalized to [0,1]
+        scale_mag = torch.exp(params["scales"]).mean(dim=-1)  # (N,) mean across 3 axes
+        if scale_mag.max() > 0:
+            s = torch.log1p(scale_mag) / torch.log1p(scale_mag).max()
+            scale_sh = _scalar_to_sh_dc(s)
+            p = Path(scale_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            dirs["scale"] = p
+        elif verbose:
+            print("No nonzero scale values, skipping scale export")
 
     if not dirs:
         return
@@ -961,6 +976,17 @@ def _export_view_renders(
             )
             rendered = renders[0] if renders.ndim == 4 else renders
             _save(rendered, dirs["grad2d"] / f"{name}_grad2d.png")
+
+        if "scale" in dirs:
+            renders, _, _ = rasterization(
+                means=means, quats=quats, scales=scales_act,
+                opacities=opacities_act, colors=scale_sh,
+                viewmats=viewmat.unsqueeze(0), Ks=K.unsqueeze(0),
+                width=width, height=height,
+                sh_degree=0, backgrounds=bg,
+            )
+            rendered = renders[0] if renders.ndim == 4 else renders
+            _save(rendered, dirs["scale"] / f"{name}_scale.png")
 
     if verbose:
         for channel, d in dirs.items():

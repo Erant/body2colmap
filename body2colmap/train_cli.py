@@ -105,6 +105,11 @@ def main(argv: Optional[list] = None) -> int:
         help="Export per-view grad2d masks to DIR (default strategy only)",
     )
     parser.add_argument(
+        "--export-scale",
+        metavar="DIR",
+        help="Export per-view scale magnitude renders to DIR (grayscale, bright=large)",
+    )
+    parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -140,6 +145,7 @@ def main(argv: Optional[list] = None) -> int:
             export_rgb_dir=args.export_rgb,
             export_depth_dir=args.export_depth,
             export_grad2d_dir=args.export_grad2d,
+            export_scale_dir=args.export_scale,
             verbose=not args.quiet,
         )
 
