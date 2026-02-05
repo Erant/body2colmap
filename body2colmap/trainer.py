@@ -564,3 +564,78 @@ class SplatTrainer:
             renders, alphas, info = self._rasterize(viewmat, K_t, width, height, sh_degree)
 
         return renders.squeeze(0), alphas.squeeze(0), info
+
+    def render_stat_map(
+        self,
+        stat: Tensor,
+        c2w: np.ndarray,
+        K: np.ndarray,
+        width: int,
+        height: int,
+        log_scale: bool = False,
+    ) -> np.ndarray:
+        """Render a per-Gaussian scalar statistic as a grayscale image.
+
+        Splatts each Gaussian with a grayscale intensity proportional to
+        its statistic value instead of its SH colour.  Useful for
+        visualising gradient norms, view counts, or any other per-Gaussian
+        scalar.
+
+        Args:
+            stat: (N,) per-Gaussian scalar values (e.g.
+                ``result.avg_grad_norm`` or ``result.view_count``).
+            c2w: (4, 4) camera-to-world matrix.
+            K: (3, 3) intrinsic matrix.
+            width: Image width in pixels.
+            height: Image height in pixels.
+            log_scale: If *True*, apply ``log(1 + x)`` before normalising.
+                Useful when the value range spans several orders of
+                magnitude (common for raw gradient norms).
+
+        Returns:
+            (H, W) ``np.float32`` array in [0, 1] – a grayscale image
+            where brighter pixels correspond to higher statistic values.
+        """
+        from gsplat import rasterization  # type: ignore
+
+        s = stat.to(self.device).float()
+        if log_scale:
+            s = torch.log1p(s)
+
+        s_min, s_max = s.min(), s.max()
+        if s_max > s_min:
+            s_norm = (s - s_min) / (s_max - s_min)
+        else:
+            s_norm = torch.zeros_like(s)
+
+        # Expand scalar to (N, 3) so rasterisation produces an RGB image
+        colors = s_norm.unsqueeze(-1).expand(-1, 3)  # (N, 3)
+
+        c2w_t = torch.tensor(c2w, dtype=torch.float32, device=self.device)
+        viewmat = torch.linalg.inv(c2w_t).unsqueeze(0)
+        K_t = torch.tensor(K, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+        rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
+
+        with torch.no_grad():
+            renders, _alphas, _info = rasterization(
+                means=self.splats["means"],
+                quats=self.splats["quats"],
+                scales=torch.exp(self.splats["scales"]),
+                opacities=torch.sigmoid(self.splats["opacities"]),
+                colors=colors,
+                viewmats=viewmat,
+                Ks=K_t,
+                width=width,
+                height=height,
+                near_plane=self.cfg.near_plane,
+                far_plane=self.cfg.far_plane,
+                sh_degree=None,  # pre-computed colours, not SH
+                packed=self.cfg.packed,
+                render_mode="RGB",
+                rasterize_mode=rasterize_mode,
+            )
+
+        # Take first channel (all three are identical)
+        gray = renders.squeeze(0)[:, :, 0].cpu().numpy()
+        return gray

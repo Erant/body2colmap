@@ -83,6 +83,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Steps at which to save intermediate checkpoints.",
     )
 
+    # Stat maps
+    p.add_argument(
+        "--render-stats",
+        action="store_true",
+        help="Render per-Gaussian statistic maps (grad norm, view count) "
+             "for the first training view after training completes.",
+    )
+
     return p
 
 
@@ -185,6 +193,34 @@ def main(argv: Optional[list] = None) -> int:
         ckpt_path = output_dir / "checkpoint.pt"
         result.save_checkpoint(str(ckpt_path))
         print(f"  CKPT -> {ckpt_path}")
+
+        # Render statistic maps
+        if args.render_stats:
+            import cv2  # type: ignore
+
+            # Use the first training view
+            c2w = trainer.dataset.camtoworlds[0]
+            K = trainer.dataset.Ks[0]
+            w, h = int(trainer.dataset.image_sizes[0][0]), int(trainer.dataset.image_sizes[0][1])
+
+            stats_dir = output_dir / "stats"
+            stats_dir.mkdir(parents=True, exist_ok=True)
+
+            # Gradient norm map (log-scaled for visibility)
+            grad_map = trainer.render_stat_map(
+                result.avg_grad_norm, c2w, K, w, h, log_scale=True
+            )
+            grad_path = stats_dir / "grad_norm.png"
+            cv2.imwrite(str(grad_path), (grad_map * 255).clip(0, 255).astype("uint8"))
+            print(f"  STAT -> {grad_path}")
+
+            # View count map
+            count_map = trainer.render_stat_map(
+                result.view_count, c2w, K, w, h, log_scale=False
+            )
+            count_path = stats_dir / "view_count.png"
+            cv2.imwrite(str(count_path), (count_map * 255).clip(0, 255).astype("uint8"))
+            print(f"  STAT -> {count_path}")
 
         print(f"\nDone.")
         return 0
