@@ -622,18 +622,26 @@ class Renderer:
                 colormap=depth_opts.get("colormap")
             )
 
-        if base_image is None:
-            raise ValueError("Must specify 'mesh' or 'depth' as base layer")
-
-        # Ensure base_image is writable before compositing
-        if not base_image.flags.writeable:
-            base_image = np.array(base_image, copy=True)
-
         # Determine face mode from composite modes
         face_mode = None
         if "face" in modes and self.scene.skeleton_joints is not None:
             face_opts = modes["face"] if isinstance(modes["face"], dict) else {}
             face_mode = face_opts.get("face_mode", "full")
+
+        # If skeleton is present but no mesh/depth base, render skeleton directly
+        if base_image is None:
+            if "skeleton" not in modes:
+                raise ValueError("Must specify 'mesh', 'depth', or 'skeleton' as base layer")
+
+            skel_opts = modes["skeleton"] if isinstance(modes["skeleton"], dict) else {}
+            return self.render_skeleton(
+                camera,
+                joint_radius=skel_opts.get("joint_radius", 0.015),
+                bone_radius=skel_opts.get("bone_radius", 0.008),
+                joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
+                bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
+                face_mode=face_mode
+            )
 
         # Overlay skeleton if requested
         if "skeleton" in modes and self.scene.skeleton_joints is not None:
