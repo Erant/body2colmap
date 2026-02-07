@@ -272,6 +272,16 @@ def fit_face_to_skeleton(
     """
     if face_landmarks is None:
         face_landmarks = CANONICAL_FACE_LANDMARKS_70.copy()
+        logger.debug("Using canonical face landmarks")
+    else:
+        logger.debug(
+            "Using custom face landmarks: shape=%s, "
+            "x range=[%.3f, %.3f], y range=[%.3f, %.3f], z range=[%.3f, %.3f]",
+            face_landmarks.shape,
+            face_landmarks[:, 0].min(), face_landmarks[:, 0].max(),
+            face_landmarks[:, 1].min(), face_landmarks[:, 1].max(),
+            face_landmarks[:, 2].min(), face_landmarks[:, 2].max(),
+        )
 
     # Extract anchor points from face landmarks
     source_anchors = face_landmarks[CANONICAL_ANCHOR_INDICES]
@@ -279,8 +289,16 @@ def fit_face_to_skeleton(
     # Extract anchor points from skeleton
     target_anchors = skeleton_joints[SKELETON_ANCHOR_JOINT_INDICES]
 
+    logger.debug(
+        "Procrustes anchors — source (face): %s, target (skeleton): %s",
+        source_anchors.tolist(), target_anchors.tolist()
+    )
+
     # Run Procrustes alignment
     rotation, scale, translation, residual = procrustes_align(source_anchors, target_anchors)
+    logger.debug(
+        "Procrustes result: scale=%.6f, residual=%.6f", scale, residual
+    )
 
     # Apply transform to all 70 landmarks
     transformed = scale * (face_landmarks @ rotation.T) + translation
@@ -484,10 +502,15 @@ class FaceLandmarkIngest:
         # tall in normalized space, breaking Procrustes alignment.
         if image_size is not None:
             w, h = image_size
+            logger.debug(
+                "Denormalizing MediaPipe landmarks with image_size=(%d, %d)", w, h
+            )
             lm = lm.copy()
             lm[:, 0] *= w
             lm[:, 1] *= h
             lm[:, 2] *= w
+        else:
+            logger.debug("No image_size provided, using raw normalized coordinates")
 
         # Map the first 68 keypoints
         openpose_68 = lm[MEDIAPIPE_TO_OPENPOSE_68]  # (68, 3)
@@ -545,6 +568,10 @@ class FaceLandmarkIngest:
                     f"MediaPipe JSON missing 'landmarks' field in {filepath}"
                 )
             image_size = data.get("image_size")
+            logger.debug(
+                "Loading MediaPipe JSON from %s: %d landmarks, image_size=%s",
+                filepath, len(raw_landmarks), image_size
+            )
             if image_size is not None:
                 image_size = tuple(image_size)
             return FaceLandmarkIngest.from_mediapipe(

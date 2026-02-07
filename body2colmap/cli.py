@@ -4,6 +4,7 @@ Command-line interface for body2colmap.
 This module provides the main entry point for the CLI tool.
 """
 
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,10 @@ def main(argv: Optional[list] = None) -> int:
         print(f"Configuration error: {e}", file=sys.stderr)
         print(f"\nUse --help for usage information or --save-config to generate a template.", file=sys.stderr)
         return 1
+
+    # Configure logging
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
 
     # Print banner
     if args.verbose:
