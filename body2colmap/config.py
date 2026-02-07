@@ -387,7 +387,7 @@ render:
   # Background color [R, G, B] in range 0-1
   bg_color: [1.0, 1.0, 1.0]
 
-  # Render modes (for .npz): mesh, depth, skeleton, or combinations (mesh+skeleton, depth+skeleton)
+  # Render modes (for .npz): mesh, depth, skeleton, depth+skeleton, skeleton+face, depth+skeleton+face
   # For .ply files, "splat" mode is automatically used
   modes: ["mesh"]
 
@@ -538,7 +538,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--render-modes",
         type=str,
         metavar="MODE[,MODE...]",
-        help="Comma-separated render modes: mesh, depth, skeleton, mesh+skeleton, depth+skeleton, skeleton+face, mesh+skeleton+face (for .npz); splat mode auto-selected for .ply"
+        help="Comma-separated render modes: mesh, depth, skeleton, depth+skeleton, skeleton+face, depth+skeleton+face (for .npz); splat mode auto-selected for .ply"
     )
     render_group.add_argument(
         "--mesh-color",

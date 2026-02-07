@@ -454,9 +454,9 @@ elif args.width is not None or args.height is not None:
 
 ### Composite Rendering Pattern (`renderer.py`, `pipeline.py`)
 
-**Composite modes** (e.g., "mesh+skeleton", "depth+skeleton"):
+**Composite modes** (e.g., "depth+skeleton", "depth+skeleton+face"):
 
-1. Parse composite string: `"mesh+skeleton"` → base="mesh", overlays=["skeleton"]
+1. Parse composite string: `"depth+skeleton+face"` → base="depth", overlays=["skeleton", "face"]
 2. Render base mode to RGBA
 3. For each overlay:
    - Render overlay mode to RGBA

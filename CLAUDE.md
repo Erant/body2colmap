@@ -242,7 +242,7 @@ For proper framing across all aspect ratios:
 - **Format**: YAML for human readability
 - **Override precedence**: CLI args > config file > defaults
 - **Pattern**: Load config from YAML, then selectively override with CLI args that are `not None`
-- **Composite modes**: Support "mesh+skeleton" and "depth+skeleton" rendering
+- **Composite modes**: Support "depth+skeleton", "skeleton+face", "depth+skeleton+face" rendering
 
 ## Known Limitations
 
