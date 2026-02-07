@@ -497,20 +497,25 @@ class FaceLandmarkIngest:
             )
 
         # Denormalize to pixel coordinates for correct aspect ratio.
-        # MediaPipe x is normalized to width, y to height, z to width.
-        # Without this, portrait images produce faces that are wider than
-        # tall in normalized space, breaking Procrustes alignment.
+        # MediaPipe x is normalized to width, y to height. Without this,
+        # portrait images produce faces wider than tall in normalized space.
+        #
+        # MediaPipe z is a relative depth estimate that is NOT calibrated
+        # to the same scale as x,y — it can have 2-3x the range of the
+        # face width, distorting the shape for Procrustes alignment. We
+        # zero it out: the 2D face shape from x,y is reliable, and
+        # Procrustes will orient the face plane to match the 3D skeleton.
+        lm = lm.copy()
         if image_size is not None:
             w, h = image_size
             logger.debug(
                 "Denormalizing MediaPipe landmarks with image_size=(%d, %d)", w, h
             )
-            lm = lm.copy()
             lm[:, 0] *= w
             lm[:, 1] *= h
-            lm[:, 2] *= w
         else:
             logger.debug("No image_size provided, using raw normalized coordinates")
+        lm[:, 2] = 0.0
 
         # Map the first 68 keypoints
         openpose_68 = lm[MEDIAPIPE_TO_OPENPOSE_68]  # (68, 3)

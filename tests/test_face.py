@@ -427,34 +427,35 @@ class TestFaceLandmarkIngestFromMediaPipe:
         assert result.dtype == np.float32
 
     def test_first_68_from_mapping(self):
-        """First 68 keypoints should come from the mapping."""
+        """First 68 keypoints x,y should come from the mapping (z zeroed)."""
         mp = self._make_fake_mediapipe_478()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
         for i, mp_idx in enumerate(MEDIAPIPE_TO_OPENPOSE_68):
             np.testing.assert_array_equal(
-                result[i], mp[mp_idx],
+                result[i, :2], mp[mp_idx, :2],
                 err_msg=f"OpenPose keypoint {i} doesn't match MP index {mp_idx}"
             )
+            assert result[i, 2] == 0.0
 
     def test_pupils_from_iris_478(self):
-        """With 478 landmarks, pupils should come from iris centers."""
+        """With 478 landmarks, pupils x,y should come from iris centers."""
         mp = self._make_fake_mediapipe_478()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
-        np.testing.assert_array_equal(result[68], mp[468])  # right pupil
-        np.testing.assert_array_equal(result[69], mp[473])  # left pupil
+        np.testing.assert_array_equal(result[68, :2], mp[468, :2])
+        np.testing.assert_array_equal(result[69, :2], mp[473, :2])
 
     def test_pupils_from_centroids_468(self):
-        """With 468 landmarks, pupils should be eye contour centroids."""
+        """With 468 landmarks, pupils x,y should be eye contour centroids."""
         mp = self._make_fake_mediapipe_468()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
-        expected_right = mp[MEDIAPIPE_RIGHT_EYE_CONTOUR].mean(axis=0)
-        expected_left = mp[MEDIAPIPE_LEFT_EYE_CONTOUR].mean(axis=0)
+        expected_right = mp[MEDIAPIPE_RIGHT_EYE_CONTOUR, :2].mean(axis=0)
+        expected_left = mp[MEDIAPIPE_LEFT_EYE_CONTOUR, :2].mean(axis=0)
 
-        np.testing.assert_allclose(result[68], expected_right, atol=1e-6)
-        np.testing.assert_allclose(result[69], expected_left, atol=1e-6)
+        np.testing.assert_allclose(result[68, :2], expected_right, atol=1e-6)
+        np.testing.assert_allclose(result[69, :2], expected_left, atol=1e-6)
 
     def test_accepts_list_input(self):
         """Should accept list-of-lists as well as numpy array."""
@@ -476,27 +477,41 @@ class TestFaceLandmarkIngestFromMediaPipe:
             FaceLandmarkIngest.from_mediapipe(mp)
 
     def test_denormalize_with_image_size(self):
-        """With image_size, coords should be scaled to pixel space."""
+        """With image_size, x/y should be scaled to pixel space, z zeroed."""
         mp = self._make_fake_mediapipe_478()
         w, h = 800, 1200
 
         result = FaceLandmarkIngest.from_mediapipe(mp, image_size=(w, h))
-        result_raw = FaceLandmarkIngest.from_mediapipe(mp)
 
-        # x should be scaled by width, y by height, z by width
-        np.testing.assert_allclose(result[:, 0], result_raw[:, 0] * w, atol=1e-4)
-        np.testing.assert_allclose(result[:, 1], result_raw[:, 1] * h, atol=1e-4)
-        np.testing.assert_allclose(result[:, 2], result_raw[:, 2] * w, atol=1e-4)
+        # x should be scaled by width, y by height
+        for i, mp_idx in enumerate(MEDIAPIPE_TO_OPENPOSE_68):
+            assert abs(result[i, 0] - mp[mp_idx, 0] * w) < 1e-4
+            assert abs(result[i, 1] - mp[mp_idx, 1] * h) < 1e-4
 
-    def test_no_image_size_passes_through(self):
-        """Without image_size, coords should pass through unchanged."""
+        # z should be zeroed (MediaPipe z is unreliable for 3D fitting)
+        np.testing.assert_array_equal(result[:, 2], 0.0)
+
+    def test_z_always_zeroed(self):
+        """MediaPipe z should be zeroed regardless of image_size."""
+        mp = self._make_fake_mediapipe_478()
+
+        result_with = FaceLandmarkIngest.from_mediapipe(mp, image_size=(800, 600))
+        result_without = FaceLandmarkIngest.from_mediapipe(mp)
+
+        np.testing.assert_array_equal(result_with[:, 2], 0.0)
+        np.testing.assert_array_equal(result_without[:, 2], 0.0)
+
+    def test_no_image_size_preserves_xy(self):
+        """Without image_size, x/y pass through unchanged, z zeroed."""
         mp = self._make_fake_mediapipe_478()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
-        # First keypoint should be raw value from mapping
+        # x,y should be raw values from mapping
         np.testing.assert_array_equal(
-            result[0], mp[MEDIAPIPE_TO_OPENPOSE_68[0]]
+            result[0, :2], mp[MEDIAPIPE_TO_OPENPOSE_68[0], :2]
         )
+        # z should be zero
+        assert result[0, 2] == 0.0
 
 
 class TestFaceLandmarkIngestFromJSON:
