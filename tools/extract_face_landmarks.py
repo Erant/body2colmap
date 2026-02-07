@@ -108,7 +108,8 @@ def extract_landmarks(
     image_path: str,
     landmarker_model_path: str = None,
     detector_model_path: str = None,
-    min_confidence: float = 0.3
+    min_confidence: float = 0.3,
+    save_crop: str = None,
 ) -> dict:
     """
     Extract raw face landmarks from an image using MediaPipe.
@@ -124,6 +125,7 @@ def extract_landmarks(
         landmarker_model_path: Path to FaceLandmarker .task model
         detector_model_path: Path to FaceDetector .tflite model
         min_confidence: Minimum face detection confidence (0-1)
+        save_crop: If set, save the detected face crop to this path
 
     Returns:
         Dictionary with raw MediaPipe landmark data ready for JSON serialization
@@ -215,6 +217,10 @@ def extract_landmarks(
                 file=sys.stderr
             )
 
+            if save_crop:
+                cv2.imwrite(save_crop, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+                print(f"Crop saved to: {save_crop}", file=sys.stderr)
+
             crop_image = mp.Image(
                 image_format=mp.ImageFormat.SRGB, data=crop
             )
@@ -279,6 +285,10 @@ def main():
         default=0.3,
         help="Minimum face detection confidence 0-1 (default: 0.3)"
     )
+    parser.add_argument(
+        "--save-crop",
+        help="Save the detected face crop to this path (for verification)"
+    )
 
     args = parser.parse_args()
 
@@ -287,6 +297,7 @@ def main():
         landmarker_model_path=args.landmarker_model,
         detector_model_path=args.detector_model,
         min_confidence=args.min_confidence,
+        save_crop=args.save_crop,
     )
 
     json_str = json.dumps(result, indent=2)
