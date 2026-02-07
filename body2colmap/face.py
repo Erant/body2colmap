@@ -29,7 +29,7 @@ import json
 import logging
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict, Any, Union
+from typing import Tuple, Optional, List, Union
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ SKELETON_ANCHOR_JOINT_INDICES = [0, 15, 16, 17, 18]
 # =============================================================================
 # OpenPose Face 70 Connectivity
 # =============================================================================
-# From OpenPose FACE_PAIRS_RENDER_GPU: 71 bone connections.
+# From OpenPose FACE_PAIRS_RENDER_GPU: 63 bone connections.
 
 OPENPOSE_FACE_BONES = [
     # Jawline (open chain, 16 segments)

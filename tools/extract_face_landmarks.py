@@ -105,8 +105,8 @@ def _crop_to_face(rgb, bbox, padding=0.5):
 
 
 # MediaPipe landmark indices for frontality scoring
-_MP_LEFT_EYE_OUTER = 33
-_MP_RIGHT_EYE_OUTER = 263
+_MP_RIGHT_EYE_OUTER = 33
+_MP_LEFT_EYE_OUTER = 263
 _MP_NOSE_BRIDGE = 168
 _MP_CHIN = 152
 
@@ -127,7 +127,7 @@ def _frontality_score(face_landmarks):
         lm = face_landmarks[idx]
         return np.array([lm.x, lm.y, lm.z])
 
-    eye_vec = _xyz(_MP_LEFT_EYE_OUTER) - _xyz(_MP_RIGHT_EYE_OUTER)
+    eye_vec = _xyz(_MP_LEFT_EYE_OUTER) - _xyz(_MP_RIGHT_EYE_OUTER)  # left-to-right
     vert_vec = _xyz(_MP_NOSE_BRIDGE) - _xyz(_MP_CHIN)
     normal = np.cross(eye_vec, vert_vec)
 
