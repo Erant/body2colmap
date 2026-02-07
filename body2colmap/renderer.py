@@ -465,14 +465,6 @@ class Renderer:
             mesh = pyrender.Mesh.from_trimesh(sphere, smooth=False)
             pr_scene.add(mesh)
 
-        # Add face landmarks if requested
-        if face_mode is not None:
-            self._add_face_to_scene(
-                pr_scene, skeleton_joints, camera, face_mode,
-                face_joint_radius=joint_radius * 0.35,
-                face_bone_radius=bone_radius * 0.35
-            )
-
         # Add camera
         pr_camera = pyrender.PerspectiveCamera(
             yfov=2 * np.arctan(self.height / (2 * camera.fy)),
@@ -480,34 +472,54 @@ class Renderer:
         )
         pr_scene.add(pr_camera, pose=camera.get_c2w())
 
-        # Render
+        # Render skeleton
         renderer = self._get_pyrender_renderer()
-        color, depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
+        skel_color, _ = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
 
-        return color
+        # Render face landmarks as separate pass and composite on top
+        if face_mode is not None:
+            face_image = self._render_face(
+                skeleton_joints, camera, face_mode,
+                face_joint_radius=joint_radius * 0.35,
+                face_bone_radius=bone_radius * 0.35
+            )
+            if face_image is not None:
+                skel_color = np.array(skel_color, copy=True)
+                face_alpha = face_image[:, :, 3:4] / 255.0
+                skel_color[:, :, :3] = (
+                    face_image[:, :, :3] * face_alpha +
+                    skel_color[:, :, :3] * (1 - face_alpha)
+                ).astype(np.uint8)
+                skel_color[:, :, 3] = np.maximum(
+                    skel_color[:, :, 3], face_image[:, :, 3]
+                )
 
-    def _add_face_to_scene(
+        return skel_color
+
+    def _render_face(
         self,
-        pr_scene,
         skeleton_joints: NDArray[np.float32],
         camera: Camera,
         face_mode: str,
         face_joint_radius: float = 0.005,
         face_bone_radius: float = 0.003
-    ) -> None:
+    ) -> Optional[NDArray[np.uint8]]:
         """
-        Add face landmarks to an existing pyrender scene.
+        Render face landmarks as a separate RGBA image.
 
-        Fits canonical face landmarks to skeleton head joints via Procrustes,
-        checks if face is visible from camera, and adds geometry if so.
+        Rendered in its own pyrender scene so it can be composited on top
+        of the body skeleton without depth-test occlusion from the larger
+        skeleton head joints.
 
         Args:
-            pr_scene: pyrender.Scene to add face geometry to
             skeleton_joints: Skeleton joints in world coords (OpenPose Body25+)
-            camera: Camera for visibility test
+            camera: Camera for visibility test and rendering
             face_mode: "full" (points + connectivity) or "points" (points only)
             face_joint_radius: Radius for face keypoint spheres
             face_bone_radius: Radius for face connection cylinders
+
+        Returns:
+            RGBA image with face landmarks, or None if face is not visible
         """
         import trimesh
         import pyrender
@@ -516,14 +528,20 @@ class Renderer:
         # Check we have enough joints for the 5 anchor points
         max_anchor = max(face_module.SKELETON_ANCHOR_JOINT_INDICES)
         if len(skeleton_joints) <= max_anchor:
-            return
+            return None
 
         # Fit face to skeleton
         face_landmarks, residual = face_module.fit_face_to_skeleton(skeleton_joints)
 
         # Check visibility (frontal 180 degrees only)
         if not face_module.is_face_visible(face_landmarks, camera.position):
-            return
+            return None
+
+        # Create separate scene for face
+        pr_scene = pyrender.Scene(
+            bg_color=[0, 0, 0, 0],
+            ambient_light=[1.0, 1.0, 1.0]
+        )
 
         face_color_uint8 = np.array([255, 255, 255, 255], dtype=np.uint8)
 
@@ -577,6 +595,17 @@ class Renderer:
             sphere.visual.vertex_colors = face_color_uint8
             mesh = pyrender.Mesh.from_trimesh(sphere, smooth=False)
             pr_scene.add(mesh)
+
+        # Add camera and render
+        pr_camera = pyrender.PerspectiveCamera(
+            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
+            aspectRatio=self.width / self.height
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        renderer = self._get_pyrender_renderer()
+        color, _ = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
+        return color
 
     def render_composite(
         self,
