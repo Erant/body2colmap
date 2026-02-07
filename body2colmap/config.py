@@ -63,6 +63,7 @@ class SkeletonConfig:
     joint_radius: float = 0.015
     bone_radius: float = 0.008
     face_mode: str = None  # None, "full", or "points"
+    face_landmarks: str = None  # Path to face landmarks JSON file
 
 
 @dataclass
@@ -194,6 +195,11 @@ class Config:
                 config.skeleton.face_mode = None
             else:
                 config.skeleton.face_mode = args.face_mode
+        if args.face_landmarks:
+            config.skeleton.face_landmarks = args.face_landmarks
+            # Providing landmarks implies face rendering
+            if config.skeleton.face_mode is None:
+                config.skeleton.face_mode = "full"
 
         # Export overrides
         if args.no_colmap:
@@ -642,6 +648,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Face landmark rendering mode: full (points + connectivity), "
              "points (points only), none (disabled). "
              "Requires skeleton data. Rendered only for frontal views."
+    )
+    skeleton_group.add_argument(
+        "--face-landmarks",
+        metavar="PATH",
+        help="Path to face landmarks JSON file (from extract_face_landmarks.py). "
+             "When provided, uses subject-specific face geometry instead of "
+             "the generic canonical face model. Implies --face-mode full."
     )
 
     # Export options

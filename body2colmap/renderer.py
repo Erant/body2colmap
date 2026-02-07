@@ -304,7 +304,8 @@ class Renderer:
         use_openpose_colors: bool = True,
         render_bones: bool = True,
         target_format: str = "openpose_body25_hands",
-        face_mode: str = None
+        face_mode: str = None,
+        face_landmarks: Optional[NDArray[np.float32]] = None
     ) -> NDArray[np.uint8]:
         """
         Render 3D skeleton as spheres (joints) and cylinders (bones).
@@ -322,6 +323,9 @@ class Renderer:
                 - None: No face landmarks (default)
                 - "full": Points + connectivity lines
                 - "points": Points only, no connecting lines
+            face_landmarks: Optional custom face landmarks in OpenPose Face 70
+                format, shape (70, 3). If provided, used instead of the
+                canonical face model for Procrustes fitting.
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8
@@ -481,7 +485,8 @@ class Renderer:
             face_image = self._render_face(
                 skeleton_joints, camera, face_mode,
                 face_joint_radius=joint_radius * 0.35,
-                face_bone_radius=bone_radius * 0.35
+                face_bone_radius=bone_radius * 0.35,
+                face_landmarks=face_landmarks
             )
             if face_image is not None:
                 skel_color = np.array(skel_color, copy=True)
@@ -502,7 +507,8 @@ class Renderer:
         camera: Camera,
         face_mode: str,
         face_joint_radius: float = 0.005,
-        face_bone_radius: float = 0.003
+        face_bone_radius: float = 0.003,
+        face_landmarks: Optional[NDArray[np.float32]] = None
     ) -> Optional[NDArray[np.uint8]]:
         """
         Render face landmarks as a separate RGBA image.
@@ -517,6 +523,9 @@ class Renderer:
             face_mode: "full" (points + connectivity) or "points" (points only)
             face_joint_radius: Radius for face keypoint spheres
             face_bone_radius: Radius for face connection cylinders
+            face_landmarks: Optional custom face landmarks in OpenPose Face 70
+                format, shape (70, 3). Passed to fit_face_to_skeleton() to use
+                instead of the canonical face model.
 
         Returns:
             RGBA image with face landmarks, or None if face is not visible
@@ -530,11 +539,13 @@ class Renderer:
         if len(skeleton_joints) <= max_anchor:
             return None
 
-        # Fit face to skeleton
-        face_landmarks, residual = face_module.fit_face_to_skeleton(skeleton_joints)
+        # Fit face to skeleton (custom landmarks override canonical model)
+        fitted_landmarks, residual = face_module.fit_face_to_skeleton(
+            skeleton_joints, face_landmarks=face_landmarks
+        )
 
         # Check visibility (frontal 180 degrees only)
-        if not face_module.is_face_visible(face_landmarks, camera.position):
+        if not face_module.is_face_visible(fitted_landmarks, camera.position):
             return None
 
         # Create separate scene for face
@@ -548,8 +559,8 @@ class Renderer:
         # Add face bones as cylinders (if full mode)
         if face_mode == "full":
             for start_idx, end_idx in face_module.OPENPOSE_FACE_BONES:
-                start_pos = face_landmarks[start_idx]
-                end_pos = face_landmarks[end_idx]
+                start_pos = fitted_landmarks[start_idx]
+                end_pos = fitted_landmarks[end_idx]
 
                 direction = end_pos - start_pos
                 length = np.linalg.norm(direction)
@@ -589,7 +600,7 @@ class Renderer:
                 pr_scene.add(mesh)
 
         # Add face joints as spheres
-        for face_pos in face_landmarks:
+        for face_pos in fitted_landmarks:
             sphere = trimesh.creation.icosphere(subdivisions=1, radius=face_joint_radius)
             sphere.vertices += face_pos
             sphere.visual.vertex_colors = face_color_uint8
@@ -651,11 +662,13 @@ class Renderer:
                 colormap=depth_opts.get("colormap")
             )
 
-        # Determine face mode from composite modes
+        # Determine face mode and custom landmarks from composite modes
         face_mode = None
+        custom_face_landmarks = None
         if "face" in modes and self.scene.skeleton_joints is not None:
             face_opts = modes["face"] if isinstance(modes["face"], dict) else {}
             face_mode = face_opts.get("face_mode", "full")
+            custom_face_landmarks = face_opts.get("face_landmarks")
 
         # If skeleton is present but no mesh/depth base, render skeleton directly
         if base_image is None:
@@ -669,7 +682,8 @@ class Renderer:
                 bone_radius=skel_opts.get("bone_radius", 0.008),
                 joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
                 bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
-                face_mode=face_mode
+                face_mode=face_mode,
+                face_landmarks=custom_face_landmarks
             )
 
         # Overlay skeleton if requested
@@ -683,7 +697,8 @@ class Renderer:
                 bone_radius=skel_opts.get("bone_radius", 0.008),
                 joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
                 bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
-                face_mode=face_mode
+                face_mode=face_mode,
+                face_landmarks=custom_face_landmarks
             )
 
             # Composite skeleton over base using alpha blending

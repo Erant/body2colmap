@@ -1,8 +1,12 @@
 """
 Tests for face landmark module.
 
-Tests Procrustes alignment, face visibility, and data integrity.
+Tests Procrustes alignment, face visibility, data integrity, and ingestion.
 """
+
+import json
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,6 +17,10 @@ from body2colmap.face import (
     SKELETON_ANCHOR_JOINT_INDICES,
     OPENPOSE_FACE_BONES,
     FACE_COLOR,
+    MEDIAPIPE_TO_OPENPOSE_68,
+    MEDIAPIPE_RIGHT_EYE_CONTOUR,
+    MEDIAPIPE_LEFT_EYE_CONTOUR,
+    FaceLandmarkIngest,
     procrustes_align,
     fit_face_to_skeleton,
     compute_face_normal,
@@ -364,3 +372,202 @@ class TestComputeFaceNormal:
         normal = compute_face_normal(landmarks.astype(np.float32))
 
         assert np.allclose(np.linalg.norm(normal), 1.0, atol=1e-5)
+
+
+class TestMediaPipeMappingConstants:
+    """Test MediaPipe → OpenPose mapping constants."""
+
+    def test_mapping_length(self):
+        """Should map 68 keypoints (without pupils)."""
+        assert len(MEDIAPIPE_TO_OPENPOSE_68) == 68
+
+    def test_mapping_indices_in_range(self):
+        """All MediaPipe indices should be in 0-467 range."""
+        for mp_idx in MEDIAPIPE_TO_OPENPOSE_68:
+            assert 0 <= mp_idx < 468, f"MP index {mp_idx} out of range"
+
+    def test_eye_contour_indices_in_range(self):
+        """Eye contour indices should be in 0-467 range."""
+        for idx in MEDIAPIPE_RIGHT_EYE_CONTOUR:
+            assert 0 <= idx < 468
+        for idx in MEDIAPIPE_LEFT_EYE_CONTOUR:
+            assert 0 <= idx < 468
+
+    def test_eye_contour_length(self):
+        """Each eye contour should have 6 points."""
+        assert len(MEDIAPIPE_RIGHT_EYE_CONTOUR) == 6
+        assert len(MEDIAPIPE_LEFT_EYE_CONTOUR) == 6
+
+
+class TestFaceLandmarkIngestFromMediaPipe:
+    """Test FaceLandmarkIngest.from_mediapipe()."""
+
+    def _make_fake_mediapipe_478(self):
+        """Create fake 478-landmark array for testing."""
+        rng = np.random.RandomState(42)
+        return rng.rand(478, 3).astype(np.float32)
+
+    def _make_fake_mediapipe_468(self):
+        """Create fake 468-landmark array (no iris)."""
+        rng = np.random.RandomState(42)
+        return rng.rand(468, 3).astype(np.float32)
+
+    def test_output_shape_478(self):
+        """Should produce (70, 3) from 478-landmark input."""
+        mp = self._make_fake_mediapipe_478()
+        result = FaceLandmarkIngest.from_mediapipe(mp)
+        assert result.shape == (70, 3)
+        assert result.dtype == np.float32
+
+    def test_output_shape_468(self):
+        """Should produce (70, 3) from 468-landmark input."""
+        mp = self._make_fake_mediapipe_468()
+        result = FaceLandmarkIngest.from_mediapipe(mp)
+        assert result.shape == (70, 3)
+        assert result.dtype == np.float32
+
+    def test_first_68_from_mapping(self):
+        """First 68 keypoints should come from the mapping."""
+        mp = self._make_fake_mediapipe_478()
+        result = FaceLandmarkIngest.from_mediapipe(mp)
+
+        for i, mp_idx in enumerate(MEDIAPIPE_TO_OPENPOSE_68):
+            np.testing.assert_array_equal(
+                result[i], mp[mp_idx],
+                err_msg=f"OpenPose keypoint {i} doesn't match MP index {mp_idx}"
+            )
+
+    def test_pupils_from_iris_478(self):
+        """With 478 landmarks, pupils should come from iris centers."""
+        mp = self._make_fake_mediapipe_478()
+        result = FaceLandmarkIngest.from_mediapipe(mp)
+
+        np.testing.assert_array_equal(result[68], mp[468])  # right pupil
+        np.testing.assert_array_equal(result[69], mp[473])  # left pupil
+
+    def test_pupils_from_centroids_468(self):
+        """With 468 landmarks, pupils should be eye contour centroids."""
+        mp = self._make_fake_mediapipe_468()
+        result = FaceLandmarkIngest.from_mediapipe(mp)
+
+        expected_right = mp[MEDIAPIPE_RIGHT_EYE_CONTOUR].mean(axis=0)
+        expected_left = mp[MEDIAPIPE_LEFT_EYE_CONTOUR].mean(axis=0)
+
+        np.testing.assert_allclose(result[68], expected_right, atol=1e-6)
+        np.testing.assert_allclose(result[69], expected_left, atol=1e-6)
+
+    def test_accepts_list_input(self):
+        """Should accept list-of-lists as well as numpy array."""
+        mp = self._make_fake_mediapipe_478()
+        mp_list = mp.tolist()
+        result = FaceLandmarkIngest.from_mediapipe(mp_list)
+        assert result.shape == (70, 3)
+
+    def test_rejects_too_few_landmarks(self):
+        """Should raise ValueError for < 468 landmarks."""
+        mp = np.random.rand(100, 3).astype(np.float32)
+        with pytest.raises(ValueError, match="at least 468"):
+            FaceLandmarkIngest.from_mediapipe(mp)
+
+    def test_rejects_wrong_dimensions(self):
+        """Should raise ValueError for non-Nx3 input."""
+        mp = np.random.rand(478, 2).astype(np.float32)
+        with pytest.raises(ValueError, match="shape"):
+            FaceLandmarkIngest.from_mediapipe(mp)
+
+
+class TestFaceLandmarkIngestFromJSON:
+    """Test FaceLandmarkIngest.from_json()."""
+
+    def _make_mediapipe_json(self, n_landmarks=478):
+        """Create a MediaPipe-format JSON dict."""
+        rng = np.random.RandomState(42)
+        landmarks = rng.rand(n_landmarks, 3).tolist()
+        return {
+            "version": "1.0",
+            "source": "mediapipe",
+            "source_image": "test.jpg",
+            "image_size": [640, 480],
+            "n_landmarks": n_landmarks,
+            "refined": n_landmarks >= 478,
+            "landmarks": landmarks
+        }
+
+    def test_loads_mediapipe_json(self):
+        """Should correctly load and convert a MediaPipe JSON file."""
+        data = self._make_mediapipe_json(478)
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            result = FaceLandmarkIngest.from_json(f.name)
+
+        assert result.shape == (70, 3)
+        assert result.dtype == np.float32
+
+    def test_loads_468_landmarks(self):
+        """Should handle 468-landmark (non-refined) JSON."""
+        data = self._make_mediapipe_json(468)
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            result = FaceLandmarkIngest.from_json(f.name)
+
+        assert result.shape == (70, 3)
+
+    def test_rejects_unknown_source(self):
+        """Should raise ValueError for unsupported source format."""
+        data = {"source": "unknown_format", "landmarks": []}
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            with pytest.raises(ValueError, match="Unsupported"):
+                FaceLandmarkIngest.from_json(f.name)
+
+    def test_rejects_missing_landmarks(self):
+        """Should raise ValueError when landmarks field is missing."""
+        data = {"source": "mediapipe"}
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            with pytest.raises(ValueError, match="missing 'landmarks'"):
+                FaceLandmarkIngest.from_json(f.name)
+
+    def test_file_not_found(self):
+        """Should raise FileNotFoundError for nonexistent file."""
+        with pytest.raises(FileNotFoundError):
+            FaceLandmarkIngest.from_json("/nonexistent/path.json")
+
+    def test_accepts_path_object(self):
+        """Should accept pathlib.Path as well as string."""
+        data = self._make_mediapipe_json(478)
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            result = FaceLandmarkIngest.from_json(Path(f.name))
+
+        assert result.shape == (70, 3)
+
+    def test_roundtrip_consistency(self):
+        """JSON load should produce same result as direct from_mediapipe."""
+        rng = np.random.RandomState(42)
+        raw = rng.rand(478, 3).astype(np.float32)
+
+        # Direct conversion
+        direct = FaceLandmarkIngest.from_mediapipe(raw)
+
+        # Via JSON roundtrip
+        data = {
+            "source": "mediapipe",
+            "landmarks": raw.tolist()
+        }
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            from_json = FaceLandmarkIngest.from_json(f.name)
+
+        np.testing.assert_allclose(from_json, direct, atol=1e-5)

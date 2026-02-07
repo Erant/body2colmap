@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import create_argument_parser, Config
+from .face import FaceLandmarkIngest
 from .pipeline import OrbitPipeline
 
 
@@ -89,6 +90,15 @@ def main(argv: Optional[list] = None) -> int:
 
         if args.verbose:
             print(f"  Loaded: {pipeline.scene}")
+
+        # Load face landmarks if provided
+        face_landmarks_70 = None
+        if config.skeleton.face_landmarks:
+            if args.verbose:
+                print(f"  Loading face landmarks: {config.skeleton.face_landmarks}")
+            face_landmarks_70 = FaceLandmarkIngest.from_json(config.skeleton.face_landmarks)
+            if args.verbose:
+                print(f"  Converted to OpenPose Face 70 ({face_landmarks_70.shape})")
 
         # Generate orbit
         if args.verbose:
@@ -179,9 +189,12 @@ def main(argv: Optional[list] = None) -> int:
                                 "target_format": config.skeleton.format
                             }
                         if overlay == "face" or (overlay == "skeleton" and config.skeleton.face_mode):
-                            composite_modes["face"] = {
+                            face_opts = {
                                 "face_mode": config.skeleton.face_mode or "full"
                             }
+                            if face_landmarks_70 is not None:
+                                face_opts["face_landmarks"] = face_landmarks_70
+                            composite_modes["face"] = face_opts
 
                     # Render composite for all frames
                     mode_images = pipeline.render_composite_all(composite_modes)

@@ -20,12 +20,14 @@ __version__ = "0.1.0"
 __author__ = "Your Name"
 
 from .camera import Camera
+from .face import FaceLandmarkIngest
 from .scene import Scene
 from .pipeline import OrbitPipeline
 from .utils import compute_auto_orbit_radius, compute_default_focal_length
 
 __all__ = [
     "Camera",
+    "FaceLandmarkIngest",
     "Scene",
     "OrbitPipeline",
     "compute_auto_orbit_radius",

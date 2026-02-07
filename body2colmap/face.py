@@ -6,6 +6,7 @@ This module provides:
 - Procrustes alignment to anchor face landmarks to skeleton head joints
 - Face visibility test (frontal hemisphere only)
 - OpenPose Face 70 connectivity for rendering
+- FaceLandmarkIngest: Convert external face landmark formats to OpenPose Face 70
 
 The 70 keypoints follow the OpenPose face convention:
   0-16:  Jawline contour (17 points, open chain)
@@ -24,9 +25,11 @@ No MediaPipe dependency is required. The canonical face model geometry is embedd
 as a constant extracted from MediaPipe's canonical_face_model.obj.
 """
 
+import json
 import logging
 import numpy as np
-from typing import Tuple, Optional
+from pathlib import Path
+from typing import Tuple, Optional, List, Dict, Any, Union
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -373,3 +376,157 @@ def is_face_visible(
 
     # Dot product > 0 means face points toward camera
     return float(np.dot(face_normal, view_direction)) > 0.0
+
+
+# =============================================================================
+# Face Landmark Ingestion
+# =============================================================================
+# Converts external face landmark formats to our canonical OpenPose Face 70.
+# No dependency on MediaPipe or other detection libraries.
+
+# MediaPipe Face Mesh 478 → OpenPose Face 68 index mapping (MaixPy convention).
+# Each entry is a single MediaPipe vertex index that maps to the corresponding
+# OpenPose face keypoint. Pupils (68-69) are handled separately.
+MEDIAPIPE_TO_OPENPOSE_68 = [
+    # Jawline 0-16
+    162, 234, 93, 58, 172, 136, 149, 148, 152, 377, 378, 365, 397, 288, 323, 454, 389,
+    # Right eyebrow 17-21
+    71, 63, 105, 66, 107,
+    # Left eyebrow 22-26
+    336, 296, 334, 293, 301,
+    # Nose bridge 27-30
+    168, 197, 5, 4,
+    # Nose bottom 31-35
+    75, 97, 2, 326, 305,
+    # Right eye 36-41
+    33, 160, 158, 133, 153, 144,
+    # Left eye 42-47
+    362, 385, 387, 263, 373, 380,
+    # Outer lip 48-59
+    61, 39, 37, 0, 267, 269, 291, 405, 314, 17, 84, 181,
+    # Inner lip 60-67
+    78, 82, 13, 312, 308, 317, 14, 87,
+]
+
+# Iris center indices in MediaPipe's refined 478-landmark model
+MEDIAPIPE_RIGHT_IRIS_CENTER = 468
+MEDIAPIPE_LEFT_IRIS_CENTER = 473
+
+# Eye contour indices (in MediaPipe space) for pupil centroid fallback
+MEDIAPIPE_RIGHT_EYE_CONTOUR = [33, 160, 158, 133, 153, 144]
+MEDIAPIPE_LEFT_EYE_CONTOUR = [362, 385, 387, 263, 373, 380]
+
+
+class FaceLandmarkIngest:
+    """
+    Convert external face landmark formats to OpenPose Face 70.
+
+    Supported input formats:
+    - "mediapipe": MediaPipe Face Mesh (468 or 478 landmarks)
+
+    The canonical output is always OpenPose Face 70 keypoints as (70, 3) float32.
+
+    Usage:
+        # From a JSON file saved by extract_face_landmarks.py:
+        landmarks = FaceLandmarkIngest.from_json("landmarks.json")
+
+        # From raw MediaPipe landmarks (list of [x, y, z]):
+        landmarks = FaceLandmarkIngest.from_mediapipe(mp_landmarks)
+    """
+
+    @staticmethod
+    def from_mediapipe(
+        landmarks: Union[List[List[float]], NDArray[np.float32]],
+    ) -> NDArray[np.float32]:
+        """
+        Convert MediaPipe Face Mesh landmarks to OpenPose Face 70.
+
+        Applies the MaixPy single-index mapping from MediaPipe 468/478
+        landmarks to OpenPose Face 68, then adds pupils (indices 68-69)
+        from iris centers (if 478 landmarks) or eye contour centroids.
+
+        Args:
+            landmarks: MediaPipe face landmarks, shape (N, 3) where N is
+                468 (standard) or 478 (refined with iris tracking).
+                Coordinates are normalized [0,1] x [0,1] x relative_depth.
+
+        Returns:
+            OpenPose Face 70 landmarks, shape (70, 3), float32.
+
+        Raises:
+            ValueError: If landmarks have wrong shape or too few points.
+        """
+        lm = np.asarray(landmarks, dtype=np.float32)
+
+        if lm.ndim != 2 or lm.shape[1] != 3:
+            raise ValueError(
+                f"Expected landmarks shape (N, 3), got {lm.shape}"
+            )
+
+        n = lm.shape[0]
+        if n < 468:
+            raise ValueError(
+                f"MediaPipe landmarks require at least 468 points, got {n}"
+            )
+
+        # Map the first 68 keypoints
+        openpose_68 = lm[MEDIAPIPE_TO_OPENPOSE_68]  # (68, 3)
+
+        # Pupils (indices 68-69)
+        if n >= 478:
+            # Use iris center landmarks directly
+            right_pupil = lm[MEDIAPIPE_RIGHT_IRIS_CENTER]
+            left_pupil = lm[MEDIAPIPE_LEFT_IRIS_CENTER]
+        else:
+            # Synthesize from eye contour centroids
+            right_pupil = lm[MEDIAPIPE_RIGHT_EYE_CONTOUR].mean(axis=0)
+            left_pupil = lm[MEDIAPIPE_LEFT_EYE_CONTOUR].mean(axis=0)
+
+        # Combine into 70-point array
+        openpose_70 = np.vstack([
+            openpose_68,
+            right_pupil[np.newaxis],
+            left_pupil[np.newaxis],
+        ]).astype(np.float32)
+
+        return openpose_70
+
+    @staticmethod
+    def from_json(filepath: Union[str, Path]) -> NDArray[np.float32]:
+        """
+        Load face landmarks from a JSON file and convert to OpenPose Face 70.
+
+        Auto-detects the source format from the JSON "source" field and
+        dispatches to the appropriate converter.
+
+        Supported JSON formats:
+        - MediaPipe: {"source": "mediapipe", "landmarks": [[x,y,z], ...]}
+
+        Args:
+            filepath: Path to JSON file.
+
+        Returns:
+            OpenPose Face 70 landmarks, shape (70, 3), float32.
+
+        Raises:
+            ValueError: If format is unrecognized or data is invalid.
+            FileNotFoundError: If file does not exist.
+        """
+        filepath = Path(filepath)
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+        source = data.get("source", "").lower()
+
+        if source == "mediapipe":
+            raw_landmarks = data.get("landmarks")
+            if raw_landmarks is None:
+                raise ValueError(
+                    f"MediaPipe JSON missing 'landmarks' field in {filepath}"
+                )
+            return FaceLandmarkIngest.from_mediapipe(raw_landmarks)
+        else:
+            raise ValueError(
+                f"Unsupported face landmark source: '{source}' in {filepath}. "
+                f"Supported: 'mediapipe'"
+            )
