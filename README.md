@@ -6,14 +6,14 @@ Generate synthetic multi-view training data for 3D Gaussian Splatting from SAM-3
 
 Body2COLMAP is a command-line tool and Python library that converts single-image 3D body reconstructions into multi-view synthetic datasets suitable for 3D Gaussian Splatting training.
 
-**Input**: 3D mesh from SAM-3D-Body (`.npz` file)
+**Input**: 3D mesh from SAM-3D-Body (`.npz` file) or Gaussian Splat (`.ply` file)
 **Output**: Multi-view images + COLMAP camera parameters
 
 ### What it does
 
 1. **Loads** 3D mesh reconstruction from SAM-3D-Body
 2. **Generates** camera orbit paths (circular, sinusoidal, or helical)
-3. **Renders** multi-view images from these cameras
+3. **Renders** multi-view images (mesh, depth, skeleton, face landmarks)
 4. **Exports** COLMAP format camera parameters and point cloud
 5. **Outputs** data ready for 3D Gaussian Splatting training
 
@@ -40,22 +40,25 @@ pip install -e .
 - opencv-python
 - scipy
 
+For face landmark extraction (optional):
+- mediapipe (`pip install mediapipe`)
+
 ## Quick Start
 
 ### Command Line
 
 ```bash
-# Basic usage
+# Basic usage — mesh rendering with COLMAP export
 body2colmap --input estimation.npz --output-dir ./output
 
-# With custom settings
-body2colmap \
-  --input estimation.npz \
-  --output-dir ./output \
-  --orbit-mode helical \
-  --n-frames 120 \
-  --width 512 \
-  --height 512
+# With skeleton overlay
+body2colmap --input estimation.npz --output-dir ./output \
+  --skeleton --render-modes depth+skeleton
+
+# With face landmarks from a photo of the subject
+python tools/extract_face_landmarks.py photo.jpg -o face.json
+body2colmap --input estimation.npz --output-dir ./output \
+  --face-landmarks face.json --render-modes skeleton+face
 ```
 
 ### Python API
@@ -87,9 +90,35 @@ pipeline.export_images("./output", images["mesh"])
 
 ### Render Modes
 
-- **Mesh**: Colored mesh with lighting
-- **Depth**: Depth maps (with optional colormaps)
-- **Skeleton**: 3D skeleton visualization (coming soon)
+Single modes:
+- **mesh**: Colored mesh with lighting
+- **depth**: Depth maps (with optional colormaps)
+
+Composite modes (overlays combined via `+`):
+- **depth+skeleton**: Depth map with skeleton overlay
+- **skeleton+face**: Skeleton with face landmark overlay
+- **depth+skeleton+face**: All three combined
+
+### Face Landmark Rendering
+
+Face landmarks render the OpenPose Face 70 keypoint topology (jawline, eyebrows, nose, eyes, lips, pupils) as white points and connecting lines on top of the skeleton.
+
+Two modes of operation:
+
+1. **Canonical face model** (no external data): Uses a generic face shape derived from MediaPipe's canonical face geometry. Good for testing; not subject-specific.
+
+2. **Subject-specific face landmarks** (recommended): Extract landmarks from a photo of the subject using the included `tools/extract_face_landmarks.py`, then pass the resulting JSON file via `--face-landmarks`. The landmarks are automatically aligned to the skeleton via Procrustes fitting.
+
+Face landmarks are only rendered when the face is pointing toward the camera (frontal 180-degree hemisphere), so rear views show only the skeleton.
+
+See [Face Landmarks](#face-landmarks) below for the full workflow.
+
+### Framing Presets
+
+- **full**: Entire body visible (default)
+- **torso**: Waist up (requires skeleton data)
+- **bust**: Shoulders and head (requires skeleton data)
+- **head**: Head only (requires skeleton data)
 
 ### Export Formats
 
@@ -99,34 +128,166 @@ pipeline.export_images("./output", images["mesh"])
   - `points3D.txt`: Initial point cloud
 - **Images**: PNG with alpha channel
 
-## Documentation
+## Face Landmarks
 
-See [IMPLEMENTATION.md](IMPLEMENTATION.md) for detailed specification and architecture notes.
+### Overview
 
-For development notes, see [CLAUDE.md](CLAUDE.md).
+Body2COLMAP can render face landmarks on top of the skeleton. This is a two-step process:
 
-## Architecture
+1. **Extract** face landmarks from a reference photo using `tools/extract_face_landmarks.py`
+2. **Render** by passing the JSON file to `body2colmap --face-landmarks`
 
-Body2COLMAP uses a clean, modular architecture:
+The extraction tool uses MediaPipe FaceLandmarker to detect 478 facial landmarks, which are then converted to the OpenPose Face 70 keypoint format internally.
 
+### Step 1: Extract Face Landmarks
+
+```bash
+# Install mediapipe (one-time)
+pip install mediapipe
+
+# Extract landmarks from a photo
+python tools/extract_face_landmarks.py photo.jpg -o face_landmarks.json
+
+# With options
+python tools/extract_face_landmarks.py photo.jpg \
+  -o face_landmarks.json \
+  --min-confidence 0.3 \
+  --save-crop face_crop.jpg  # saves the detected face region for verification
 ```
-body2colmap/
-├── coordinates.py   # Coordinate system definitions
-├── camera.py        # Camera class with intrinsics/extrinsics
-├── scene.py         # 3D scene management
-├── path.py          # Orbit path generation
-├── renderer.py      # Image rendering
-├── exporter.py      # COLMAP export
-├── pipeline.py      # High-level API
-└── cli.py           # Command-line interface
+
+On first run, the tool downloads two small model files (~4MB total) to `~/.cache/body2colmap/`.
+
+The tool uses a two-stage detection pipeline:
+- First tries MediaPipe FaceLandmarker on the full image (works for selfies/headshots)
+- If no face is found, falls back to MediaPipe FaceDetector to locate the face bounding box, crops to it, then re-runs FaceLandmarker on the crop
+- If multiple faces are detected, selects the most frontal one
+
+### Step 2: Render with Face Landmarks
+
+```bash
+# Skeleton + face overlay
+body2colmap --input estimation.npz --output-dir ./output \
+  --face-landmarks face_landmarks.json \
+  --render-modes skeleton+face
+
+# Depth + skeleton + face
+body2colmap --input estimation.npz --output-dir ./output \
+  --face-landmarks face_landmarks.json \
+  --render-modes depth+skeleton+face
+
+# Face points only (no connecting lines)
+body2colmap --input estimation.npz --output-dir ./output \
+  --face-landmarks face_landmarks.json \
+  --face-mode points \
+  --render-modes skeleton+face
 ```
 
-### Key Design Principles
+Providing `--face-landmarks` automatically enables face rendering (`--face-mode full`). You can override this with `--face-mode points` or `--face-mode none`.
 
-1. **Single coordinate system**: All internal computation in world/renderer coords
-2. **Camera movement**: Mesh stays stationary, cameras orbit
-3. **Explicit transforms**: Coordinate conversions only at system boundaries
-4. **Separation of concerns**: Each module has single responsibility
+### Face Landmarks JSON Format
+
+The JSON file produced by `extract_face_landmarks.py` has the following structure:
+
+```json
+{
+  "version": "1.0",
+  "source": "mediapipe",
+  "source_image": "photo.jpg",
+  "image_size": [1536, 2048],
+  "n_landmarks": 478,
+  "refined": true,
+  "landmarks": [
+    [0.432100, 0.215300, -0.023400],
+    [0.445200, 0.218100, -0.031200],
+    ...
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Format version (`"1.0"`) |
+| `source` | string | Landmark source, must be `"mediapipe"` |
+| `source_image` | string | Original image filename (informational) |
+| `image_size` | [int, int] | Source image `[width, height]` in pixels. Required for correct aspect ratio during Procrustes alignment. |
+| `n_landmarks` | int | Number of landmarks (468 or 478) |
+| `refined` | bool | `true` if iris landmarks are present (478 points) |
+| `landmarks` | [[float, float, float], ...] | Normalized landmark coordinates `[x, y, z]` |
+
+**Landmark coordinates**:
+- `x`: Normalized to image width (0.0 = left edge, 1.0 = right edge)
+- `y`: Normalized to image height (0.0 = top edge, 1.0 = bottom edge)
+- `z`: Relative depth estimate (roughly same scale as x; calibrated automatically during fitting)
+
+The `image_size` field is important: it allows `body2colmap` to denormalize coordinates correctly so that portrait and landscape images produce proper face proportions.
+
+### CLI Options Reference
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--face-landmarks PATH` | None | Path to face landmarks JSON. Implies `--face-mode full`. |
+| `--face-mode {full,points,none}` | None | `full`: points + lines, `points`: points only, `none`: disabled |
+| `--skeleton` | off | Enable skeleton rendering (required for face) |
+| `--render-modes MODES` | `mesh` | Comma-separated list, e.g. `skeleton+face,depth+skeleton+face` |
+
+### Config File
+
+Face options can also be set in the YAML config file:
+
+```yaml
+skeleton:
+  enabled: true
+  face_mode: "full"               # "full", "points", or null
+  face_landmarks: "face.json"     # path to landmarks JSON
+```
+
+### Writing a Custom Client
+
+If you want to produce face landmark JSON from your own detection pipeline (not using the included tool), the minimum required fields are:
+
+```json
+{
+  "source": "mediapipe",
+  "image_size": [WIDTH, HEIGHT],
+  "landmarks": [
+    [x0, y0, z0],
+    [x1, y1, z1],
+    ...
+  ]
+}
+```
+
+Requirements:
+- `source` must be `"mediapipe"` (the only format currently supported)
+- `landmarks` must contain at least 468 entries in MediaPipe Face Mesh vertex order
+- If 478 entries are provided, indices 468-477 are treated as iris landmarks (468 = right iris center, 473 = left iris center)
+- `image_size` should be `[width, height]` of the image used for detection, so coordinates can be denormalized correctly
+- Coordinates should be normalized: `x` in [0, 1] relative to width, `y` in [0, 1] relative to height, `z` as relative depth
+
+The conversion pipeline internally:
+1. Maps MediaPipe 468 indices to OpenPose Face 68 keypoints (MaixPy convention)
+2. Adds pupils (indices 68-69) from iris centers or eye contour centroids
+3. Denormalizes coordinates using `image_size` (x * width, y * height, z * width)
+4. Calibrates z depth to match the skeleton's head geometry
+5. Fits to the skeleton via Procrustes alignment (5 anchor points: nose, eyes, ears)
+
+## Configuration
+
+### YAML Config File
+
+Generate a default config template:
+
+```bash
+body2colmap --save-config config.yaml
+```
+
+Use it:
+
+```bash
+body2colmap --config config.yaml --input estimation.npz
+```
+
+CLI arguments override config file values.
 
 ## Usage with 3D Gaussian Splatting
 
@@ -141,6 +302,32 @@ cd gaussian-splatting
 python train.py -s ../data/person
 ```
 
+## Architecture
+
+```
+body2colmap/
+├── coordinates.py   # Coordinate system definitions
+├── camera.py        # Camera class with intrinsics/extrinsics
+├── scene.py         # 3D scene management
+├── path.py          # Orbit path generation
+├── skeleton.py      # Skeleton format conversion and rendering data
+├── face.py          # Face landmarks, Procrustes alignment, visibility
+├── renderer.py      # Image rendering (mesh, depth, skeleton, face)
+├── exporter.py      # COLMAP export
+├── pipeline.py      # High-level API
+├── config.py        # Configuration management (CLI + YAML)
+└── cli.py           # Command-line interface
+tools/
+└── extract_face_landmarks.py  # Standalone MediaPipe face extraction utility
+```
+
+### Key Design Principles
+
+1. **Single coordinate system**: All internal computation in Y-up OpenGL/renderer coords
+2. **Camera movement**: Mesh stays stationary, cameras orbit
+3. **Explicit transforms**: Coordinate conversions only at system boundaries
+4. **Separation of concerns**: Each module has single responsibility
+
 ## Development
 
 ### Running Tests
@@ -150,33 +337,17 @@ python train.py -s ../data/person
 pytest
 
 # Specific module
-pytest tests/test_coordinates.py
+pytest tests/test_face.py
 
 # With coverage
 pytest --cov=body2colmap
 ```
 
-### Project Status
+## Documentation
 
-This is a skeleton architecture implementation. Core modules are defined but not fully implemented.
+See [IMPLEMENTATION.md](IMPLEMENTATION.md) for detailed specification and architecture notes.
 
-**Completed**:
-- ✅ Architecture design
-- ✅ Module interfaces
-- ✅ Coordinate system specification
-- ✅ Documentation
-
-**In Progress**:
-- ⏳ Core implementations
-- ⏳ Unit tests
-- ⏳ Integration tests
-
-**TODO**:
-- ❌ Skeleton rendering
-- ❌ Video export
-- ❌ YAML config support
-
-See [CLAUDE.md](CLAUDE.md) for implementation roadmap.
+For development notes, see [CLAUDE.md](CLAUDE.md).
 
 ## Contributing
 
@@ -186,16 +357,9 @@ Contributions welcome! Please see development notes in `CLAUDE.md` for architect
 
 [Add license here]
 
-## Citation
-
-If you use this tool in your research, please cite:
-
-```
-[Add citation here]
-```
-
 ## Acknowledgments
 
 - SAM-3D-Body for 3D body reconstruction
+- MediaPipe for face landmark detection
 - COLMAP for camera parameter format
 - 3D Gaussian Splatting for the underlying technique

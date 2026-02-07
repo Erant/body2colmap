@@ -280,7 +280,9 @@ class Config:
             enabled=skeleton_data.get('enabled', False),
             format=skeleton_data.get('format', 'openpose_body25_hands'),
             joint_radius=skeleton_data.get('joint_radius', 0.015),
-            bone_radius=skeleton_data.get('bone_radius', 0.008)
+            bone_radius=skeleton_data.get('bone_radius', 0.008),
+            face_mode=skeleton_data.get('face_mode', None),
+            face_landmarks=skeleton_data.get('face_landmarks', None)
         )
 
         # Parse export config
@@ -349,7 +351,9 @@ class Config:
                 'enabled': self.skeleton.enabled,
                 'format': self.skeleton.format,
                 'joint_radius': self.skeleton.joint_radius,
-                'bone_radius': self.skeleton.bone_radius
+                'bone_radius': self.skeleton.bone_radius,
+                'face_mode': self.skeleton.face_mode,
+                'face_landmarks': self.skeleton.face_landmarks
             },
             'export': {
                 'output_dir': self.export.output_dir,
@@ -461,6 +465,14 @@ skeleton:
 
   # Bone cylinder radius in meters
   bone_radius: 0.008
+
+  # Face landmark rendering mode: null (disabled), "full" (points + lines), "points" (points only)
+  # Providing face_landmarks automatically sets this to "full" unless overridden
+  face_mode: null
+
+  # Path to face landmarks JSON file (from tools/extract_face_landmarks.py)
+  # When provided, uses subject-specific face geometry instead of the canonical model
+  face_landmarks: null
 
 # Export configuration
 export:
