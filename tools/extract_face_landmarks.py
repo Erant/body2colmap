@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Extract face landmarks from an image using MediaPipe Face Mesh.
+Extract face landmarks from an image using MediaPipe FaceLandmarker.
 
-Outputs a JSON file containing raw MediaPipe landmarks (468 or 478 points).
+Outputs a JSON file containing raw MediaPipe landmarks (478 points).
 The body2colmap library handles conversion to OpenPose Face 70 format via
 FaceLandmarkIngest.
 
 Requirements:
-    pip install mediapipe opencv-python
+    pip install mediapipe
 
 Usage:
     python extract_face_landmarks.py input_image.jpg -o landmarks.json
@@ -15,66 +15,91 @@ Usage:
 
 The output JSON can be passed to body2colmap via --face-landmarks:
     body2colmap input.npz -o output/ --face-landmarks landmarks.json
+
+On first run, the FaceLandmarker model (~4MB) is downloaded automatically
+to ~/.cache/body2colmap/face_landmarker.task.
 """
 
 import argparse
 import json
 import sys
+import urllib.request
 from pathlib import Path
 
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+)
+MODEL_CACHE_DIR = Path.home() / ".cache" / "body2colmap"
+MODEL_PATH = MODEL_CACHE_DIR / "face_landmarker.task"
 
-def extract_landmarks(image_path: str, refine: bool = True) -> dict:
+
+def ensure_model(model_path: Path = MODEL_PATH) -> Path:
+    """Download the FaceLandmarker model if not cached."""
+    if model_path.exists():
+        return model_path
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading FaceLandmarker model to {model_path}...", file=sys.stderr)
+    urllib.request.urlretrieve(MODEL_URL, str(model_path))
+    print("Done.", file=sys.stderr)
+    return model_path
+
+
+def extract_landmarks(image_path: str, model_path: str = None) -> dict:
     """
-    Extract raw face landmarks from an image using MediaPipe Face Mesh.
+    Extract raw face landmarks from an image using MediaPipe FaceLandmarker.
 
     Args:
         image_path: Path to input image
-        refine: Whether to use refined landmarks (478 with iris)
+        model_path: Path to .task model file (auto-downloaded if None)
 
     Returns:
         Dictionary with raw MediaPipe landmark data ready for JSON serialization
     """
     try:
         import mediapipe as mp
-        import cv2
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
     except ImportError:
         print(
-            "Error: mediapipe and opencv-python are required.\n"
-            "Install with: pip install mediapipe opencv-python",
+            "Error: mediapipe is required.\n"
+            "Install with: pip install mediapipe",
             file=sys.stderr
         )
         sys.exit(1)
 
-    # Read image
-    image = cv2.imread(image_path)
-    if image is None:
-        print(f"Error: Could not read image: {image_path}", file=sys.stderr)
-        sys.exit(1)
+    # Ensure model is available
+    if model_path is None:
+        model_path = str(ensure_model())
 
-    height, width = image.shape[:2]
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # Read image via MediaPipe's own loader
+    image = mp.Image.create_from_file(image_path)
+    height = image.height
+    width = image.width
 
-    # Run face mesh
-    mp_face_mesh = mp.solutions.face_mesh
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=True,
-        max_num_faces=1,
-        refine_landmarks=refine,
-        min_detection_confidence=0.5
-    ) as face_mesh:
-        results = face_mesh.process(image_rgb)
+    # Create FaceLandmarker
+    base_options = python.BaseOptions(model_asset_path=model_path)
+    options = vision.FaceLandmarkerOptions(
+        base_options=base_options,
+        num_faces=1
+    )
+    detector = vision.FaceLandmarker.create_from_options(options)
 
-    if not results.multi_face_landmarks:
+    # Detect landmarks
+    result = detector.detect(image)
+
+    if not result.face_landmarks:
         print("Error: No face detected in image.", file=sys.stderr)
         sys.exit(1)
 
-    face = results.multi_face_landmarks[0]
-    n_landmarks = len(face.landmark)
+    face = result.face_landmarks[0]
+    n_landmarks = len(face)
 
-    # Output all raw landmarks (468 or 478)
+    # Output all raw landmarks (478 with iris)
     all_landmarks = [
         [round(lm.x, 6), round(lm.y, 6), round(lm.z, 6)]
-        for lm in face.landmark
+        for lm in face
     ]
 
     return {
@@ -83,14 +108,14 @@ def extract_landmarks(image_path: str, refine: bool = True) -> dict:
         "source_image": str(Path(image_path).name),
         "image_size": [width, height],
         "n_landmarks": n_landmarks,
-        "refined": refine and n_landmarks >= 478,
+        "refined": n_landmarks >= 478,
         "landmarks": all_landmarks
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract face landmarks from an image using MediaPipe Face Mesh"
+        description="Extract face landmarks from an image using MediaPipe FaceLandmarker"
     )
     parser.add_argument(
         "image",
@@ -101,14 +126,13 @@ def main():
         help="Output JSON file path (default: stdout)"
     )
     parser.add_argument(
-        "--no-refine",
-        action="store_true",
-        help="Disable landmark refinement (skip iris detection)"
+        "--model-path",
+        help="Path to FaceLandmarker .task model (auto-downloaded if not specified)"
     )
 
     args = parser.parse_args()
 
-    result = extract_landmarks(args.image, refine=not args.no_refine)
+    result = extract_landmarks(args.image, model_path=args.model_path)
 
     json_str = json.dumps(result, indent=2)
 
