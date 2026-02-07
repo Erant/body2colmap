@@ -475,6 +475,29 @@ class TestFaceLandmarkIngestFromMediaPipe:
         with pytest.raises(ValueError, match="shape"):
             FaceLandmarkIngest.from_mediapipe(mp)
 
+    def test_denormalize_with_image_size(self):
+        """With image_size, coords should be scaled to pixel space."""
+        mp = self._make_fake_mediapipe_478()
+        w, h = 800, 1200
+
+        result = FaceLandmarkIngest.from_mediapipe(mp, image_size=(w, h))
+        result_raw = FaceLandmarkIngest.from_mediapipe(mp)
+
+        # x should be scaled by width, y by height, z by width
+        np.testing.assert_allclose(result[:, 0], result_raw[:, 0] * w, atol=1e-4)
+        np.testing.assert_allclose(result[:, 1], result_raw[:, 1] * h, atol=1e-4)
+        np.testing.assert_allclose(result[:, 2], result_raw[:, 2] * w, atol=1e-4)
+
+    def test_no_image_size_passes_through(self):
+        """Without image_size, coords should pass through unchanged."""
+        mp = self._make_fake_mediapipe_478()
+        result = FaceLandmarkIngest.from_mediapipe(mp)
+
+        # First keypoint should be raw value from mapping
+        np.testing.assert_array_equal(
+            result[0], mp[MEDIAPIPE_TO_OPENPOSE_68[0]]
+        )
+
 
 class TestFaceLandmarkIngestFromJSON:
     """Test FaceLandmarkIngest.from_json()."""
@@ -556,11 +579,33 @@ class TestFaceLandmarkIngestFromJSON:
         """JSON load should produce same result as direct from_mediapipe."""
         rng = np.random.RandomState(42)
         raw = rng.rand(478, 3).astype(np.float32)
+        image_size = (640, 480)
 
-        # Direct conversion
+        # Direct conversion with image_size
+        direct = FaceLandmarkIngest.from_mediapipe(raw, image_size=image_size)
+
+        # Via JSON roundtrip (image_size in JSON triggers denormalization)
+        data = {
+            "source": "mediapipe",
+            "image_size": list(image_size),
+            "landmarks": raw.tolist()
+        }
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            from_json = FaceLandmarkIngest.from_json(f.name)
+
+        np.testing.assert_allclose(from_json, direct, atol=1e-5)
+
+    def test_roundtrip_no_image_size(self):
+        """JSON without image_size should pass through raw coordinates."""
+        rng = np.random.RandomState(42)
+        raw = rng.rand(478, 3).astype(np.float32)
+
+        # Direct conversion without image_size
         direct = FaceLandmarkIngest.from_mediapipe(raw)
 
-        # Via JSON roundtrip
+        # Via JSON roundtrip (no image_size → no denormalization)
         data = {
             "source": "mediapipe",
             "landmarks": raw.tolist()

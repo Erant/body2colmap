@@ -437,6 +437,7 @@ class FaceLandmarkIngest:
     @staticmethod
     def from_mediapipe(
         landmarks: Union[List[List[float]], NDArray[np.float32]],
+        image_size: Optional[Tuple[int, int]] = None,
     ) -> NDArray[np.float32]:
         """
         Convert MediaPipe Face Mesh landmarks to OpenPose Face 70.
@@ -445,10 +446,18 @@ class FaceLandmarkIngest:
         landmarks to OpenPose Face 68, then adds pupils (indices 68-69)
         from iris centers (if 478 landmarks) or eye contour centroids.
 
+        MediaPipe landmarks are normalized: x to image width, y to image
+        height, z relative depth (roughly same scale as x). If image_size
+        is provided, coordinates are denormalized to pixel space so that
+        the face geometry has correct proportions for Procrustes alignment.
+
         Args:
             landmarks: MediaPipe face landmarks, shape (N, 3) where N is
                 468 (standard) or 478 (refined with iris tracking).
                 Coordinates are normalized [0,1] x [0,1] x relative_depth.
+            image_size: (width, height) of the source image. Required for
+                correct proportions — without it, portrait/landscape images
+                produce distorted face geometry.
 
         Returns:
             OpenPose Face 70 landmarks, shape (70, 3), float32.
@@ -468,6 +477,17 @@ class FaceLandmarkIngest:
             raise ValueError(
                 f"MediaPipe landmarks require at least 468 points, got {n}"
             )
+
+        # Denormalize to pixel coordinates for correct aspect ratio.
+        # MediaPipe x is normalized to width, y to height, z to width.
+        # Without this, portrait images produce faces that are wider than
+        # tall in normalized space, breaking Procrustes alignment.
+        if image_size is not None:
+            w, h = image_size
+            lm = lm.copy()
+            lm[:, 0] *= w
+            lm[:, 1] *= h
+            lm[:, 2] *= w
 
         # Map the first 68 keypoints
         openpose_68 = lm[MEDIAPIPE_TO_OPENPOSE_68]  # (68, 3)
@@ -524,7 +544,12 @@ class FaceLandmarkIngest:
                 raise ValueError(
                     f"MediaPipe JSON missing 'landmarks' field in {filepath}"
                 )
-            return FaceLandmarkIngest.from_mediapipe(raw_landmarks)
+            image_size = data.get("image_size")
+            if image_size is not None:
+                image_size = tuple(image_size)
+            return FaceLandmarkIngest.from_mediapipe(
+                raw_landmarks, image_size=image_size
+            )
         else:
             raise ValueError(
                 f"Unsupported face landmark source: '{source}' in {filepath}. "
