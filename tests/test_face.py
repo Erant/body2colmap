@@ -25,6 +25,7 @@ from body2colmap.face import (
     fit_face_to_skeleton,
     compute_face_normal,
     is_face_visible,
+    _calibrate_face_depth,
 )
 
 
@@ -427,35 +428,34 @@ class TestFaceLandmarkIngestFromMediaPipe:
         assert result.dtype == np.float32
 
     def test_first_68_from_mapping(self):
-        """First 68 keypoints x,y should come from the mapping (z zeroed)."""
+        """First 68 keypoints should come from the mapping (all 3 coords)."""
         mp = self._make_fake_mediapipe_478()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
         for i, mp_idx in enumerate(MEDIAPIPE_TO_OPENPOSE_68):
             np.testing.assert_array_equal(
-                result[i, :2], mp[mp_idx, :2],
+                result[i], mp[mp_idx],
                 err_msg=f"OpenPose keypoint {i} doesn't match MP index {mp_idx}"
             )
-            assert result[i, 2] == 0.0
 
     def test_pupils_from_iris_478(self):
-        """With 478 landmarks, pupils x,y should come from iris centers."""
+        """With 478 landmarks, pupils should come from iris centers."""
         mp = self._make_fake_mediapipe_478()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
-        np.testing.assert_array_equal(result[68, :2], mp[468, :2])
-        np.testing.assert_array_equal(result[69, :2], mp[473, :2])
+        np.testing.assert_array_equal(result[68], mp[468])
+        np.testing.assert_array_equal(result[69], mp[473])
 
     def test_pupils_from_centroids_468(self):
-        """With 468 landmarks, pupils x,y should be eye contour centroids."""
+        """With 468 landmarks, pupils should be eye contour centroids."""
         mp = self._make_fake_mediapipe_468()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
-        expected_right = mp[MEDIAPIPE_RIGHT_EYE_CONTOUR, :2].mean(axis=0)
-        expected_left = mp[MEDIAPIPE_LEFT_EYE_CONTOUR, :2].mean(axis=0)
+        expected_right = mp[MEDIAPIPE_RIGHT_EYE_CONTOUR].mean(axis=0)
+        expected_left = mp[MEDIAPIPE_LEFT_EYE_CONTOUR].mean(axis=0)
 
-        np.testing.assert_allclose(result[68, :2], expected_right, atol=1e-6)
-        np.testing.assert_allclose(result[69, :2], expected_left, atol=1e-6)
+        np.testing.assert_allclose(result[68], expected_right, atol=1e-6)
+        np.testing.assert_allclose(result[69], expected_left, atol=1e-6)
 
     def test_accepts_list_input(self):
         """Should accept list-of-lists as well as numpy array."""
@@ -477,41 +477,39 @@ class TestFaceLandmarkIngestFromMediaPipe:
             FaceLandmarkIngest.from_mediapipe(mp)
 
     def test_denormalize_with_image_size(self):
-        """With image_size, x/y should be scaled to pixel space, z zeroed."""
+        """With image_size, x scaled by width, y by height, z by width."""
         mp = self._make_fake_mediapipe_478()
         w, h = 800, 1200
 
         result = FaceLandmarkIngest.from_mediapipe(mp, image_size=(w, h))
 
-        # x should be scaled by width, y by height
+        # x should be scaled by width, y by height, z by width
         for i, mp_idx in enumerate(MEDIAPIPE_TO_OPENPOSE_68):
             assert abs(result[i, 0] - mp[mp_idx, 0] * w) < 1e-4
             assert abs(result[i, 1] - mp[mp_idx, 1] * h) < 1e-4
+            assert abs(result[i, 2] - mp[mp_idx, 2] * w) < 1e-4
 
-        # z should be zeroed (MediaPipe z is unreliable for 3D fitting)
-        np.testing.assert_array_equal(result[:, 2], 0.0)
-
-    def test_z_always_zeroed(self):
-        """MediaPipe z should be zeroed regardless of image_size."""
+    def test_z_preserved(self):
+        """MediaPipe z should be preserved (not zeroed)."""
         mp = self._make_fake_mediapipe_478()
 
         result_with = FaceLandmarkIngest.from_mediapipe(mp, image_size=(800, 600))
         result_without = FaceLandmarkIngest.from_mediapipe(mp)
 
-        np.testing.assert_array_equal(result_with[:, 2], 0.0)
-        np.testing.assert_array_equal(result_without[:, 2], 0.0)
+        # With image_size, z should be scaled by width (non-zero for random input)
+        assert not np.allclose(result_with[:, 2], 0.0)
+        # Without image_size, z should be raw values (non-zero for random input)
+        assert not np.allclose(result_without[:, 2], 0.0)
 
-    def test_no_image_size_preserves_xy(self):
-        """Without image_size, x/y pass through unchanged, z zeroed."""
+    def test_no_image_size_preserves_raw(self):
+        """Without image_size, all coordinates pass through unchanged."""
         mp = self._make_fake_mediapipe_478()
         result = FaceLandmarkIngest.from_mediapipe(mp)
 
-        # x,y should be raw values from mapping
+        # x, y, z should all be raw values from mapping
         np.testing.assert_array_equal(
-            result[0, :2], mp[MEDIAPIPE_TO_OPENPOSE_68[0], :2]
+            result[0], mp[MEDIAPIPE_TO_OPENPOSE_68[0]]
         )
-        # z should be zero
-        assert result[0, 2] == 0.0
 
 
 class TestFaceLandmarkIngestFromJSON:
@@ -631,3 +629,80 @@ class TestFaceLandmarkIngestFromJSON:
             from_json = FaceLandmarkIngest.from_json(f.name)
 
         np.testing.assert_allclose(from_json, direct, atol=1e-5)
+
+
+class TestCalibrateFaceDepth:
+    """Test z-depth calibration from skeleton geometry."""
+
+    def _make_skeleton(self):
+        """Create skeleton with known head geometry."""
+        skeleton = np.zeros((19, 3), dtype=np.float32)
+        skeleton[0] = [0.0, 1.7, 0.05]       # Nose
+        skeleton[17] = [-0.08, 1.7, -0.04]    # REar
+        skeleton[18] = [0.08, 1.7, -0.04]     # LEar
+        return skeleton
+
+    def test_scales_z_to_match_skeleton_ratio(self):
+        """Z values should be scaled to match skeleton depth/width ratio."""
+        face = np.zeros((70, 3), dtype=np.float32)
+        # Ears at x=+-8, z=-10; nose at z=+10  (exaggerated z)
+        face[1] = [-8.0, 0.0, -10.0]   # Right ear
+        face[15] = [8.0, 0.0, -10.0]   # Left ear
+        face[30] = [0.0, 0.0, 10.0]    # Nose tip
+
+        skeleton = self._make_skeleton()
+
+        # Skeleton geometry:
+        #   ear_dist = ||[0.08,1.7,-0.04] - [-0.08,1.7,-0.04]|| = 0.16
+        #   ear_mid = [0, 1.7, -0.04]
+        #   depth = ||[0,1.7,0.05] - [0,1.7,-0.04]|| = 0.09
+        #   ratio = 0.09 / 0.16 = 0.5625
+        #
+        # Face geometry:
+        #   ear_dist_xy = 16.0
+        #   z_span = |10 - (-10)| = 20
+        #   target_z_span = 16.0 * 0.5625 = 9.0
+        #   z_scale = 9.0 / 20.0 = 0.45
+        #   z_center = (10 + (-10)) / 2 = 0
+        #   nose_z_new = 10 * 0.45 = 4.5
+        #   ear_z_new = -10 * 0.45 = -4.5
+
+        result = _calibrate_face_depth(face, skeleton)
+
+        assert abs(result[30, 2] - 4.5) < 0.1
+        assert abs(result[1, 2] - (-4.5)) < 0.1
+        assert abs(result[15, 2] - (-4.5)) < 0.1
+
+    def test_preserves_xy(self):
+        """X and Y should not be modified by z calibration."""
+        face = np.zeros((70, 3), dtype=np.float32)
+        face[1] = [-8.0, -1.0, -10.0]
+        face[15] = [8.0, 1.0, -10.0]
+        face[30] = [0.0, 2.0, 10.0]
+        face[5] = [3.0, 4.0, 5.0]
+
+        skeleton = self._make_skeleton()
+        result = _calibrate_face_depth(face, skeleton)
+
+        np.testing.assert_array_equal(result[:, :2], face[:, :2])
+
+    def test_degenerate_skeleton_ears_passthrough(self):
+        """If skeleton ears coincide, should return landmarks unchanged."""
+        face = np.random.RandomState(42).rand(70, 3).astype(np.float32)
+        skeleton = np.zeros((19, 3), dtype=np.float32)
+        skeleton[17] = [0.0, 1.7, 0.0]
+        skeleton[18] = [0.0, 1.7, 0.0]  # Same as right ear
+
+        result = _calibrate_face_depth(face, skeleton)
+        np.testing.assert_array_equal(result, face)
+
+    def test_zero_face_z_span_passthrough(self):
+        """If face has no z variation at anchors, should return unchanged."""
+        face = np.zeros((70, 3), dtype=np.float32)
+        face[1] = [-8.0, 0.0, 0.0]    # Right ear, z=0
+        face[15] = [8.0, 0.0, 0.0]    # Left ear, z=0
+        face[30] = [0.0, 0.0, 0.0]    # Nose, z=0
+
+        skeleton = self._make_skeleton()
+        result = _calibrate_face_depth(face, skeleton)
+        np.testing.assert_array_equal(result, face)

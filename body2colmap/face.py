@@ -246,6 +246,74 @@ def procrustes_align(
     return rotation, float(scale), translation.astype(np.float32), residual
 
 
+def _calibrate_face_depth(
+    face_landmarks: NDArray[np.float32],
+    skeleton_joints: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """
+    Scale face landmark z values to match the skeleton's head depth.
+
+    MediaPipe z is a relative depth estimate with ~2-3x the range of the
+    actual head depth. This function computes the skeleton's head
+    depth-to-width ratio (nose-to-ear-midpoint / ear-to-ear) and scales
+    the face z values to match.
+
+    Args:
+        face_landmarks: OpenPose Face 70 landmarks with uncalibrated z
+        skeleton_joints: Skeleton joints in world coordinates
+
+    Returns:
+        Copy of face_landmarks with z values scaled to match skeleton geometry
+    """
+    # Skeleton head geometry
+    nose = skeleton_joints[0]       # Nose
+    right_ear = skeleton_joints[17] # REar
+    left_ear = skeleton_joints[18]  # LEar
+
+    ear_mid = (right_ear + left_ear) / 2.0
+    skel_ear_dist = float(np.linalg.norm(left_ear - right_ear))
+    skel_depth = float(np.linalg.norm(nose - ear_mid))
+
+    if skel_ear_dist < 1e-6:
+        logger.debug("Skeleton ear distance near zero, skipping z calibration")
+        return face_landmarks
+
+    skel_ratio = skel_depth / skel_ear_dist
+
+    # Face landmark geometry (same anchor indices: nose=30, ears=1,15)
+    face_nose = face_landmarks[30]
+    face_right_ear = face_landmarks[1]
+    face_left_ear = face_landmarks[15]
+
+    face_ear_mid_z = (face_right_ear[2] + face_left_ear[2]) / 2.0
+    face_nose_z = face_nose[2]
+    face_z_span = abs(face_nose_z - face_ear_mid_z)
+
+    face_ear_dist_xy = float(np.linalg.norm(
+        face_left_ear[:2] - face_right_ear[:2]
+    ))
+
+    if face_z_span < 1e-6 or face_ear_dist_xy < 1e-6:
+        logger.debug("Face z span or ear distance near zero, skipping z calibration")
+        return face_landmarks
+
+    # Target z span: match the skeleton's depth-to-width ratio
+    target_z_span = face_ear_dist_xy * skel_ratio
+    z_scale = target_z_span / face_z_span
+
+    logger.debug(
+        "Z calibration: skeleton depth/width=%.3f, face z_span=%.1f, "
+        "target=%.1f, z_scale=%.3f",
+        skel_ratio, face_z_span, target_z_span, z_scale
+    )
+
+    result = face_landmarks.copy()
+    z_center = (face_nose_z + face_ear_mid_z) / 2.0
+    result[:, 2] = (result[:, 2] - z_center) * z_scale + z_center
+
+    return result
+
+
 def fit_face_to_skeleton(
     skeleton_joints: NDArray[np.float32],
     face_landmarks: Optional[NDArray[np.float32]] = None,
@@ -282,6 +350,8 @@ def fit_face_to_skeleton(
             face_landmarks[:, 1].min(), face_landmarks[:, 1].max(),
             face_landmarks[:, 2].min(), face_landmarks[:, 2].max(),
         )
+        # Calibrate z depth using skeleton's known head geometry
+        face_landmarks = _calibrate_face_depth(face_landmarks, skeleton_joints)
 
     # Extract anchor points from face landmarks
     source_anchors = face_landmarks[CANONICAL_ANCHOR_INDICES]
@@ -500,11 +570,10 @@ class FaceLandmarkIngest:
         # MediaPipe x is normalized to width, y to height. Without this,
         # portrait images produce faces wider than tall in normalized space.
         #
-        # MediaPipe z is a relative depth estimate that is NOT calibrated
-        # to the same scale as x,y — it can have 2-3x the range of the
-        # face width, distorting the shape for Procrustes alignment. We
-        # zero it out: the 2D face shape from x,y is reliable, and
-        # Procrustes will orient the face plane to match the 3D skeleton.
+        # z is also denormalized by width (MediaPipe z is "roughly same
+        # scale as x"). The z values will still have wrong absolute scale
+        # (2-3x too large), but fit_face_to_skeleton() calibrates z using
+        # the skeleton's known head depth-to-width ratio.
         lm = lm.copy()
         if image_size is not None:
             w, h = image_size
@@ -513,9 +582,9 @@ class FaceLandmarkIngest:
             )
             lm[:, 0] *= w
             lm[:, 1] *= h
+            lm[:, 2] *= w
         else:
             logger.debug("No image_size provided, using raw normalized coordinates")
-        lm[:, 2] = 0.0
 
         # Map the first 68 keypoints
         openpose_68 = lm[MEDIAPIPE_TO_OPENPOSE_68]  # (68, 3)
