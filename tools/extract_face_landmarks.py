@@ -51,9 +51,9 @@ def _ensure_model(url: str, path: Path) -> Path:
     return path
 
 
-def _find_face_bbox(rgb, detector, mp_module):
+def _find_all_face_bboxes(rgb, detector, mp_module):
     """
-    Find face bounding box using MediaPipe FaceDetector.
+    Find all face bounding boxes using MediaPipe FaceDetector.
 
     Args:
         rgb: RGB image as numpy array (H, W, 3)
@@ -61,18 +61,18 @@ def _find_face_bbox(rgb, detector, mp_module):
         mp_module: mediapipe module (for mp.Image)
 
     Returns:
-        (x, y, w, h) bounding box in pixel coordinates, or None
+        List of (x, y, w, h) bounding boxes in pixel coordinates
     """
     image = mp_module.Image(
         image_format=mp_module.ImageFormat.SRGB, data=rgb
     )
     result = detector.detect(image)
 
-    if not result.detections:
-        return None
-
-    bbox = result.detections[0].bounding_box
-    return (bbox.origin_x, bbox.origin_y, bbox.width, bbox.height)
+    bboxes = []
+    for det in result.detections:
+        bbox = det.bounding_box
+        bboxes.append((bbox.origin_x, bbox.origin_y, bbox.width, bbox.height))
+    return bboxes
 
 
 def _crop_to_face(rgb, bbox, padding=0.5):
@@ -102,6 +102,63 @@ def _crop_to_face(rgb, bbox, padding=0.5):
 
     crop = np.ascontiguousarray(rgb[y1:y2, x1:x2, :])
     return crop, x1, y1
+
+
+# MediaPipe landmark indices for frontality scoring
+_MP_LEFT_EYE_OUTER = 33
+_MP_RIGHT_EYE_OUTER = 263
+_MP_NOSE_BRIDGE = 168
+_MP_CHIN = 152
+
+
+def _frontality_score(face_landmarks):
+    """
+    Score how frontal a face is from its MediaPipe landmarks.
+
+    Computes the face normal via cross product of the eye vector (horizontal)
+    and nose-to-chin vector (vertical). The Z component of the normal
+    indicates how much the face points toward the camera.
+
+    Returns a value in [0, 1]: 1 = perfectly frontal, 0 = full profile.
+    """
+    import numpy as np
+
+    def _xyz(idx):
+        lm = face_landmarks[idx]
+        return np.array([lm.x, lm.y, lm.z])
+
+    eye_vec = _xyz(_MP_LEFT_EYE_OUTER) - _xyz(_MP_RIGHT_EYE_OUTER)
+    vert_vec = _xyz(_MP_NOSE_BRIDGE) - _xyz(_MP_CHIN)
+    normal = np.cross(eye_vec, vert_vec)
+
+    norm = np.linalg.norm(normal)
+    if norm < 1e-10:
+        return 0.0
+    return abs(normal[2]) / norm
+
+
+def _pick_best_face(face_landmarks_list):
+    """
+    Pick the most frontal face from a list of detected faces.
+
+    Args:
+        face_landmarks_list: List of MediaPipe face landmark lists
+
+    Returns:
+        (best_face, best_index) - the most frontal face and its index
+    """
+    if len(face_landmarks_list) == 1:
+        return face_landmarks_list[0], 0
+
+    best_score = -1.0
+    best_idx = 0
+    for i, face in enumerate(face_landmarks_list):
+        score = _frontality_score(face)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+
+    return face_landmarks_list[best_idx], best_idx
 
 
 def extract_landmarks(
@@ -163,14 +220,15 @@ def extract_landmarks(
     rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     height, width = rgb.shape[:2]
 
-    # Create FaceLandmarker
+    # Create FaceLandmarker (allow multiple faces for best-face selection)
+    max_faces = 10
     lm_options = vision.FaceLandmarkerOptions(
         base_options=python.BaseOptions(
             model_asset_path=landmarker_model_path
         ),
         min_face_detection_confidence=min_confidence,
         min_face_presence_confidence=min_confidence,
-        num_faces=1,
+        num_faces=max_faces,
     )
     landmarker = vision.FaceLandmarker.create_from_options(lm_options)
 
@@ -180,13 +238,20 @@ def extract_landmarks(
         result = landmarker.detect(image)
 
         if result.face_landmarks:
-            face = result.face_landmarks[0]
+            face, idx = _pick_best_face(result.face_landmarks)
+            if len(result.face_landmarks) > 1:
+                score = _frontality_score(face)
+                print(
+                    f"Found {len(result.face_landmarks)} face(s), "
+                    f"selected #{idx + 1} (frontality: {score:.2f}).",
+                    file=sys.stderr
+                )
             all_landmarks = [
                 [round(lm.x, 6), round(lm.y, 6), round(lm.z, 6)]
                 for lm in face
             ]
         else:
-            # Stage 2: FaceDetector to locate bbox, then crop for landmarks
+            # Stage 2: FaceDetector to locate bboxes, crop each, pick best
             det_options = vision.FaceDetectorOptions(
                 base_options=python.BaseOptions(
                     model_asset_path=detector_model_path
@@ -196,46 +261,66 @@ def extract_landmarks(
             detector = vision.FaceDetector.create_from_options(det_options)
 
             try:
-                bbox = _find_face_bbox(rgb, detector, mp)
+                bboxes = _find_all_face_bboxes(rgb, detector, mp)
             finally:
                 detector.close()
 
-            if bbox is None:
+            if not bboxes:
                 print(
                     f"Error: No face detected in image ({width}x{height}).",
                     file=sys.stderr
                 )
                 sys.exit(1)
 
-            # Crop to detected face with padding for landmark context
-            crop, x1, y1 = _crop_to_face(rgb, bbox, padding=0.5)
-            crop_h, crop_w = crop.shape[:2]
             print(
-                f"Face detected at ({bbox[0]}, {bbox[1]}, "
-                f"{bbox[2]}x{bbox[3]}), cropped to {crop_w}x{crop_h} for "
-                f"landmark extraction.",
+                f"FaceDetector found {len(bboxes)} face(s).",
+                file=sys.stderr
+            )
+
+            # Extract landmarks from each detected face crop
+            candidates = []  # (face_landmarks, crop, x1, y1, bbox)
+            for bbox in bboxes:
+                crop, x1, y1 = _crop_to_face(rgb, bbox, padding=0.5)
+                crop_image = mp.Image(
+                    image_format=mp.ImageFormat.SRGB, data=crop
+                )
+                crop_result = landmarker.detect(crop_image)
+                if crop_result.face_landmarks:
+                    candidates.append(
+                        (crop_result.face_landmarks[0], crop, x1, y1, bbox)
+                    )
+
+            if not candidates:
+                print(
+                    f"Error: FaceDetector located {len(bboxes)} face(s) but "
+                    f"FaceLandmarker could not extract landmarks from any.",
+                    file=sys.stderr
+                )
+                sys.exit(1)
+
+            # Pick the most frontal face
+            faces_only = [c[0] for c in candidates]
+            _, best_idx = _pick_best_face(faces_only)
+            face, crop, x1, y1, bbox = candidates[best_idx]
+            crop_h, crop_w = crop.shape[:2]
+
+            if len(candidates) > 1:
+                score = _frontality_score(face)
+                print(
+                    f"Selected face #{best_idx + 1} of {len(candidates)} "
+                    f"(frontality: {score:.2f}).",
+                    file=sys.stderr
+                )
+
+            print(
+                f"Face at ({bbox[0]}, {bbox[1]}, {bbox[2]}x{bbox[3]}), "
+                f"cropped to {crop_w}x{crop_h} for landmark extraction.",
                 file=sys.stderr
             )
 
             if save_crop:
                 cv2.imwrite(save_crop, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
                 print(f"Crop saved to: {save_crop}", file=sys.stderr)
-
-            crop_image = mp.Image(
-                image_format=mp.ImageFormat.SRGB, data=crop
-            )
-            result = landmarker.detect(crop_image)
-
-            if not result.face_landmarks:
-                print(
-                    f"Error: FaceDetector located a face but FaceLandmarker "
-                    f"could not extract landmarks from the crop "
-                    f"({crop_w}x{crop_h}).",
-                    file=sys.stderr
-                )
-                sys.exit(1)
-
-            face = result.face_landmarks[0]
 
             # Map crop-normalized landmarks back to full-image normalized coords
             all_landmarks = [
