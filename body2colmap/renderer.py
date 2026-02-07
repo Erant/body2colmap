@@ -303,7 +303,8 @@ class Renderer:
         bone_color: Tuple[float, float, float] = None,
         use_openpose_colors: bool = True,
         render_bones: bool = True,
-        target_format: str = "openpose_body25_hands"
+        target_format: str = "openpose_body25_hands",
+        face_mode: str = None
     ) -> NDArray[np.uint8]:
         """
         Render 3D skeleton as spheres (joints) and cylinders (bones).
@@ -317,6 +318,10 @@ class Renderer:
             use_openpose_colors: If True, use OpenPose color scheme for bones
             render_bones: If False, only render joints (no bone cylinders)
             target_format: Skeleton format to render ("openpose_body25_hands", "mhr70", etc.)
+            face_mode: Face landmark rendering mode:
+                - None: No face landmarks (default)
+                - "full": Points + connectivity lines
+                - "points": Points only, no connecting lines
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8
@@ -460,6 +465,14 @@ class Renderer:
             mesh = pyrender.Mesh.from_trimesh(sphere, smooth=False)
             pr_scene.add(mesh)
 
+        # Add face landmarks if requested
+        if face_mode is not None:
+            self._add_face_to_scene(
+                pr_scene, skeleton_joints, camera, face_mode,
+                face_joint_radius=joint_radius * 0.35,
+                face_bone_radius=bone_radius * 0.35
+            )
+
         # Add camera
         pr_camera = pyrender.PerspectiveCamera(
             yfov=2 * np.arctan(self.height / (2 * camera.fy)),
@@ -472,6 +485,98 @@ class Renderer:
         color, depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
 
         return color
+
+    def _add_face_to_scene(
+        self,
+        pr_scene,
+        skeleton_joints: NDArray[np.float32],
+        camera: Camera,
+        face_mode: str,
+        face_joint_radius: float = 0.005,
+        face_bone_radius: float = 0.003
+    ) -> None:
+        """
+        Add face landmarks to an existing pyrender scene.
+
+        Fits canonical face landmarks to skeleton head joints via Procrustes,
+        checks if face is visible from camera, and adds geometry if so.
+
+        Args:
+            pr_scene: pyrender.Scene to add face geometry to
+            skeleton_joints: Skeleton joints in world coords (OpenPose Body25+)
+            camera: Camera for visibility test
+            face_mode: "full" (points + connectivity) or "points" (points only)
+            face_joint_radius: Radius for face keypoint spheres
+            face_bone_radius: Radius for face connection cylinders
+        """
+        import trimesh
+        import pyrender
+        from . import face as face_module
+
+        # Check we have enough joints for the 5 anchor points
+        max_anchor = max(face_module.SKELETON_ANCHOR_JOINT_INDICES)
+        if len(skeleton_joints) <= max_anchor:
+            return
+
+        # Fit face to skeleton
+        face_landmarks, residual = face_module.fit_face_to_skeleton(skeleton_joints)
+
+        # Check visibility (frontal 180 degrees only)
+        if not face_module.is_face_visible(face_landmarks, camera.position):
+            return
+
+        face_color_uint8 = np.array([255, 255, 255, 255], dtype=np.uint8)
+
+        # Add face bones as cylinders (if full mode)
+        if face_mode == "full":
+            for start_idx, end_idx in face_module.OPENPOSE_FACE_BONES:
+                start_pos = face_landmarks[start_idx]
+                end_pos = face_landmarks[end_idx]
+
+                direction = end_pos - start_pos
+                length = np.linalg.norm(direction)
+
+                if length < 1e-6:
+                    continue
+
+                cylinder = trimesh.creation.cylinder(
+                    radius=face_bone_radius,
+                    height=length,
+                    sections=6
+                )
+
+                z_axis = np.array([0, 0, 1], dtype=np.float32)
+                bone_dir = direction / length
+
+                rot_axis = np.cross(z_axis, bone_dir)
+                rot_axis_len = np.linalg.norm(rot_axis)
+
+                if rot_axis_len > 1e-6:
+                    rot_axis = rot_axis / rot_axis_len
+                    cos_angle = np.dot(z_axis, bone_dir)
+                    angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+                    rot_matrix = trimesh.transformations.rotation_matrix(angle, rot_axis)
+                else:
+                    if np.dot(z_axis, bone_dir) > 0:
+                        rot_matrix = np.eye(4)
+                    else:
+                        rot_matrix = trimesh.transformations.rotation_matrix(np.pi, [1, 0, 0])
+
+                center = (start_pos + end_pos) / 2
+                rot_matrix[:3, 3] = center
+                cylinder.apply_transform(rot_matrix)
+
+                cylinder.visual.vertex_colors = face_color_uint8
+                mesh = pyrender.Mesh.from_trimesh(cylinder, smooth=False)
+                pr_scene.add(mesh)
+
+        # Add face joints as spheres
+        for face_pos in face_landmarks:
+            sphere = trimesh.creation.icosphere(subdivisions=1, radius=face_joint_radius)
+            sphere.vertices += face_pos
+            sphere.visual.vertex_colors = face_color_uint8
+            mesh = pyrender.Mesh.from_trimesh(sphere, smooth=False)
+            pr_scene.add(mesh)
 
     def render_composite(
         self,
@@ -524,17 +629,24 @@ class Renderer:
         if not base_image.flags.writeable:
             base_image = np.array(base_image, copy=True)
 
+        # Determine face mode from composite modes
+        face_mode = None
+        if "face" in modes and self.scene.skeleton_joints is not None:
+            face_opts = modes["face"] if isinstance(modes["face"], dict) else {}
+            face_mode = face_opts.get("face_mode", "full")
+
         # Overlay skeleton if requested
         if "skeleton" in modes and self.scene.skeleton_joints is not None:
             skel_opts = modes["skeleton"] if isinstance(modes["skeleton"], dict) else {}
 
-            # Render skeleton
+            # Render skeleton (with optional face landmarks)
             skel_image = self.render_skeleton(
                 camera,
                 joint_radius=skel_opts.get("joint_radius", 0.015),
                 bone_radius=skel_opts.get("bone_radius", 0.008),
                 joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
-                bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0))
+                bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
+                face_mode=face_mode
             )
 
             # Composite skeleton over base using alpha blending

@@ -62,6 +62,7 @@ class SkeletonConfig:
     format: str = "openpose_body25_hands"  # Default to OpenPose format
     joint_radius: float = 0.015
     bone_radius: float = 0.008
+    face_mode: str = None  # None, "full", or "points"
 
 
 @dataclass
@@ -188,6 +189,11 @@ class Config:
             config.skeleton.joint_radius = args.joint_radius
         if args.bone_radius is not None:
             config.skeleton.bone_radius = args.bone_radius
+        if args.face_mode:
+            if args.face_mode == "none":
+                config.skeleton.face_mode = None
+            else:
+                config.skeleton.face_mode = args.face_mode
 
         # Export overrides
         if args.no_colmap:
@@ -532,7 +538,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--render-modes",
         type=str,
         metavar="MODE[,MODE...]",
-        help="Comma-separated render modes: mesh, depth, skeleton, mesh+skeleton, depth+skeleton (for .npz); splat mode auto-selected for .ply"
+        help="Comma-separated render modes: mesh, depth, skeleton, mesh+skeleton, depth+skeleton, skeleton+face, mesh+skeleton+face (for .npz); splat mode auto-selected for .ply"
     )
     render_group.add_argument(
         "--mesh-color",
@@ -629,6 +635,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=float,
         metavar="METERS",
         help="Bone cylinder radius in meters"
+    )
+    skeleton_group.add_argument(
+        "--face-mode",
+        choices=["full", "points", "none"],
+        help="Face landmark rendering mode: full (points + connectivity), "
+             "points (points only), none (disabled). "
+             "Requires skeleton data. Rendered only for frontal views."
     )
 
     # Export options

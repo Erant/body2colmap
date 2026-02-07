@@ -75,7 +75,9 @@ def main(argv: Optional[list] = None) -> int:
             # Enable skeleton loading if:
             # - Skeleton rendering is requested, OR
             # - Non-full framing preset is used (requires skeleton for Y-threshold)
-            needs_skeleton = config.skeleton.enabled or config.path.framing != "full"
+            needs_skeleton = (config.skeleton.enabled
+                              or config.skeleton.face_mode is not None
+                              or config.path.framing != "full")
             pipeline = OrbitPipeline.from_npz_file(
                 config.input_file,
                 render_size=config.render.resolution,
@@ -175,6 +177,10 @@ def main(argv: Optional[list] = None) -> int:
                                 "bone_radius": config.skeleton.bone_radius,
                                 "use_openpose_colors": True,
                                 "target_format": config.skeleton.format
+                            }
+                        if overlay == "face" or (overlay == "skeleton" and config.skeleton.face_mode):
+                            composite_modes["face"] = {
+                                "face_mode": config.skeleton.face_mode or "full"
                             }
 
                     # Render composite for all frames

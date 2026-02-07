@@ -13,9 +13,11 @@ camera.py  (depends on: coordinates)
     ↓
 scene.py  (depends on: coordinates)
     ↓
+face.py  (no dependencies - pure math + embedded data)
+    ↓
 path.py  (depends on: camera, coordinates)
     ↓
-renderer.py  (depends on: scene, camera)
+renderer.py  (depends on: scene, camera, face, skeleton)
     ↓
 exporter.py  (depends on: camera, scene)
     ↓
@@ -317,6 +319,34 @@ if args.n_frames is not None:  # Not: if args.n_frames:
 ```
 
 **Key Insight**: For CLI overrides of config file values, arguments must have NO default and use None-checking.
+
+### Face Landmark Rendering (`face.py`)
+
+**Purpose**: Generate OpenPose Face 70 keypoints anchored to skeleton head joints.
+
+**Architecture**:
+- No MediaPipe dependency. Canonical face geometry embedded as constant array.
+- 70 keypoints extracted from MediaPipe's canonical_face_model.obj via MaixPy mapping.
+- Pupils (indices 68-69) synthesized as centroids of 6-point eye contours.
+- 5 anchor points (nose, eyes, ears) shared between face model and skeleton.
+- Procrustes alignment (SVD-based) computes scale + rotation + translation.
+
+**Face Visibility**: Hemisphere test using dot product of face normal and view direction.
+Face rendered only when facing camera (frontal 180 degrees). This prevents ControlNet/3DGS
+from seeing facial features on the back of the head.
+
+**Face Normal Computation**: cross(left_eye - right_eye, nose_bridge_top - chin).
+These two vectors span the face plane horizontally and vertically; their cross product
+gives the outward-facing normal.
+
+**Rendering**: White points (icospheres) + optional white cylinders for 63 OpenPose
+face bone connections. Smaller geometry than body skeleton (~35% of body joint/bone radii).
+
+**CLI**: `--face-mode full|points|none`, composite mode `skeleton+face`.
+
+**Standalone utility**: `tools/extract_face_landmarks.py` runs MediaPipe Face Mesh on
+an image and outputs JSON with 70 OpenPose-format keypoints. Only dependency on
+mediapipe is in this utility, not the main package.
 
 ### Skeleton Rendering Details (`skeleton.py`)
 

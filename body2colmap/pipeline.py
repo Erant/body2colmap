@@ -332,7 +332,8 @@ class OrbitPipeline:
                     image = renderer.render_skeleton(
                         camera,
                         joint_radius=render_kwargs.get('joint_radius', 0.015),
-                        bone_radius=render_kwargs.get('bone_radius', 0.008)
+                        bone_radius=render_kwargs.get('bone_radius', 0.008),
+                        face_mode=render_kwargs.get('face_mode')
                     )
                 else:
                     raise ValueError(f"Unknown render mode: {mode}")
