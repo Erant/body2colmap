@@ -26,80 +26,103 @@ import sys
 import urllib.request
 from pathlib import Path
 
-MODEL_URL = (
+LANDMARKER_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/"
     "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
+DETECTOR_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+)
 MODEL_CACHE_DIR = Path.home() / ".cache" / "body2colmap"
-MODEL_PATH = MODEL_CACHE_DIR / "face_landmarker.task"
+LANDMARKER_MODEL_PATH = MODEL_CACHE_DIR / "face_landmarker.task"
+DETECTOR_MODEL_PATH = MODEL_CACHE_DIR / "blaze_face_short_range.tflite"
 
 
-def ensure_model(model_path: Path = MODEL_PATH) -> Path:
-    """Download the FaceLandmarker model if not cached."""
-    if model_path.exists():
-        return model_path
+def _ensure_model(url: str, path: Path) -> Path:
+    """Download a model file if not cached."""
+    if path.exists():
+        return path
 
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading FaceLandmarker model to {model_path}...", file=sys.stderr)
-    urllib.request.urlretrieve(MODEL_URL, str(model_path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading {path.name}...", file=sys.stderr)
+    urllib.request.urlretrieve(url, str(path))
     print("Done.", file=sys.stderr)
-    return model_path
+    return path
 
 
-def _detect_with_crop(detector, rgb, crop_fraction, mp_module):
+def _find_face_bbox(rgb, detector, mp_module):
     """
-    Try face detection on a crop of the upper portion of the image.
-
-    The MediaPipe FaceLandmarker uses BlazeFace (short-range), which internally
-    resizes to 128x128/256x256. For full-body images, the face may be too small
-    after this downscaling. Cropping to the upper portion makes the face larger
-    relative to the input.
+    Find face bounding box using MediaPipe FaceDetector.
 
     Args:
-        detector: FaceLandmarker instance
-        rgb: Full RGB image as numpy array (H, W, 3)
-        crop_fraction: Fraction of image height to keep from the top (0-1)
+        rgb: RGB image as numpy array (H, W, 3)
+        detector: MediaPipe FaceDetector instance
         mp_module: mediapipe module (for mp.Image)
 
     Returns:
-        (face_landmarks, crop_fraction) if detected, (None, crop_fraction) otherwise
+        (x, y, w, h) bounding box in pixel coordinates, or None
     """
-    import numpy as np
-
-    full_h, full_w = rgb.shape[:2]
-
-    if crop_fraction >= 1.0:
-        # Use full image
-        crop = rgb
-    else:
-        crop_h = int(full_h * crop_fraction)
-        crop = np.ascontiguousarray(rgb[:crop_h, :, :])
-
     image = mp_module.Image(
-        image_format=mp_module.ImageFormat.SRGB, data=crop
+        image_format=mp_module.ImageFormat.SRGB, data=rgb
     )
     result = detector.detect(image)
 
-    if result.face_landmarks:
-        return result.face_landmarks[0], crop_fraction
-    return None, crop_fraction
+    if not result.detections:
+        return None
+
+    bbox = result.detections[0].bounding_box
+    return (bbox.origin_x, bbox.origin_y, bbox.width, bbox.height)
+
+
+def _crop_to_face(rgb, bbox, padding=0.5):
+    """
+    Crop image to face bounding box with padding.
+
+    Args:
+        rgb: Full RGB image (H, W, 3)
+        bbox: (x, y, w, h) face bounding box from detector
+        padding: Fraction of face size to add as padding on each side
+
+    Returns:
+        (crop, x1, y1) - cropped RGB array and top-left corner in full image
+    """
+    import numpy as np
+
+    height, width = rgb.shape[:2]
+    x, y, w, h = bbox
+
+    pad_x = int(w * padding)
+    pad_y = int(h * padding)
+
+    x1 = max(0, x - pad_x)
+    y1 = max(0, y - pad_y)
+    x2 = min(width, x + w + pad_x)
+    y2 = min(height, y + h + pad_y)
+
+    crop = np.ascontiguousarray(rgb[y1:y2, x1:x2, :])
+    return crop, x1, y1
 
 
 def extract_landmarks(
     image_path: str,
-    model_path: str = None,
+    landmarker_model_path: str = None,
+    detector_model_path: str = None,
     min_confidence: float = 0.3
 ) -> dict:
     """
-    Extract raw face landmarks from an image using MediaPipe FaceLandmarker.
+    Extract raw face landmarks from an image using MediaPipe.
 
-    Uses progressive cropping: if no face is found in the full image, retries
-    with the upper 1/2, then upper 1/3 of the image. This handles full-body
-    photos where the face is small relative to the image.
+    Two-stage pipeline for robust detection at any face scale:
+    1. Try FaceLandmarker on full image (fast path for selfies/headshots)
+    2. If no face found, use FaceDetector to locate the face bounding box,
+       crop tightly to it, and re-run FaceLandmarker on the crop
+    3. Landmarks are mapped back to full-image normalized coordinates
 
     Args:
         image_path: Path to input image
-        model_path: Path to .task model file (auto-downloaded if None)
+        landmarker_model_path: Path to FaceLandmarker .task model
+        detector_model_path: Path to FaceDetector .tflite model
         min_confidence: Minimum face detection confidence (0-1)
 
     Returns:
@@ -117,76 +140,106 @@ def extract_landmarks(
         )
         sys.exit(1)
 
-    # Ensure model is available
-    if model_path is None:
-        model_path = str(ensure_model())
-
-    # Load image via OpenCV for reliable format handling
-    try:
-        import cv2
-        bgr = cv2.imread(image_path)
-        if bgr is None:
-            print(f"Error: Could not read image: {image_path}", file=sys.stderr)
-            sys.exit(1)
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    except ImportError:
-        # Fall back to MediaPipe's own loader if cv2 not available
-        tmp_image = mp.Image.create_from_file(image_path)
-        rgb = tmp_image.numpy_view().copy()
-
+    import cv2
     import numpy as np
-    rgb = np.ascontiguousarray(rgb)
+
+    # Ensure models are available
+    if landmarker_model_path is None:
+        landmarker_model_path = str(
+            _ensure_model(LANDMARKER_MODEL_URL, LANDMARKER_MODEL_PATH)
+        )
+    if detector_model_path is None:
+        detector_model_path = str(
+            _ensure_model(DETECTOR_MODEL_URL, DETECTOR_MODEL_PATH)
+        )
+
+    # Load image
+    bgr = cv2.imread(image_path)
+    if bgr is None:
+        print(f"Error: Could not read image: {image_path}", file=sys.stderr)
+        sys.exit(1)
+    rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     height, width = rgb.shape[:2]
 
     # Create FaceLandmarker
-    base_options = python.BaseOptions(model_asset_path=model_path)
-    options = vision.FaceLandmarkerOptions(
-        base_options=base_options,
+    lm_options = vision.FaceLandmarkerOptions(
+        base_options=python.BaseOptions(
+            model_asset_path=landmarker_model_path
+        ),
         min_face_detection_confidence=min_confidence,
         min_face_presence_confidence=min_confidence,
-        num_faces=1
+        num_faces=1,
     )
-    detector = vision.FaceLandmarker.create_from_options(options)
+    landmarker = vision.FaceLandmarker.create_from_options(lm_options)
 
     try:
-        # Progressive cropping: try full image, then upper 1/2, then upper 1/3.
-        # BlazeFace (short-range) resizes internally to 128-256px, so a face
-        # that's <15% of image height may be undetectable without cropping.
-        crop_fractions = [1.0, 0.5, 1.0 / 3.0]
-        face = None
-        used_fraction = 1.0
+        # Stage 1: Try full image (fast path for selfies/headshots)
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = landmarker.detect(image)
 
-        for frac in crop_fractions:
-            face, used_fraction = _detect_with_crop(detector, rgb, frac, mp)
-            if face is not None:
-                if frac < 1.0:
-                    print(
-                        f"Face detected in upper {frac:.0%} crop of image.",
-                        file=sys.stderr
-                    )
-                break
+        if result.face_landmarks:
+            face = result.face_landmarks[0]
+            all_landmarks = [
+                [round(lm.x, 6), round(lm.y, 6), round(lm.z, 6)]
+                for lm in face
+            ]
+        else:
+            # Stage 2: FaceDetector to locate bbox, then crop for landmarks
+            det_options = vision.FaceDetectorOptions(
+                base_options=python.BaseOptions(
+                    model_asset_path=detector_model_path
+                ),
+                min_detection_confidence=min_confidence,
+            )
+            detector = vision.FaceDetector.create_from_options(det_options)
 
-        if face is None:
+            try:
+                bbox = _find_face_bbox(rgb, detector, mp)
+            finally:
+                detector.close()
+
+            if bbox is None:
+                print(
+                    f"Error: No face detected in image ({width}x{height}).",
+                    file=sys.stderr
+                )
+                sys.exit(1)
+
+            # Crop to detected face with padding for landmark context
+            crop, x1, y1 = _crop_to_face(rgb, bbox, padding=0.5)
+            crop_h, crop_w = crop.shape[:2]
             print(
-                f"Error: No face detected in image ({width}x{height}), "
-                f"even after cropping to upper 1/3. "
-                f"Try --min-confidence with a lower value (current: {min_confidence}).",
+                f"Face detected at ({bbox[0]}, {bbox[1]}, "
+                f"{bbox[2]}x{bbox[3]}), cropped to {crop_w}x{crop_h} for "
+                f"landmark extraction.",
                 file=sys.stderr
             )
-            sys.exit(1)
+
+            crop_image = mp.Image(
+                image_format=mp.ImageFormat.SRGB, data=crop
+            )
+            result = landmarker.detect(crop_image)
+
+            if not result.face_landmarks:
+                print(
+                    f"Error: FaceDetector located a face but FaceLandmarker "
+                    f"could not extract landmarks from the crop "
+                    f"({crop_w}x{crop_h}).",
+                    file=sys.stderr
+                )
+                sys.exit(1)
+
+            face = result.face_landmarks[0]
+
+            # Map crop-normalized landmarks back to full-image normalized coords
+            all_landmarks = [
+                [round((lm.x * crop_w + x1) / width, 6),
+                 round((lm.y * crop_h + y1) / height, 6),
+                 round(lm.z, 6)]
+                for lm in face
+            ]
 
         n_landmarks = len(face)
-
-        # Convert landmarks back to full-image normalized coordinates.
-        # MediaPipe landmarks are normalized 0-1 within the input crop.
-        # x stays the same (width unchanged), y is scaled by crop fraction.
-        all_landmarks = [
-            [round(lm.x, 6),
-             round(lm.y * used_fraction, 6),
-             round(lm.z, 6)]
-            for lm in face
-        ]
-
         return {
             "version": "1.0",
             "source": "mediapipe",
@@ -197,8 +250,7 @@ def extract_landmarks(
             "landmarks": all_landmarks
         }
     finally:
-        # Explicit close avoids __del__ crash during interpreter shutdown
-        detector.close()
+        landmarker.close()
 
 
 def main():
@@ -214,8 +266,12 @@ def main():
         help="Output JSON file path (default: stdout)"
     )
     parser.add_argument(
-        "--model-path",
+        "--landmarker-model",
         help="Path to FaceLandmarker .task model (auto-downloaded if not specified)"
+    )
+    parser.add_argument(
+        "--detector-model",
+        help="Path to FaceDetector .tflite model (auto-downloaded if not specified)"
     )
     parser.add_argument(
         "--min-confidence",
@@ -223,37 +279,14 @@ def main():
         default=0.3,
         help="Minimum face detection confidence 0-1 (default: 0.3)"
     )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Print diagnostic info (image shape, model path, crop attempts)"
-    )
 
     args = parser.parse_args()
 
-    if args.debug:
-        import os
-        model_p = args.model_path or str(MODEL_PATH)
-        print(f"Model path: {model_p}", file=sys.stderr)
-        if os.path.exists(model_p):
-            print(f"Model size: {os.path.getsize(model_p)} bytes", file=sys.stderr)
-        else:
-            print("Model file not yet downloaded.", file=sys.stderr)
-
-        try:
-            import cv2
-            bgr = cv2.imread(args.image)
-            if bgr is not None:
-                print(f"Image shape: {bgr.shape}, dtype: {bgr.dtype}", file=sys.stderr)
-            else:
-                print(f"cv2.imread returned None for: {args.image}", file=sys.stderr)
-        except ImportError:
-            print("cv2 not available for debug info.", file=sys.stderr)
-
     result = extract_landmarks(
         args.image,
-        model_path=args.model_path,
-        min_confidence=args.min_confidence
+        landmarker_model_path=args.landmarker_model,
+        detector_model_path=args.detector_model,
+        min_confidence=args.min_confidence,
     )
 
     json_str = json.dumps(result, indent=2)
