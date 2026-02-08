@@ -41,6 +41,9 @@ class PathConfig:
     framing: str = "full"  # "full", "torso", "bust", "head"
     crop_to_viewport: bool = False  # Filter mesh to first camera's viewport
 
+    # Initial body orientation
+    initial_rotation: float = 0.0  # Additional degrees offset after auto-facing
+
     # Circular-specific
     elevation_deg: float = 0.0
 
@@ -181,6 +184,8 @@ class Config:
             config.path.framing = args.framing
         if args.crop_to_viewport:
             config.path.crop_to_viewport = True
+        if args.initial_rotation is not None:
+            config.path.initial_rotation = args.initial_rotation
 
         # Skeleton overrides
         if args.skeleton:
@@ -268,6 +273,7 @@ class Config:
             radius=path_data.get('radius'),
             framing=path_data.get('framing', 'full'),
             crop_to_viewport=path_data.get('crop_to_viewport', False),
+            initial_rotation=path_data.get('initial_rotation', 0.0),
             elevation_deg=path_data.get('elevation_deg', 0.0),
             sinusoidal_amplitude_deg=path_data.get('sinusoidal_amplitude_deg', 30.0),
             sinusoidal_cycles=path_data.get('sinusoidal_cycles', 2),
@@ -343,6 +349,7 @@ class Config:
                 'radius': self.path.radius,
                 'framing': self.path.framing,
                 'crop_to_viewport': self.path.crop_to_viewport,
+                'initial_rotation': self.path.initial_rotation,
                 'elevation_deg': self.path.elevation_deg,
                 'sinusoidal_amplitude_deg': self.path.sinusoidal_amplitude_deg,
                 'sinusoidal_cycles': self.path.sinusoidal_cycles,
@@ -437,6 +444,11 @@ path:
   # - bust: Shoulders and head (requires skeleton data)
   # - head: Head only (requires skeleton data)
   framing: "full"
+
+  # Initial body rotation offset in degrees.
+  # The body is auto-rotated to face the camera at frame 0.
+  # This value adds additional rotation (0 = face camera, 90 = right side, etc.)
+  initial_rotation: 0.0
 
   # Crop mesh to initial viewport
   # When true, removes vertices not visible in the first camera's viewport.
@@ -637,6 +649,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Filter mesh to keep only vertices visible in the first camera's "
              "viewport. Vertices outside the initial view won't appear when "
              "the camera orbits around."
+    )
+    path_group.add_argument(
+        "--initial-rotation",
+        type=float,
+        metavar="DEGREES",
+        help="Additional rotation (degrees) after auto-facing the body toward "
+             "the camera. 0 = face camera (default), 90 = right side, etc."
     )
 
     # Skeleton options

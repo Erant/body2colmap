@@ -78,12 +78,9 @@ def main(argv: Optional[list] = None) -> int:
             is_splat = True
         elif input_ext == '.npz':
             # SAM-3D-Body NPZ file
-            # Enable skeleton loading if:
-            # - Skeleton rendering is requested, OR
-            # - Non-full framing preset is used (requires skeleton for Y-threshold)
-            needs_skeleton = (config.skeleton.enabled
-                              or config.skeleton.face_mode is not None
-                              or config.path.framing != "full")
+            # Always load skeleton: needed for auto-orient (torso facing
+            # direction), framing presets, and skeleton/face rendering.
+            needs_skeleton = True
             pipeline = OrbitPipeline.from_npz_file(
                 config.input_file,
                 render_size=config.render.resolution,
@@ -104,6 +101,12 @@ def main(argv: Optional[list] = None) -> int:
             face_landmarks_70 = FaceLandmarkIngest.from_json(config.skeleton.face_landmarks)
             if args.verbose:
                 print(f"  Converted to OpenPose Face 70 ({face_landmarks_70.shape})")
+
+        # Auto-orient: rotate body to face camera, plus any user offset
+        if not is_splat:
+            pipeline.auto_orient(rotation_offset_deg=config.path.initial_rotation)
+            if args.verbose:
+                print(f"  Auto-oriented body (offset: {config.path.initial_rotation}°)")
 
         # Generate orbit
         if args.verbose:

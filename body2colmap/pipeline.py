@@ -164,6 +164,35 @@ class OrbitPipeline:
 
         return self._renderer
 
+    def auto_orient(self, rotation_offset_deg: float = 0.0) -> None:
+        """
+        Rotate the scene so the body faces the camera at orbit frame 0.
+
+        Computes the torso facing direction from the skeleton's shoulder
+        and hip joints, then rotates the entire scene (mesh + skeleton)
+        around the Y axis so that the body faces -Z (toward the camera).
+
+        An optional offset rotates further from that facing position.
+
+        Args:
+            rotation_offset_deg: Additional rotation in degrees after
+                auto-facing. 0 = face camera directly, 90 = turned 90
+                degrees to the right, etc.
+        """
+        facing = self.scene.compute_torso_facing_direction()
+
+        if facing is not None:
+            # Angle of current facing direction from +Z axis
+            current_angle = float(np.arctan2(facing[0], facing[2]))
+            # Angle of target (-Z) from +Z axis
+            target_angle = float(np.arctan2(0.0, -1.0))  # pi
+            correction_deg = float(np.degrees(target_angle - current_angle))
+        else:
+            correction_deg = 0.0
+
+        total_rotation = correction_deg + rotation_offset_deg
+        self.scene.rotate_around_y(total_rotation)
+
     def set_orbit_params(
         self,
         pattern: str = "helical",

@@ -24,8 +24,8 @@ class Scene:
 
     All geometry is stored in world coordinates (see coordinates.py).
 
-    The Scene is immutable after creation - geometry doesn't move.
-    Cameras orbit around the scene.
+    Cameras orbit around the scene. The scene may be rotated once
+    during setup (e.g. to face the camera) but is otherwise static.
     """
 
     def __init__(
@@ -217,6 +217,89 @@ class Scene:
         """
         min_corner, max_corner = self.get_bounds()
         return (min_corner + max_corner) / 2.0
+
+    def compute_torso_facing_direction(self) -> Optional[NDArray[np.float32]]:
+        """
+        Compute the direction the body's torso faces, projected to the XZ plane.
+
+        Uses the average of the shoulder and hip left-to-right vectors, then
+        takes the perpendicular in the XZ plane to get the forward direction.
+
+        Returns:
+            Unit vector in XZ plane pointing the direction the body faces,
+            or None if skeleton data is unavailable.
+        """
+        if self.skeleton_joints is None or self.skeleton_format is None:
+            return None
+
+        # Look up shoulder/hip indices by format
+        if self.skeleton_format == "mhr70":
+            # MHR70: 5=left_shoulder, 6=right_shoulder, 9=left_hip, 10=right_hip
+            l_shoulder = self.skeleton_joints[5]
+            r_shoulder = self.skeleton_joints[6]
+            l_hip = self.skeleton_joints[9]
+            r_hip = self.skeleton_joints[10]
+        elif self.skeleton_format in ("openpose_body25_hands", "openpose_body25"):
+            # OpenPose: 5=LShoulder, 2=RShoulder, 12=LHip, 9=RHip
+            l_shoulder = self.skeleton_joints[5]
+            r_shoulder = self.skeleton_joints[2]
+            l_hip = self.skeleton_joints[12]
+            r_hip = self.skeleton_joints[9]
+        else:
+            return None
+
+        # Average "across body" vector (right → left)
+        shoulder_vec = l_shoulder - r_shoulder
+        hip_vec = l_hip - r_hip
+        across = (shoulder_vec + hip_vec) / 2.0
+
+        # Project to XZ plane
+        across_xz = np.array([across[0], 0.0, across[2]], dtype=np.float64)
+        if np.linalg.norm(across_xz) < 1e-6:
+            return None
+
+        # Forward = Y_up × across (perpendicular in XZ plane, facing outward)
+        y_up = np.array([0.0, 1.0, 0.0])
+        forward = np.cross(y_up, across_xz)
+
+        norm = np.linalg.norm(forward)
+        if norm < 1e-6:
+            return None
+
+        return (forward / norm).astype(np.float32)
+
+    def rotate_around_y(self, angle_deg: float) -> None:
+        """
+        Rotate mesh and skeleton around the Y axis through the bbox center.
+
+        Args:
+            angle_deg: Rotation angle in degrees (positive = counterclockwise
+                from above, i.e. from +Z toward +X).
+        """
+        if abs(angle_deg) < 1e-6:
+            return
+
+        angle_rad = np.radians(angle_deg)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        R = np.array([
+            [cos_a, 0, sin_a],
+            [0, 1, 0],
+            [-sin_a, 0, cos_a],
+        ], dtype=np.float64)
+
+        center = self.get_bbox_center().astype(np.float64)
+
+        self.vertices = ((self.vertices - center) @ R.T + center).astype(np.float32)
+        if self.skeleton_joints is not None:
+            self.skeleton_joints = (
+                (self.skeleton_joints - center) @ R.T + center
+            ).astype(np.float32)
+
+        # Invalidate cached bounds/centroid
+        self._bounds = None
+        self._centroid = None
+        self._mesh_trimesh = None
 
     def get_framing_bounds(
         self,
