@@ -69,6 +69,9 @@ from body2colmap import OrbitPipeline
 # Create pipeline
 pipeline = OrbitPipeline.from_npz_file("estimation.npz")
 
+# Auto-orient body to face camera (default, no offset)
+pipeline.auto_orient()
+
 # Configure orbit
 pipeline.set_orbit_params(pattern="helical", n_frames=120)
 
@@ -99,6 +102,25 @@ Composite modes (overlays combined via `+`):
 - **skeleton+face**: Skeleton with face landmark overlay
 - **depth+skeleton+face**: All three combined
 
+### Auto-Orient
+
+By default, the body is automatically rotated to face the camera at frame 0 of the orbit. The facing direction is computed from the skeleton's shoulder and hip joints (averaged torso normal, projected to the horizontal XZ plane).
+
+Use `--initial-rotation` to add an offset from the auto-facing position:
+
+```bash
+# Default: body faces camera
+body2colmap --input estimation.npz --output-dir ./output
+
+# Body's right side toward camera
+body2colmap --input estimation.npz --output-dir ./output --initial-rotation 90
+
+# Back toward camera
+body2colmap --input estimation.npz --output-dir ./output --initial-rotation 180
+```
+
+This ensures consistent starting orientation regardless of how the subject was posed in the source image, giving predictable control over when features appear and disappear during the orbit.
+
 ### Face Landmark Rendering
 
 Face landmarks render the OpenPose Face 70 keypoint topology (jawline, eyebrows, nose, eyes, lips, pupils) as white points and connecting lines on top of the skeleton.
@@ -109,7 +131,7 @@ Two modes of operation:
 
 2. **Subject-specific face landmarks** (recommended): Extract landmarks from a photo of the subject using the included `tools/extract_face_landmarks.py`, then pass the resulting JSON file via `--face-landmarks`. The landmarks are automatically aligned to the skeleton via Procrustes fitting.
 
-Face landmarks are only rendered when the face is pointing toward the camera (frontal 180-degree hemisphere), so rear views show only the skeleton.
+Face landmarks are only rendered when the face is pointing toward the camera. By default this is the frontal 180-degree hemisphere; use `--face-max-angle` to narrow the range (e.g. `--face-max-angle 45` for only near-frontal views).
 
 See [Face Landmarks](#face-landmarks) below for the full workflow.
 
