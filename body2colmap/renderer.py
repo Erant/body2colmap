@@ -305,7 +305,8 @@ class Renderer:
         render_bones: bool = True,
         target_format: str = "openpose_body25_hands",
         face_mode: str = None,
-        face_landmarks: Optional[NDArray[np.float32]] = None
+        face_landmarks: Optional[NDArray[np.float32]] = None,
+        face_max_angle: float = 90.0,
     ) -> NDArray[np.uint8]:
         """
         Render 3D skeleton as spheres (joints) and cylinders (bones).
@@ -326,6 +327,8 @@ class Renderer:
             face_landmarks: Optional custom face landmarks in OpenPose Face 70
                 format, shape (70, 3). If provided, used instead of the
                 canonical face model for Procrustes fitting.
+            face_max_angle: Maximum angle (degrees) off the face normal at which
+                face landmarks are rendered. 90 = full frontal hemisphere.
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8
@@ -486,7 +489,8 @@ class Renderer:
                 skeleton_joints, camera, face_mode,
                 face_joint_radius=joint_radius * 0.35,
                 face_bone_radius=bone_radius * 0.35,
-                face_landmarks=face_landmarks
+                face_landmarks=face_landmarks,
+                face_max_angle=face_max_angle,
             )
             if face_image is not None:
                 skel_color = np.array(skel_color, copy=True)
@@ -508,7 +512,8 @@ class Renderer:
         face_mode: str,
         face_joint_radius: float = 0.005,
         face_bone_radius: float = 0.003,
-        face_landmarks: Optional[NDArray[np.float32]] = None
+        face_landmarks: Optional[NDArray[np.float32]] = None,
+        face_max_angle: float = 90.0,
     ) -> Optional[NDArray[np.uint8]]:
         """
         Render face landmarks as a separate RGBA image.
@@ -544,8 +549,10 @@ class Renderer:
             skeleton_joints, face_landmarks=face_landmarks
         )
 
-        # Check visibility (frontal 180 degrees only)
-        if not face_module.is_face_visible(fitted_landmarks, camera.position):
+        # Check visibility (angle threshold from face normal)
+        if not face_module.is_face_visible(
+            fitted_landmarks, camera.position, max_angle_deg=face_max_angle
+        ):
             return None
 
         # Create separate scene for face
@@ -665,10 +672,12 @@ class Renderer:
         # Determine face mode and custom landmarks from composite modes
         face_mode = None
         custom_face_landmarks = None
+        face_max_angle = 90.0
         if "face" in modes and self.scene.skeleton_joints is not None:
             face_opts = modes["face"] if isinstance(modes["face"], dict) else {}
             face_mode = face_opts.get("face_mode", "full")
             custom_face_landmarks = face_opts.get("face_landmarks")
+            face_max_angle = face_opts.get("face_max_angle", 90.0)
 
         # If skeleton is present but no mesh/depth base, render skeleton directly
         if base_image is None:
@@ -683,7 +692,8 @@ class Renderer:
                 joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
                 bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
                 face_mode=face_mode,
-                face_landmarks=custom_face_landmarks
+                face_landmarks=custom_face_landmarks,
+                face_max_angle=face_max_angle,
             )
 
         # Overlay skeleton if requested
@@ -698,7 +708,8 @@ class Renderer:
                 joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
                 bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
                 face_mode=face_mode,
-                face_landmarks=custom_face_landmarks
+                face_landmarks=custom_face_landmarks,
+                face_max_angle=face_max_angle,
             )
 
             # Composite skeleton over base using alpha blending

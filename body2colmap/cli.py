@@ -195,7 +195,8 @@ def main(argv: Optional[list] = None) -> int:
                             }
                         if overlay == "face" or (overlay == "skeleton" and config.skeleton.face_mode):
                             face_opts = {
-                                "face_mode": config.skeleton.face_mode or "full"
+                                "face_mode": config.skeleton.face_mode or "full",
+                                "face_max_angle": config.skeleton.face_max_angle,
                             }
                             if face_landmarks_70 is not None:
                                 face_opts["face_landmarks"] = face_landmarks_70

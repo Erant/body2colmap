@@ -227,6 +227,7 @@ The `image_size` field is important: it allows `body2colmap` to denormalize coor
 |--------|---------|-------------|
 | `--face-landmarks PATH` | None | Path to face landmarks JSON. Implies `--face-mode full`. |
 | `--face-mode {full,points,none}` | None | `full`: points + lines, `points`: points only, `none`: disabled |
+| `--face-max-angle DEGREES` | 90 | Max degrees off face normal to render. 90 = full hemisphere, 45 = only within 45 degrees of straight-on. |
 | `--skeleton` | off | Enable skeleton rendering (required for face) |
 | `--render-modes MODES` | `mesh` | Comma-separated list, e.g. `skeleton+face,depth+skeleton+face` |
 
@@ -239,6 +240,7 @@ skeleton:
   enabled: true
   face_mode: "full"               # "full", "points", or null
   face_landmarks: "face.json"     # path to landmarks JSON
+  face_max_angle: 90.0            # degrees off face normal to render
 ```
 
 ### Writing a Custom Client

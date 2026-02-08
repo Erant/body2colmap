@@ -351,6 +351,37 @@ class TestFaceVisibility:
         result = is_face_visible(landmarks, camera_pos)
         assert isinstance(result, bool)
 
+    def test_max_angle_restricts_visibility(self):
+        """With max_angle_deg=45, 45-degree side view should be excluded."""
+        landmarks = self._make_face_landmarks()
+        # Camera at 45° to the right — visible at default 90°, hidden at 30°
+        camera_pos = np.array([5, 0, 5], dtype=np.float32)
+
+        assert is_face_visible(landmarks, camera_pos, max_angle_deg=90.0)
+        assert not is_face_visible(landmarks, camera_pos, max_angle_deg=30.0)
+
+    def test_tight_angle_excludes_side_views(self):
+        """With a tight max_angle_deg, side views should be excluded."""
+        landmarks = self._make_face_landmarks()
+
+        # Directly in front — visible even with tight threshold
+        # (canonical face normal is ~4° off pure +Z, so 10° still passes)
+        camera_front = np.array([0, 0, 5], dtype=np.float32)
+        assert is_face_visible(landmarks, camera_front, max_angle_deg=10.0)
+
+        # 30° off to the side — should be hidden at 10° threshold
+        camera_side = np.array([3, 0, 5], dtype=np.float32)  # ~31° off-axis
+        assert not is_face_visible(landmarks, camera_side, max_angle_deg=10.0)
+
+    def test_max_angle_default_matches_hemisphere(self):
+        """Default max_angle_deg=90 should match the old hemisphere behavior."""
+        landmarks = self._make_face_landmarks()
+        camera_pos = np.array([5, 0, 5], dtype=np.float32)
+
+        # Explicit 90 should match no-arg call
+        assert is_face_visible(landmarks, camera_pos) == \
+            is_face_visible(landmarks, camera_pos, max_angle_deg=90.0)
+
 
 class TestComputeFaceNormal:
     """Test face normal computation."""

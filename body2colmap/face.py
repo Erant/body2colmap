@@ -432,21 +432,26 @@ def compute_face_normal(
 
 def is_face_visible(
     face_landmarks: NDArray[np.float32],
-    camera_position: NDArray[np.float32]
+    camera_position: NDArray[np.float32],
+    max_angle_deg: float = 90.0,
 ) -> bool:
     """
     Determine if the face is visible from a camera position.
 
-    The face is considered visible when the face normal points toward
-    the camera (dot product > 0), giving a clean 180-degree frontal
-    hemisphere cutoff.
+    The face is visible when the angle between the face normal and the
+    view direction is less than max_angle_deg.  At the default of 90
+    degrees this gives the full frontal hemisphere (dot > 0).  Smaller
+    values restrict visibility to more frontal views.
 
     Args:
         face_landmarks: Transformed face landmarks, shape (70, 3)
         camera_position: Camera position in world coordinates, shape (3,)
+        max_angle_deg: Maximum angle off the face normal (in degrees) at
+            which the face is still rendered.  90 = full hemisphere,
+            45 = +/-45 degrees from straight-on.
 
     Returns:
-        True if face is visible (facing camera), False if occluded by head
+        True if face is visible (facing camera within threshold)
     """
     face_normal = compute_face_normal(face_landmarks)
 
@@ -462,8 +467,11 @@ def is_face_visible(
 
     view_direction = view_direction / view_norm
 
-    # Dot product > 0 means face points toward camera
-    return float(np.dot(face_normal, view_direction)) > 0.0
+    # cos(angle) between face normal and view direction
+    cos_angle = float(np.dot(face_normal, view_direction))
+    cos_threshold = float(np.cos(np.radians(max_angle_deg)))
+
+    return cos_angle >= cos_threshold
 
 
 # =============================================================================

@@ -64,6 +64,7 @@ class SkeletonConfig:
     bone_radius: float = 0.008
     face_mode: str = None  # None, "full", or "points"
     face_landmarks: str = None  # Path to face landmarks JSON file
+    face_max_angle: float = 90.0  # Max degrees off face normal to render (90 = full hemisphere)
 
 
 @dataclass
@@ -200,6 +201,8 @@ class Config:
             # Providing landmarks implies face rendering
             if config.skeleton.face_mode is None:
                 config.skeleton.face_mode = "full"
+        if args.face_max_angle is not None:
+            config.skeleton.face_max_angle = args.face_max_angle
 
         # Export overrides
         if args.no_colmap:
@@ -282,7 +285,8 @@ class Config:
             joint_radius=skeleton_data.get('joint_radius', 0.015),
             bone_radius=skeleton_data.get('bone_radius', 0.008),
             face_mode=skeleton_data.get('face_mode', None),
-            face_landmarks=skeleton_data.get('face_landmarks', None)
+            face_landmarks=skeleton_data.get('face_landmarks', None),
+            face_max_angle=skeleton_data.get('face_max_angle', 90.0)
         )
 
         # Parse export config
@@ -353,7 +357,8 @@ class Config:
                 'joint_radius': self.skeleton.joint_radius,
                 'bone_radius': self.skeleton.bone_radius,
                 'face_mode': self.skeleton.face_mode,
-                'face_landmarks': self.skeleton.face_landmarks
+                'face_landmarks': self.skeleton.face_landmarks,
+                'face_max_angle': self.skeleton.face_max_angle
             },
             'export': {
                 'output_dir': self.export.output_dir,
@@ -473,6 +478,10 @@ skeleton:
   # Path to face landmarks JSON file (from tools/extract_face_landmarks.py)
   # When provided, uses subject-specific face geometry instead of the canonical model
   face_landmarks: null
+
+  # Maximum angle (degrees) off the face normal at which face landmarks are rendered.
+  # 90 = full frontal hemisphere (default), 45 = only +/-45 degrees from straight-on.
+  face_max_angle: 90.0
 
 # Export configuration
 export:
@@ -667,6 +676,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Path to face landmarks JSON file (from extract_face_landmarks.py). "
              "When provided, uses subject-specific face geometry instead of "
              "the generic canonical face model. Implies --face-mode full."
+    )
+    skeleton_group.add_argument(
+        "--face-max-angle",
+        type=float,
+        metavar="DEGREES",
+        help="Maximum angle (degrees) off the face normal at which face "
+             "landmarks are rendered. 90 = full frontal hemisphere (default), "
+             "45 = only within 45 degrees of straight-on."
     )
 
     # Export options
