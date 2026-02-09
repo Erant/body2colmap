@@ -21,7 +21,7 @@ Body2COLMAP is a command-line tool and Python library that converts single-image
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/body2colmap.git
+git clone https://github.com/Erant/body2colmap.git
 cd body2colmap
 
 # Install dependencies
@@ -33,7 +33,7 @@ pip install -e .
 
 ### Requirements
 
-- Python 3.8+
+- Python 3.10+
 - numpy
 - pyrender
 - trimesh
