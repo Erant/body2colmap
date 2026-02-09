@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "body2colmap"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generate multi-view synthetic data for 3D Gaussian Splatting from SAM-3D-Body output"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["3d", "gaussian-splatting", "colmap", "computer-vision", "rendering"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -30,7 +30,6 @@ dependencies = [
     "pyrender>=0.1.45",
     "trimesh>=3.9.0",
     "opencv-python>=4.5.0",
-    "scipy>=1.7.0",
 ]
 
 [project.optional-dependencies]

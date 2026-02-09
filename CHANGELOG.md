@@ -2,9 +2,19 @@
 
 All notable changes to body2colmap will be documented in this file.
 
-## [1.0.0] - 2026-01-20
+## [0.2.0] - 2026-02-09
 
-### ✅ Production Ready
+### Changed
+- Bump version to 0.2.0 for public release
+- Update Development Status classifier from Alpha to Beta
+- Remove unused `scipy` dependency
+- Remove `setuptools_scm` from build-system requirements (not used)
+- Add MIT LICENSE file
+- Clean up README for public release
+
+## [0.1.0] - 2026-01-20
+
+### Production Ready
 First fully functional release. Successfully generates 3D Gaussian Splatting training data from SAM-3D-Body output.
 
 ### Added

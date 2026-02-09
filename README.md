@@ -38,7 +38,6 @@ pip install -e .
 - pyrender
 - trimesh
 - opencv-python
-- scipy
 
 For face landmark extraction (optional):
 - mediapipe (`pip install mediapipe`)
@@ -379,7 +378,7 @@ Contributions welcome! Please see development notes in `CLAUDE.md` for architect
 
 ## License
 
-[Add license here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
