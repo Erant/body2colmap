@@ -199,6 +199,7 @@ class OrbitPipeline:
         n_frames: int = 120,
         radius: Optional[float] = None,
         framing: str = "full",
+        camera_height: str = "bbox_center",
         **kwargs
     ) -> "OrbitPipeline":
         """
@@ -212,6 +213,10 @@ class OrbitPipeline:
             framing: Body framing preset ("full", "torso", "bust", "head")
                     Non-full presets use skeleton joints to determine Y threshold
                     and filter mesh vertices for accurate framing bounds.
+            camera_height: Skeleton-based camera orbit height preset.
+                    Sets the Y component of the orbit center:
+                    "bbox_center" (default), "feet", "knees", "waist",
+                    "chest", "shoulders", "head".
             **kwargs: Pattern-specific parameters:
                 - circular: elevation_deg
                 - sinusoidal: amplitude_deg, n_cycles
@@ -226,6 +231,10 @@ class OrbitPipeline:
 
         # Compute orbit center (look-at target) from framing region
         target = (framing_bounds[0] + framing_bounds[1]) / 2.0
+
+        # Override orbit center Y with skeleton-based camera height
+        if camera_height != "bbox_center":
+            target[1] = self.scene.get_camera_height_y(camera_height)
 
         # Auto-compute radius if not provided
         if radius is None:

@@ -39,6 +39,7 @@ class PathConfig:
     n_frames: int = 120
     radius: Optional[float] = None  # None = auto-compute
     framing: str = "full"  # "full", "torso", "bust", "head"
+    camera_height: str = "bbox_center"  # skeleton-based camera orbit height
     crop_to_viewport: bool = False  # Filter mesh to first camera's viewport
 
     # Initial body orientation
@@ -182,6 +183,8 @@ class Config:
             config.path.sinusoidal_amplitude_deg = args.amplitude
         if args.framing:
             config.path.framing = args.framing
+        if args.camera_height:
+            config.path.camera_height = args.camera_height
         if args.crop_to_viewport:
             config.path.crop_to_viewport = True
         if args.initial_rotation is not None:
@@ -272,6 +275,7 @@ class Config:
             n_frames=path_data.get('n_frames', 120),
             radius=path_data.get('radius'),
             framing=path_data.get('framing', 'full'),
+            camera_height=path_data.get('camera_height', 'bbox_center'),
             crop_to_viewport=path_data.get('crop_to_viewport', False),
             initial_rotation=path_data.get('initial_rotation', 0.0),
             elevation_deg=path_data.get('elevation_deg', 0.0),
@@ -348,6 +352,7 @@ class Config:
                 'n_frames': self.path.n_frames,
                 'radius': self.path.radius,
                 'framing': self.path.framing,
+                'camera_height': self.path.camera_height,
                 'crop_to_viewport': self.path.crop_to_viewport,
                 'initial_rotation': self.path.initial_rotation,
                 'elevation_deg': self.path.elevation_deg,
@@ -444,6 +449,17 @@ path:
   # - bust: Shoulders and head (requires skeleton data)
   # - head: Head only (requires skeleton data)
   framing: "full"
+
+  # Camera orbit height: determines the Y position of the orbit center.
+  # Uses skeleton joint positions for body-part presets.
+  # - bbox_center: Center of bounding box (default, no skeleton needed)
+  # - feet: Ankle height
+  # - knees: Knee height
+  # - waist: Hip height
+  # - chest: Midpoint between hips and shoulders
+  # - shoulders: Shoulder height
+  # - head: Nose height
+  camera_height: "bbox_center"
 
   # Initial body rotation offset in degrees.
   # The body is auto-rotated to face the camera at frame 0.
@@ -642,6 +658,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Body framing preset: full (entire body), torso (waist up), "
              "bust (shoulders and head), head (head only). "
              "Non-full presets require skeleton data."
+    )
+    path_group.add_argument(
+        "--camera-height",
+        choices=["bbox_center", "feet", "knees", "waist", "chest", "shoulders", "head"],
+        help="Camera orbit height relative to body: bbox_center (default), "
+             "feet, knees, waist, chest, shoulders, head. "
+             "Non-bbox_center presets use skeleton joint positions."
     )
     path_group.add_argument(
         "--crop-to-viewport",

@@ -763,3 +763,82 @@ def get_framing_y_threshold(joints: NDArray[np.float32], preset: str) -> Optiona
 
     # Should not reach here due to earlier validation
     return None
+
+
+# =============================================================================
+# Camera Height Presets - Skeleton-based orbit center height
+# =============================================================================
+
+# Valid camera height preset names
+CAMERA_HEIGHT_PRESETS = [
+    "bbox_center", "feet", "knees", "waist", "chest", "shoulders", "head"
+]
+
+
+def get_camera_height_y(joints: NDArray[np.float32], preset: str) -> float:
+    """
+    Get Y-coordinate for camera orbit center height based on skeleton joints.
+
+    Uses skeleton joint positions to determine the height at which the camera
+    orbits. This sets the Y component of the orbit target point.
+
+    Args:
+        joints: MHR70 skeleton joints, shape (70, 3)
+        preset: Camera height preset name:
+            - "feet": Ankle height (average of left/right ankle Y)
+            - "knees": Knee height (average of left/right knee Y)
+            - "waist": Hip height (average of left/right hip Y)
+            - "chest": Midpoint between hips and shoulders
+            - "shoulders": Shoulder height (average of left/right shoulder Y)
+            - "head": Nose height
+
+    Returns:
+        Y coordinate for the camera orbit center
+
+    Raises:
+        ValueError: If preset is unknown or "bbox_center" (handled elsewhere)
+    """
+    if preset == "bbox_center":
+        raise ValueError(
+            "bbox_center is not skeleton-based; handle before calling this function"
+        )
+
+    if preset not in CAMERA_HEIGHT_PRESETS:
+        raise ValueError(
+            f"Unknown camera height preset: '{preset}'. "
+            f"Valid options: {', '.join(CAMERA_HEIGHT_PRESETS)}"
+        )
+
+    # Extract Y coordinates from MHR70 joints
+    left_ankle_y = joints[13, 1]
+    right_ankle_y = joints[14, 1]
+    left_knee_y = joints[11, 1]
+    right_knee_y = joints[12, 1]
+    left_hip_y = joints[9, 1]
+    right_hip_y = joints[10, 1]
+    left_shoulder_y = joints[5, 1]
+    right_shoulder_y = joints[6, 1]
+    nose_y = joints[0, 1]
+
+    if preset == "feet":
+        return float((left_ankle_y + right_ankle_y) / 2.0)
+
+    elif preset == "knees":
+        return float((left_knee_y + right_knee_y) / 2.0)
+
+    elif preset == "waist":
+        return float((left_hip_y + right_hip_y) / 2.0)
+
+    elif preset == "chest":
+        hip_y = (left_hip_y + right_hip_y) / 2.0
+        shoulder_y = (left_shoulder_y + right_shoulder_y) / 2.0
+        return float((hip_y + shoulder_y) / 2.0)
+
+    elif preset == "shoulders":
+        return float((left_shoulder_y + right_shoulder_y) / 2.0)
+
+    elif preset == "head":
+        return float(nose_y)
+
+    # Should not reach here due to earlier validation
+    raise ValueError(f"Unhandled camera height preset: '{preset}'")

@@ -374,6 +374,57 @@ class Scene:
 
         return min_corner.astype(np.float32), max_corner.astype(np.float32)
 
+    def get_camera_height_y(self, preset: str) -> float:
+        """
+        Get Y-coordinate for camera orbit center based on skeleton joints.
+
+        For skeleton-based presets (feet, knees, waist, chest, shoulders, head),
+        uses joint positions to determine the orbit center height.
+        For "bbox_center", returns the Y component of the bounding box center.
+
+        Args:
+            preset: Camera height preset:
+                - "bbox_center": Center of mesh bounding box (default)
+                - "feet": Ankle height
+                - "knees": Knee height
+                - "waist": Hip height
+                - "chest": Midpoint between hips and shoulders
+                - "shoulders": Shoulder height
+                - "head": Nose height
+
+        Returns:
+            Y coordinate for camera orbit center
+
+        Raises:
+            ValueError: If preset requires skeleton but none is loaded,
+                       or if skeleton format is not MHR70
+        """
+        from .skeleton import get_camera_height_y, CAMERA_HEIGHT_PRESETS
+
+        if preset not in CAMERA_HEIGHT_PRESETS:
+            raise ValueError(
+                f"Unknown camera height preset: '{preset}'. "
+                f"Valid options: {', '.join(CAMERA_HEIGHT_PRESETS)}"
+            )
+
+        if preset == "bbox_center":
+            return float(self.get_bbox_center()[1])
+
+        # Skeleton-based presets require skeleton data
+        if self.skeleton_joints is None:
+            raise ValueError(
+                f"Camera height preset '{preset}' requires skeleton data. "
+                "Load with include_skeleton=True or use --camera-height bbox_center"
+            )
+
+        if self.skeleton_format != "mhr70":
+            raise ValueError(
+                f"Camera height presets only supported for MHR70 skeleton format, "
+                f"got: {self.skeleton_format}"
+            )
+
+        return get_camera_height_y(self.skeleton_joints, preset)
+
     def filter_mesh_to_viewport(self, camera: "Camera") -> "Scene":
         """
         Create a new Scene with only vertices visible in camera's viewport.

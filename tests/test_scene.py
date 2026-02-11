@@ -239,3 +239,111 @@ class TestAutoOrientIntegration:
         facing_after = scene.compute_torso_facing_direction()
         assert facing_after[2] < -0.9
         assert abs(facing_after[0]) < 0.1
+
+
+def _make_full_skeleton():
+    """Create a realistic MHR70 skeleton for camera height tests."""
+    joints = np.zeros((70, 3), dtype=np.float32)
+    # Feet / ankles
+    joints[13] = [-0.1, 0.05, 0.0]   # left_ankle
+    joints[14] = [0.1, 0.05, 0.0]    # right_ankle
+    # Knees
+    joints[11] = [-0.1, 0.45, 0.0]   # left_knee
+    joints[12] = [0.1, 0.45, 0.0]    # right_knee
+    # Hips
+    joints[9] = [-0.1, 0.90, 0.0]    # left_hip
+    joints[10] = [0.1, 0.90, 0.0]    # right_hip
+    # Shoulders
+    joints[5] = [-0.2, 1.40, 0.0]    # left_shoulder
+    joints[6] = [0.2, 1.40, 0.0]     # right_shoulder
+    # Neck
+    joints[69] = [0.0, 1.55, 0.0]    # neck
+    # Head
+    joints[0] = [0.0, 1.70, 0.0]     # nose
+    return joints
+
+
+class TestGetCameraHeightY:
+    """Test skeleton-based camera orbit height."""
+
+    def test_bbox_center(self):
+        """bbox_center should return Y center of bounding box."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+        # Override vertices to have predictable bounds
+        scene.vertices = np.array([
+            [-0.3, 0.0, -0.1],
+            [0.3, 1.8, 0.1],
+        ], dtype=np.float32)
+        scene._bounds = None
+
+        y = scene.get_camera_height_y("bbox_center")
+        assert abs(y - 0.9) < 1e-5  # (0 + 1.8) / 2
+
+    def test_feet(self):
+        """feet should return average ankle Y."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+        y = scene.get_camera_height_y("feet")
+        assert abs(y - 0.05) < 1e-5
+
+    def test_knees(self):
+        """knees should return average knee Y."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+        y = scene.get_camera_height_y("knees")
+        assert abs(y - 0.45) < 1e-5
+
+    def test_waist(self):
+        """waist should return average hip Y."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+        y = scene.get_camera_height_y("waist")
+        assert abs(y - 0.90) < 1e-5
+
+    def test_chest(self):
+        """chest should return midpoint between hips and shoulders."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+        y = scene.get_camera_height_y("chest")
+        expected = (0.90 + 1.40) / 2.0  # midpoint hip-shoulder
+        assert abs(y - expected) < 1e-5
+
+    def test_shoulders(self):
+        """shoulders should return average shoulder Y."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+        y = scene.get_camera_height_y("shoulders")
+        assert abs(y - 1.40) < 1e-5
+
+    def test_head(self):
+        """head should return nose Y."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+        y = scene.get_camera_height_y("head")
+        assert abs(y - 1.70) < 1e-5
+
+    def test_no_skeleton_raises(self):
+        """Skeleton-based preset without skeleton should raise ValueError."""
+        vertices = np.random.rand(10, 3).astype(np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.int32)
+        scene = Scene(vertices=vertices, faces=faces)
+
+        with pytest.raises(ValueError, match="requires skeleton data"):
+            scene.get_camera_height_y("waist")
+
+    def test_unknown_preset_raises(self):
+        """Unknown preset should raise ValueError."""
+        joints = _make_full_skeleton()
+        scene = _make_scene_with_skeleton(joints, "mhr70")
+
+        with pytest.raises(ValueError, match="Unknown camera height preset"):
+            scene.get_camera_height_y("belly_button")
+
+    def test_non_mhr70_raises(self):
+        """Non-MHR70 skeleton format should raise ValueError."""
+        joints = np.zeros((25, 3), dtype=np.float32)
+        scene = _make_scene_with_skeleton(joints, "openpose_body25")
+
+        with pytest.raises(ValueError, match="MHR70"):
+            scene.get_camera_height_y("waist")

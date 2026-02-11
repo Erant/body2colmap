@@ -133,6 +133,7 @@ def main(argv: Optional[list] = None) -> int:
             pattern=config.path.pattern,
             n_frames=config.path.n_frames,
             radius=config.path.radius,
+            camera_height=config.path.camera_height,
             **orbit_kwargs
         )
 
