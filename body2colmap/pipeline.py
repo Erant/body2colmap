@@ -411,6 +411,100 @@ class OrbitPipeline:
 
         return images
 
+    def render_original_view(
+        self,
+        original_focal_length: float,
+        modes: List[str] = ["mesh"],
+        **render_kwargs
+    ) -> Dict[str, NDArray[np.uint8]]:
+        """
+        Render a single frame from the original SAM-3D-Body viewpoint.
+
+        After sam3d_to_world(), the original camera is at the origin with
+        identity rotation (the 180° X-axis flip that converts SAM-3D coords
+        to world coords also converts the camera from OpenCV convention to
+        OpenGL convention). So we just need the original focal length.
+
+        IMPORTANT: The scene must NOT have been auto-oriented or rotated
+        for this to produce a correct overlay.
+
+        Args:
+            original_focal_length: Focal length from the .npz file, in pixels.
+                This was computed by SAM-3D-Body for its internal crop resolution.
+            modes: Render modes (same as render_all)
+            **render_kwargs: Passed through to render methods
+
+        Returns:
+            Dict mapping mode name to a single rendered image (not a list)
+        """
+        # Camera at origin, identity rotation, original focal length
+        camera = Camera(
+            focal_length=(original_focal_length, original_focal_length),
+            image_size=self.render_size,
+            position=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32)
+        )
+
+        renderer = self._get_renderer()
+        results = {}
+
+        for mode in modes:
+            if '+' in mode:
+                # Composite mode — delegate to render_composite
+                parts = [p.strip() for p in mode.split('+')]
+                base_mode = parts[0]
+                overlays = parts[1:]
+
+                # Build composite config from render_kwargs
+                composite_modes = {}
+                if base_mode == "mesh":
+                    composite_modes["mesh"] = {
+                        "color": render_kwargs.get('mesh_color'),
+                        "bg_color": render_kwargs.get('bg_color', (1.0, 1.0, 1.0)),
+                    }
+                elif base_mode == "depth":
+                    composite_modes["depth"] = {}
+
+                for overlay in overlays:
+                    if overlay == "skeleton":
+                        composite_modes["skeleton"] = {
+                            "joint_radius": render_kwargs.get('joint_radius', 0.015),
+                            "bone_radius": render_kwargs.get('bone_radius', 0.008),
+                        }
+                    elif overlay == "face":
+                        composite_modes["face"] = {
+                            "face_mode": render_kwargs.get('face_mode', 'full'),
+                            "face_landmarks": render_kwargs.get('face_landmarks'),
+                        }
+
+                image = renderer.render_composite(camera, composite_modes)
+            elif mode == "mesh":
+                image = renderer.render_mesh(
+                    camera,
+                    mesh_color=render_kwargs.get('mesh_color'),
+                    bg_color=render_kwargs.get('bg_color', (1.0, 1.0, 1.0))
+                )
+            elif mode == "depth":
+                image = renderer.render_depth(
+                    camera,
+                    normalize=render_kwargs.get('normalize_depth', True),
+                    colormap=render_kwargs.get('depth_colormap')
+                )
+            elif mode == "skeleton":
+                image = renderer.render_skeleton(
+                    camera,
+                    joint_radius=render_kwargs.get('joint_radius', 0.015),
+                    bone_radius=render_kwargs.get('bone_radius', 0.008),
+                    face_mode=render_kwargs.get('face_mode'),
+                    face_landmarks=render_kwargs.get('face_landmarks')
+                )
+            else:
+                raise ValueError(f"Unknown render mode: {mode}")
+
+            results[mode] = image
+
+        return results
+
     def export_colmap(
         self,
         output_dir: str,

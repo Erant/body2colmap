@@ -12,6 +12,7 @@ from typing import Optional
 from .config import create_argument_parser, Config
 from .face import FaceLandmarkIngest
 from .pipeline import OrbitPipeline
+from .scene import Scene
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -92,6 +93,97 @@ def main(argv: Optional[list] = None) -> int:
 
         if args.verbose:
             print(f"  Loaded: {pipeline.scene}")
+
+        # --- Debug: render from original SAM-3D-Body viewpoint ---
+        if args.debug_original_view:
+            if is_splat:
+                raise ValueError("--debug-original-view is only supported for .npz input")
+
+            if args.verbose:
+                print("\n[DEBUG] Original-view rendering mode")
+
+            # Load metadata from .npz to get original focal length
+            metadata = Scene.load_npz_metadata(config.input_file)
+            if args.verbose:
+                print(f"  .npz keys: {metadata['_all_keys']}")
+                for k, v in metadata.items():
+                    if k != '_all_keys':
+                        val_repr = f"shape={v.shape}" if hasattr(v, 'shape') else repr(v)
+                        print(f"  {k}: {val_repr}")
+
+            if 'focal_length' not in metadata:
+                raise ValueError(
+                    "--debug-original-view requires 'focal_length' in .npz file, "
+                    f"but it only contains: {metadata['_all_keys']}"
+                )
+
+            original_fl = float(metadata['focal_length'])
+            if args.verbose:
+                print(f"\n  Original focal length: {original_fl:.2f} px")
+                print(f"  Render resolution: {config.render.resolution[0]}x{config.render.resolution[1]}")
+                print(f"  NOTE: focal_length is from SAM-3D-Body's internal crop.")
+                print(f"  For exact overlay, render resolution must match the crop size.")
+
+            # DO NOT auto-orient — the original view requires the mesh
+            # in its post-conversion position (no additional rotations).
+
+            # Determine render modes
+            modes = config.render.modes
+
+            # Build render kwargs
+            render_kwargs = {
+                'mesh_color': config.render.mesh_color,
+                'bg_color': config.render.bg_color,
+                'joint_radius': config.skeleton.joint_radius,
+                'bone_radius': config.skeleton.bone_radius,
+            }
+
+            # Load face landmarks if needed
+            if config.skeleton.face_landmarks:
+                fl_70 = FaceLandmarkIngest.from_json(config.skeleton.face_landmarks)
+                render_kwargs['face_landmarks'] = fl_70
+            if config.skeleton.face_mode:
+                render_kwargs['face_mode'] = config.skeleton.face_mode
+
+            # Render from original viewpoint
+            if args.verbose:
+                print(f"\n  Rendering modes: {modes}")
+
+            rendered = pipeline.render_original_view(
+                original_focal_length=original_fl,
+                modes=modes,
+                **render_kwargs
+            )
+
+            # Save images
+            output_dir = Path(config.export.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            import cv2
+            for mode, image in rendered.items():
+                safe_mode = mode.replace('+', '_')
+                filename = f"original_view_{safe_mode}.png"
+                filepath = output_dir / filename
+                if image.shape[2] == 4:
+                    image_bgr = cv2.cvtColor(image, cv2.COLOR_RGBA2BGRA)
+                else:
+                    image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(filepath), image_bgr)
+                print(f"  Saved: {filepath}")
+
+            if 'pred_keypoints_2d' in metadata:
+                import json
+                kp2d = metadata['pred_keypoints_2d']
+                kp_path = output_dir / "original_view_keypoints_2d.json"
+                kp_list = kp2d.tolist() if hasattr(kp2d, 'tolist') else kp2d
+                with open(kp_path, 'w') as f:
+                    json.dump(kp_list, f, indent=2)
+                print(f"  Saved 2D keypoints: {kp_path}")
+
+            if args.verbose:
+                print("\n[DEBUG] Done. Overlay these images on the original input to verify alignment.")
+
+            return 0
 
         # Load face landmarks if provided
         face_landmarks_70 = None

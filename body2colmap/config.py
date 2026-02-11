@@ -724,6 +724,18 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Output filename pattern (Python format string, e.g., 'frame_{:04d}.png')"
     )
 
+    # Debug options
+    debug_group = parser.add_argument_group("Debug Options")
+    debug_group.add_argument(
+        "--debug-original-view",
+        action="store_true",
+        help="Render a single frame from the original SAM-3D-Body camera viewpoint "
+             "using the focal length stored in the .npz file. Use this to verify "
+             "mesh/skeleton alignment with the original input image. "
+             "Skips orbit generation and COLMAP export. "
+             "Requires 'focal_length' to be present in the .npz file."
+    )
+
     # Other options
     parser.add_argument(
         "--verbose", "-v",

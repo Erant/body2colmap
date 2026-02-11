@@ -128,6 +128,39 @@ class Scene:
         return cls.from_sam3d_output(output_dict, include_skeleton)
 
     @staticmethod
+    def load_npz_metadata(filepath: str) -> Dict[str, Any]:
+        """
+        Load optional metadata fields from SAM-3D-Body .npz file.
+
+        Returns a dictionary with whatever optional fields are present:
+        focal_length, bbox, pred_keypoints_2d, global_rot, img_shape, etc.
+
+        Args:
+            filepath: Path to .npz file
+
+        Returns:
+            Dictionary of optional metadata (may be empty)
+        """
+        data = np.load(filepath, allow_pickle=True)
+        metadata = {}
+        optional_fields = [
+            'focal_length', 'bbox', 'pred_keypoints_2d',
+            'global_rot', 'body_pose_params', 'shape_params',
+            'img_shape', 'original_img_shape',
+        ]
+        for field in optional_fields:
+            if field in data.files:
+                val = data[field]
+                # Convert 0-d arrays to scalars
+                if isinstance(val, np.ndarray) and val.ndim == 0:
+                    val = val.item()
+                metadata[field] = val
+
+        # Also report all keys present for debugging
+        metadata['_all_keys'] = list(data.files)
+        return metadata
+
+    @staticmethod
     def _infer_skeleton_format(n_joints: int) -> str:
         """
         Infer skeleton format from number of joints.
