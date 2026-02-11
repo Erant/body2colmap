@@ -200,6 +200,7 @@ class OrbitPipeline:
         radius: Optional[float] = None,
         framing: str = "full",
         camera_height: str = "bbox_center",
+        look_at_height: str = "bbox_center",
         **kwargs
     ) -> "OrbitPipeline":
         """
@@ -217,6 +218,9 @@ class OrbitPipeline:
                     Sets the Y component of the orbit center:
                     "bbox_center" (default), "feet", "knees", "waist",
                     "chest", "shoulders", "head".
+            look_at_height: Skeleton-based look-at target height preset.
+                    Sets the Y component of the look-at point.
+                    Same presets as camera_height. Independent of camera_height.
             **kwargs: Pattern-specific parameters:
                 - circular: elevation_deg
                 - sinusoidal: amplitude_deg, n_cycles
@@ -229,12 +233,18 @@ class OrbitPipeline:
         # For partial body presets, this filters mesh vertices by Y coordinate
         framing_bounds = self.scene.get_framing_bounds(preset=framing)
 
-        # Compute orbit center (look-at target) from framing region
-        target = (framing_bounds[0] + framing_bounds[1]) / 2.0
+        # Compute base XZ center from framing bounds
+        bbox_center = (framing_bounds[0] + framing_bounds[1]) / 2.0
 
-        # Override orbit center Y with skeleton-based camera height
+        # Orbit center: XZ from framing bounds, Y from camera_height
+        orbit_center = bbox_center.copy()
         if camera_height != "bbox_center":
-            target[1] = self.scene.get_camera_height_y(camera_height)
+            orbit_center[1] = self.scene.get_camera_height_y(camera_height)
+
+        # Look-at target: XZ from framing bounds, Y from look_at_height
+        look_at = bbox_center.copy()
+        if look_at_height != "bbox_center":
+            look_at[1] = self.scene.get_camera_height_y(look_at_height)
 
         # Auto-compute radius if not provided
         if radius is None:
@@ -247,7 +257,13 @@ class OrbitPipeline:
             )
 
         # Create orbit path generator
-        orbit = OrbitPath(target=target, radius=radius)
+        # Orbit center controls camera positions; look_at controls where
+        # cameras point. They can differ (e.g. camera at feet, look at head).
+        orbit = OrbitPath(
+            target=orbit_center,
+            radius=radius,
+            look_at_target=look_at
+        )
 
         # Create camera template with correct intrinsics
         camera_template = Camera(

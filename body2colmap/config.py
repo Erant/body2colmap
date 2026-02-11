@@ -40,6 +40,7 @@ class PathConfig:
     radius: Optional[float] = None  # None = auto-compute
     framing: str = "full"  # "full", "torso", "bust", "head"
     camera_height: str = "bbox_center"  # skeleton-based camera orbit height
+    look_at_height: str = "bbox_center"  # skeleton-based look-at target height
     crop_to_viewport: bool = False  # Filter mesh to first camera's viewport
 
     # Initial body orientation
@@ -185,6 +186,8 @@ class Config:
             config.path.framing = args.framing
         if args.camera_height:
             config.path.camera_height = args.camera_height
+        if args.look_at_height:
+            config.path.look_at_height = args.look_at_height
         if args.crop_to_viewport:
             config.path.crop_to_viewport = True
         if args.initial_rotation is not None:
@@ -276,6 +279,7 @@ class Config:
             radius=path_data.get('radius'),
             framing=path_data.get('framing', 'full'),
             camera_height=path_data.get('camera_height', 'bbox_center'),
+            look_at_height=path_data.get('look_at_height', 'bbox_center'),
             crop_to_viewport=path_data.get('crop_to_viewport', False),
             initial_rotation=path_data.get('initial_rotation', 0.0),
             elevation_deg=path_data.get('elevation_deg', 0.0),
@@ -353,6 +357,7 @@ class Config:
                 'radius': self.path.radius,
                 'framing': self.path.framing,
                 'camera_height': self.path.camera_height,
+                'look_at_height': self.path.look_at_height,
                 'crop_to_viewport': self.path.crop_to_viewport,
                 'initial_rotation': self.path.initial_rotation,
                 'elevation_deg': self.path.elevation_deg,
@@ -460,6 +465,11 @@ path:
   # - shoulders: Shoulder height
   # - head: Nose height
   camera_height: "bbox_center"
+
+  # Look-at target height: determines the Y position the cameras look at.
+  # Same presets as camera_height. Independent of camera_height.
+  # Example: camera_height=feet + look_at_height=head = low-angle upward shot
+  look_at_height: "bbox_center"
 
   # Initial body rotation offset in degrees.
   # The body is auto-rotated to face the camera at frame 0.
@@ -663,6 +673,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--camera-height",
         choices=["bbox_center", "feet", "knees", "waist", "chest", "shoulders", "head"],
         help="Camera orbit height relative to body: bbox_center (default), "
+             "feet, knees, waist, chest, shoulders, head. "
+             "Non-bbox_center presets use skeleton joint positions."
+    )
+    path_group.add_argument(
+        "--look-at-height",
+        choices=["bbox_center", "feet", "knees", "waist", "chest", "shoulders", "head"],
+        help="Look-at target height relative to body: bbox_center (default), "
              "feet, knees, waist, chest, shoulders, head. "
              "Non-bbox_center presets use skeleton joint positions."
     )

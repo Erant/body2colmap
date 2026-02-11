@@ -33,20 +33,29 @@ class OrbitPath:
         self,
         target: NDArray[np.float32],
         radius: float,
-        up_vector: Optional[NDArray[np.float32]] = None
+        up_vector: Optional[NDArray[np.float32]] = None,
+        look_at_target: Optional[NDArray[np.float32]] = None
     ):
         """
         Initialize OrbitPath.
 
         Args:
-            target: 3D point to orbit around (typically mesh centroid)
+            target: 3D point to orbit around (camera positions are
+                   computed relative to this point)
             radius: Distance from target to camera
             up_vector: World up direction for elevation reference
                       Default: [0, 1, 0] (Y-up)
+            look_at_target: 3D point cameras should look at.
+                           If None, cameras look at target.
         """
         self.target = np.array(target, dtype=np.float32)
         self.radius = radius
         self.up_vector = up_vector if up_vector is not None else coordinates.WorldCoordinates.UP_AXIS
+        self.look_at_target = (
+            np.array(look_at_target, dtype=np.float32)
+            if look_at_target is not None
+            else self.target
+        )
 
     def circular(
         self,
@@ -101,7 +110,7 @@ class OrbitPath:
 
             # Create camera
             camera = self._create_camera(position, camera_template)
-            camera.look_at(self.target, self.up_vector)
+            camera.look_at(self.look_at_target, self.up_vector)
 
             cameras.append(camera)
 
@@ -152,7 +161,7 @@ class OrbitPath:
 
             # Create camera
             camera = self._create_camera(position, camera_template)
-            camera.look_at(self.target, self.up_vector)
+            camera.look_at(self.look_at_target, self.up_vector)
 
             cameras.append(camera)
 
@@ -230,7 +239,7 @@ class OrbitPath:
 
             # Create camera
             camera = self._create_camera(position, camera_template)
-            camera.look_at(self.target, self.up_vector)
+            camera.look_at(self.look_at_target, self.up_vector)
 
             cameras.append(camera)
 
