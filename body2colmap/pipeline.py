@@ -411,18 +411,117 @@ class OrbitPipeline:
 
         return images
 
+    def compute_original_view_framing(
+        self,
+        original_focal_length: float,
+        fill_ratio: float = 0.8
+    ) -> Dict[str, Any]:
+        """
+        Compute auto-framing parameters for the original SAM-3D-Body viewpoint.
+
+        Projects the mesh through the original camera and computes the scale
+        and translation needed to center the subject and fill the frame.
+
+        Since the camera stays at the origin (same viewpoint), this is a pure
+        2D operation: scale + translate. The result is a new focal length and
+        principal point, plus a 2x3 affine matrix that can be applied to the
+        original input image with cv2.warpAffine().
+
+        Args:
+            original_focal_length: Focal length from .npz, in pixels
+            fill_ratio: How much of the frame the subject should fill (0-1)
+
+        Returns:
+            Dictionary with framing parameters:
+                scale_factor, framed_focal_length, framed_principal_point,
+                affine_matrix (2x3, for cv2.warpAffine on the original image),
+                inverse_affine_matrix (2x3, maps framed coords back to original),
+                original_2d_bbox [u_min, v_min, u_max, v_max],
+                crop_box_in_original (what region of the original maps to output)
+        """
+        w, h = self.render_size
+        cx_orig = w / 2.0
+        cy_orig = h / 2.0
+
+        # Create the original camera
+        orig_cam = Camera(
+            focal_length=(original_focal_length, original_focal_length),
+            image_size=self.render_size,
+            position=np.zeros(3, dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32)
+        )
+
+        # Project all mesh vertices to 2D image coordinates
+        points_2d = orig_cam.project(self.scene.vertices)
+
+        # 2D bounding box of the projected mesh
+        u_min, v_min = points_2d.min(axis=0)
+        u_max, v_max = points_2d.max(axis=0)
+        bbox_w = u_max - u_min
+        bbox_h = v_max - v_min
+        bbox_cx = (u_min + u_max) / 2.0
+        bbox_cy = (v_min + v_max) / 2.0
+
+        # Scale factor: make the subject fill fill_ratio of the output
+        if bbox_w < 1e-6 or bbox_h < 1e-6:
+            s = 1.0
+        else:
+            s = fill_ratio * min(w / bbox_w, h / bbox_h)
+
+        f_new = original_focal_length * s
+
+        # New principal point: centers the subject in the output
+        cx_new = w / 2.0 - s * (bbox_cx - cx_orig)
+        cy_new = h / 2.0 - s * (bbox_cy - cy_orig)
+
+        # Affine matrix: maps original image coords → auto-framed coords
+        # u' = s * u + tx, v' = s * v + ty
+        tx = cx_new - s * cx_orig
+        ty = cy_new - s * cy_orig
+        affine = [[s, 0.0, tx], [0.0, s, ty]]
+
+        # Inverse affine: maps framed coords → original image coords
+        # u = (u' - tx) / s, v = (v' - ty) / s
+        inv_s = 1.0 / s
+        inv_tx = -tx / s
+        inv_ty = -ty / s
+        inv_affine = [[inv_s, 0.0, inv_tx], [0.0, inv_s, inv_ty]]
+
+        # Crop box: what region of the original image maps to the output
+        # Output corners (0,0) and (w,h) in original-image coords:
+        orig_u_left = -tx / s
+        orig_v_top = -ty / s
+        orig_u_right = (w - tx) / s
+        orig_v_bottom = (h - ty) / s
+
+        return {
+            'scale_factor': float(s),
+            'framed_focal_length': float(f_new),
+            'framed_principal_point': [float(cx_new), float(cy_new)],
+            'original_focal_length': float(original_focal_length),
+            'original_principal_point': [float(cx_orig), float(cy_orig)],
+            'affine_matrix': affine,
+            'inverse_affine_matrix': inv_affine,
+            'original_2d_bbox': [float(u_min), float(v_min),
+                                 float(u_max), float(v_max)],
+            'crop_box_in_original': [float(orig_u_left), float(orig_v_top),
+                                     float(orig_u_right), float(orig_v_bottom)],
+        }
+
     def render_original_view(
         self,
         original_focal_length: float,
         modes: List[str] = ["mesh"],
+        auto_frame: bool = False,
+        fill_ratio: float = 0.8,
         **render_kwargs
-    ) -> Dict[str, NDArray[np.uint8]]:
+    ) -> Tuple[Dict[str, NDArray[np.uint8]], Optional[Dict[str, Any]]]:
         """
         Render a single frame from the original SAM-3D-Body viewpoint.
 
         After sam3d_to_world(), the original camera is at the origin with
-        identity rotation (the 180° X-axis flip that converts SAM-3D coords
-        to world coords also converts the camera from OpenCV convention to
+        identity rotation (the 180-degree X-axis flip that converts SAM-3D
+        coords to world coords also converts the camera from OpenCV to
         OpenGL convention). So we just need the original focal length.
 
         IMPORTANT: The scene must NOT have been auto-oriented or rotated
@@ -430,17 +529,35 @@ class OrbitPipeline:
 
         Args:
             original_focal_length: Focal length from the .npz file, in pixels.
-                This was computed by SAM-3D-Body for its internal crop resolution.
             modes: Render modes (same as render_all)
+            auto_frame: If True, adjust focal length and principal point to
+                center and fill the frame. Also returns framing metadata.
+            fill_ratio: Target fill ratio when auto_frame=True (0-1)
             **render_kwargs: Passed through to render methods
 
         Returns:
-            Dict mapping mode name to a single rendered image (not a list)
+            Tuple of (rendered_images, framing_info):
+                rendered_images: Dict mapping mode name to single rendered image
+                framing_info: Dict with affine transform metadata, or None
         """
-        # Camera at origin, identity rotation, original focal length
+        framing_info = None
+
+        if auto_frame:
+            framing_info = self.compute_original_view_framing(
+                original_focal_length, fill_ratio
+            )
+            fl = framing_info['framed_focal_length']
+            cx, cy = framing_info['framed_principal_point']
+        else:
+            fl = original_focal_length
+            cx = self.render_size[0] / 2.0
+            cy = self.render_size[1] / 2.0
+
+        # Camera at origin, identity rotation, chosen intrinsics
         camera = Camera(
-            focal_length=(original_focal_length, original_focal_length),
+            focal_length=(fl, fl),
             image_size=self.render_size,
+            principal_point=(cx, cy),
             position=np.array([0.0, 0.0, 0.0], dtype=np.float32),
             rotation=np.eye(3, dtype=np.float32)
         )
@@ -503,7 +620,7 @@ class OrbitPipeline:
 
             results[mode] = image
 
-        return results
+        return results, framing_info
 
     def export_colmap(
         self,

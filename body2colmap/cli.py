@@ -99,8 +99,11 @@ def main(argv: Optional[list] = None) -> int:
             if is_splat:
                 raise ValueError("--debug-original-view is only supported for .npz input")
 
+            auto_frame = not args.no_auto_frame
+
             if args.verbose:
-                print("\n[DEBUG] Original-view rendering mode")
+                mode_label = "auto-framed" if auto_frame else "raw"
+                print(f"\n[DEBUG] Original-view rendering mode ({mode_label})")
 
             # Load metadata from .npz to get original focal length
             metadata = Scene.load_npz_metadata(config.input_file)
@@ -121,8 +124,9 @@ def main(argv: Optional[list] = None) -> int:
             if args.verbose:
                 print(f"\n  Original focal length: {original_fl:.2f} px")
                 print(f"  Render resolution: {config.render.resolution[0]}x{config.render.resolution[1]}")
-                print(f"  NOTE: focal_length is from SAM-3D-Body's internal crop.")
-                print(f"  For exact overlay, render resolution must match the crop size.")
+                if not auto_frame:
+                    print(f"  NOTE: focal_length is from SAM-3D-Body's internal crop.")
+                    print(f"  For exact overlay, render resolution must match the crop size.")
 
             # DO NOT auto-orient — the original view requires the mesh
             # in its post-conversion position (no additional rotations).
@@ -148,12 +152,27 @@ def main(argv: Optional[list] = None) -> int:
             # Render from original viewpoint
             if args.verbose:
                 print(f"\n  Rendering modes: {modes}")
+                if auto_frame:
+                    print(f"  Auto-framing: fill_ratio={config.camera.fill_ratio}")
 
-            rendered = pipeline.render_original_view(
+            rendered, framing_info = pipeline.render_original_view(
                 original_focal_length=original_fl,
                 modes=modes,
+                auto_frame=auto_frame,
+                fill_ratio=config.camera.fill_ratio,
                 **render_kwargs
             )
+
+            if framing_info and args.verbose:
+                s = framing_info['scale_factor']
+                f_new = framing_info['framed_focal_length']
+                cx, cy = framing_info['framed_principal_point']
+                bbox = framing_info['original_2d_bbox']
+                print(f"\n  Auto-framing results:")
+                print(f"    Scale factor: {s:.4f} ({'zoom in' if s > 1 else 'zoom out'})")
+                print(f"    Framed focal length: {f_new:.2f} px")
+                print(f"    Framed principal point: ({cx:.1f}, {cy:.1f})")
+                print(f"    Original 2D bbox: [{bbox[0]:.1f}, {bbox[1]:.1f}, {bbox[2]:.1f}, {bbox[3]:.1f}]")
 
             # Save images
             output_dir = Path(config.export.output_dir)
@@ -171,6 +190,15 @@ def main(argv: Optional[list] = None) -> int:
                 cv2.imwrite(str(filepath), image_bgr)
                 print(f"  Saved: {filepath}")
 
+            # Save framing metadata
+            if framing_info is not None:
+                import json
+                framing_path = output_dir / "original_view_framing.json"
+                with open(framing_path, 'w') as f:
+                    json.dump(framing_info, f, indent=2)
+                print(f"  Saved: {framing_path}")
+
+            # Save 2D keypoints if available
             if 'pred_keypoints_2d' in metadata:
                 import json
                 kp2d = metadata['pred_keypoints_2d']
@@ -181,7 +209,13 @@ def main(argv: Optional[list] = None) -> int:
                 print(f"  Saved 2D keypoints: {kp_path}")
 
             if args.verbose:
-                print("\n[DEBUG] Done. Overlay these images on the original input to verify alignment.")
+                print("\n[DEBUG] Done.")
+                if framing_info:
+                    print("  To transform the original image to match:")
+                    print("    import cv2, json, numpy as np")
+                    print(f"    info = json.load(open('{framing_path}'))")
+                    print("    M = np.array(info['affine_matrix'])")
+                    print(f"    warped = cv2.warpAffine(img, M, ({config.render.resolution[0]}, {config.render.resolution[1]}))")
 
             return 0
 

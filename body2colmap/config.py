@@ -733,7 +733,15 @@ def create_argument_parser() -> argparse.ArgumentParser:
              "using the focal length stored in the .npz file. Use this to verify "
              "mesh/skeleton alignment with the original input image. "
              "Skips orbit generation and COLMAP export. "
-             "Requires 'focal_length' to be present in the .npz file."
+             "Requires 'focal_length' to be present in the .npz file. "
+             "Auto-frames by default; use --no-auto-frame to disable."
+    )
+    debug_group.add_argument(
+        "--no-auto-frame",
+        action="store_true",
+        help="With --debug-original-view: render at exact original camera parameters "
+             "without auto-framing. By default, the subject is zoomed and centered "
+             "to fill the frame, and a framing.json with the affine transform is saved."
     )
 
     # Other options

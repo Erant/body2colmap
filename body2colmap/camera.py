@@ -208,6 +208,10 @@ class Camera:
         """
         Project 3D points in world coordinates to 2D image coordinates.
 
+        Uses OpenGL camera convention (Y-up, camera looks -Z) and converts
+        to OpenCV for projection (Y-down, camera looks +Z), matching how
+        pyrender renders images.
+
         Args:
             points_3d: 3D points in world coords, shape (N, 3)
 
@@ -215,12 +219,16 @@ class Camera:
             2D points in image coordinates, shape (N, 2)
             Points may be outside image bounds.
         """
-        # Transform to camera coordinates
+        # Transform to OpenGL camera coordinates
         w2c = self.get_w2c()
         points_cam = (w2c[:3, :3] @ points_3d.T).T + w2c[:3, 3]
 
-        # Project to normalized image plane (divide by Z)
-        points_normalized = points_cam[:, :2] / points_cam[:, 2:3]
+        # Convert OpenGL camera space (Y-up, -Z forward) to OpenCV (Y-down, +Z forward)
+        # This ensures projection matches pyrender's rendered output.
+        points_cv = points_cam * np.array([1.0, -1.0, -1.0], dtype=np.float32)
+
+        # Standard pinhole projection (Z > 0 for visible points in OpenCV)
+        points_normalized = points_cv[:, :2] / points_cv[:, 2:3]
 
         # Apply intrinsics
         K = self.get_intrinsics_matrix()
