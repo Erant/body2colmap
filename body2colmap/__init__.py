@@ -20,6 +20,7 @@ __version__ = "0.2.0"
 __author__ = "Your Name"
 
 from .camera import Camera
+from .coordinates import cartesian_to_spherical, spherical_to_cartesian
 from .face import FaceLandmarkIngest
 from .scene import Scene
 from .pipeline import OrbitPipeline
@@ -37,9 +38,11 @@ __all__ = [
     "OrbitPath",
     "Scene",
     "OrbitPipeline",
+    "cartesian_to_spherical",
     "compute_auto_orbit_radius",
     "compute_default_focal_length",
     "compute_original_camera_orbit_params",
     "compute_original_view_framing",
     "compute_warp_to_camera",
+    "spherical_to_cartesian",
 ]

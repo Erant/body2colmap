@@ -26,12 +26,13 @@ This tool takes SAM-3D-Body output (3D mesh reconstruction from a single image) 
 
 ### 3. Separation of Concerns
 Each module has a single, clear responsibility:
-- `coordinates.py`: Coordinate system definitions and conversions
+- `coordinates.py`: Coordinate system definitions, conversions, spherical ↔ Cartesian
 - `camera.py`: Camera intrinsics/extrinsics representation
 - `path.py`: Orbit path pattern generation
 - `scene.py`: 3D scene management (mesh, skeleton, lighting)
 - `renderer.py`: Image rendering (mesh, depth, skeleton modes)
 - `exporter.py`: Export to COLMAP and other formats
+- `utils.py`: Auto-framing, homography warp, focal length utilities
 - `pipeline.py`: High-level orchestration
 - `cli.py`: Command-line interface
 
@@ -74,6 +75,7 @@ body2colmap/
 │   ├── scene.py                 # Scene management
 │   ├── renderer.py              # Rendering engine
 │   ├── exporter.py              # Export to COLMAP/other formats
+│   ├── utils.py                 # Auto-framing, homography warp, focal length
 │   ├── pipeline.py              # High-level API
 │   ├── config.py                # Configuration management
 │   └── cli.py                   # Command-line interface
@@ -217,6 +219,43 @@ def get_bbox_center(self) -> NDArray[np.float32]:
 **Solution**: Remove default from argument definition, check `if args.n_frames is not None:` before overriding config.
 
 **Lesson**: For CLI overrides of config file values, arguments should have NO default and use None-checking.
+
+## Original-Camera Orbit Mode (2026-02)
+
+### Overview
+`--use-original-camera` / `original_focal_length` mode generates an orbit where frame 0 matches the SAM-3D-Body camera viewpoint (at the origin, looking toward the mesh). This enables diffusion-based pipelines to use the input image as a conditioning frame.
+
+### Key Design: Geometric Radius
+**Problem**: How to ensure frame 0 lands exactly at the origin (the original camera position)?
+
+**Solution**: Use the geometric distance `||target||` (distance from origin to mesh bbox center) as the orbit radius. Since the orbit uses spherical coordinates centered on the target, and the original camera at the origin has a specific (azimuth, elevation) relative to the target, the spherical-to-Cartesian roundtrip reproduces the origin exactly.
+
+This avoids any position discontinuity between frame 0 and frame 1 — they are just adjacent positions on the same smooth orbit. The auto-framed focal length was computed for this exact distance, so framing is correct by construction.
+
+**Rejected alternative**: "Pinning" frame 0 to identity rotation + shifted principal point. This caused a rotation discontinuity at frame 0→1 because all other frames used `look_at()`. The approach was removed entirely.
+
+### Key Design: Homography Warp for Input Image
+**Problem**: Frame 0's camera has a `look_at()` rotation (not identity) and a different focal length than the original. How to warp the input image to match?
+
+**Solution**: `compute_warp_to_camera()` in `utils.py` computes a 3×3 homography:
+```
+H = K_target @ R_cv @ K_orig^{-1}
+```
+where `R_cv = flip @ R_c2w^T @ flip` with `flip = diag(1, -1, -1)` to account for the OpenGL→OpenCV convention used in the projection pipeline.
+
+This is used with `cv2.warpPerspective()` to align the original image with frame 0's rendered view.
+
+### Key Design: Elevation Override
+In original-camera mode, the `elevation_deg` parameter for circular orbits is **not user-tunable** — it is geometrically determined by the mesh position. The pipeline forces the derived elevation to ensure frame 0 lands at the origin. This follows the same pattern as the "Configuration Override Issues" lesson below.
+
+### Spherical Coordinate Convention
+Used by `coordinates.cartesian_to_spherical()` / `spherical_to_cartesian()`:
+- **Y-up** convention (matches world coordinates)
+- **Azimuth**: angle in XZ plane from +Z axis. 0° = +Z (toward viewer), 90° = +X (right), 180° = -Z (behind)
+- **Elevation**: angle above XZ plane. 0° = eye level, +45° = above, -45° = below
+- **Radius**: distance from origin
+
+These are the inverse of each other: `spherical_to_cartesian(cartesian_to_spherical(v)) ≈ v`.
 
 ## Critical Implementation Details
 

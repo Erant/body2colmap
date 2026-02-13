@@ -120,6 +120,56 @@ body2colmap --input estimation.npz --output-dir ./output --initial-rotation 180
 
 This ensures consistent starting orientation regardless of how the subject was posed in the source image, giving predictable control over when features appear and disappear during the orbit.
 
+### Original-Camera Orbit (`--use-original-camera`)
+
+When you have the original input image, `--use-original-camera` generates an orbit where **frame 0 matches the SAM-3D-Body camera viewpoint**. This is useful for diffusion-based pipelines where the input image serves as a conditioning frame.
+
+```bash
+# Original-camera orbit with the source image composited at frame 0
+body2colmap --input estimation.npz --output-dir ./output \
+  --use-original-camera --original-image photo.jpg \
+  --render-modes skeleton
+
+# Adjust how much of the frame the subject fills (default: 0.8)
+body2colmap --input estimation.npz --output-dir ./output \
+  --use-original-camera --original-image photo.jpg \
+  --fill-ratio 0.6 --render-modes mesh
+```
+
+How it works:
+
+1. The orbit radius is derived from the geometric distance between the origin (SAM-3D-Body camera) and the mesh bbox center, so frame 0 lands exactly at the original camera position via a spherical-coordinate roundtrip
+2. All cameras (including frame 0) use `look_at()` with a centered principal point and an auto-framed focal length that zooms the subject to fill the viewport
+3. The original image is warped via a homography to align with frame 0's look-at view, accounting for both the focal-length zoom and the slight rotation correction
+
+**Important**: Do not use `--initial-rotation` / `auto_orient()` with `--use-original-camera`. The orbit geometry depends on the unrotated mesh position to place frame 0 at the origin.
+
+#### Python API
+
+```python
+import numpy as np
+from body2colmap import OrbitPipeline
+
+pipeline = OrbitPipeline.from_npz_file("estimation.npz")
+# Do NOT call pipeline.auto_orient() in original-camera mode
+
+# original_focal_length triggers original-camera orbit
+pipeline.set_orbit_params(
+    pattern="circular",
+    n_frames=60,
+    original_focal_length=500.0,  # from .npz file
+    fill_ratio=0.8,
+)
+
+# The orbit_params dict contains the warp homography for the input image
+H = pipeline.orbit_params['warp_homography']  # 3x3 numpy array
+# Use with: cv2.warpPerspective(original_image, H, (w, h))
+
+images = pipeline.render_all(modes=["mesh"])
+pipeline.export_colmap("./output")
+pipeline.export_images("./output", images["mesh"])
+```
+
 ### Face Landmark Rendering
 
 Face landmarks render the OpenPose Face 70 keypoint topology (jawline, eyebrows, nose, eyes, lips, pupils) as white points and connecting lines on top of the skeleton.
@@ -337,6 +387,7 @@ body2colmap/
 ├── face.py          # Face landmarks, Procrustes alignment, visibility
 ├── renderer.py      # Image rendering (mesh, depth, skeleton, face)
 ├── exporter.py      # COLMAP export
+├── utils.py         # Auto-framing, homography warp, focal length utilities
 ├── pipeline.py      # High-level API
 ├── config.py        # Configuration management (CLI + YAML)
 └── cli.py           # Command-line interface
