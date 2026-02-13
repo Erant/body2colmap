@@ -46,7 +46,10 @@ class TestSAM3DToWorld:
 
         result = coordinates.sam3d_to_world(vertices, cam_t)
 
-        expected = vertices + cam_t
+        # sam3d_to_world translates by cam_t then applies 180° X rotation
+        # (keeps X, flips Y and Z)
+        positioned = vertices + cam_t
+        expected = positioned * np.array([1.0, -1.0, -1.0], dtype=np.float32)
         assert np.allclose(result, expected)
 
     def test_preserves_shape(self):
