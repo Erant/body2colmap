@@ -157,10 +157,6 @@ class Renderer:
         right_pose[:3, :3] = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # Rotate -90° around Y
         pr_scene.add(light_right, pose=right_pose)
 
-        # TODO: Add skeleton rendering if requested
-        # if include_skeleton and self.scene.skeleton_joints is not None:
-        #     self._add_skeleton_to_scene(pr_scene)
-
         return pr_scene
 
     def render_mesh(

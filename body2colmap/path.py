@@ -79,7 +79,6 @@ class OrbitPath:
         target: NDArray[np.float32],
         radius: float,
         up_vector: Optional[NDArray[np.float32]] = None,
-        pin_first_camera: Optional[Camera] = None
     ):
         """
         Initialize OrbitPath.
@@ -89,18 +88,10 @@ class OrbitPath:
             radius: Distance from target to camera
             up_vector: World up direction for elevation reference
                       Default: [0, 1, 0] (Y-up)
-            pin_first_camera: If provided, replaces cameras[0] with this
-                exact camera after orbit generation. Use this to ensure
-                frame 0 is pixel-identical to the original camera (e.g.
-                identity pose at origin for SAM-3D-Body) rather than the
-                look_at approximation which may be off by a fraction of
-                a degree. Only affects frame 0; all other frames are
-                generated normally.
         """
         self.target = np.array(target, dtype=np.float32)
         self.radius = radius
         self.up_vector = up_vector if up_vector is not None else coordinates.WorldCoordinates.UP_AXIS
-        self.pin_first_camera = pin_first_camera
 
     def circular(
         self,
@@ -163,7 +154,7 @@ class OrbitPath:
         for i in range(overlap):
             cameras.append(cameras[i])
 
-        return self._apply_pin_first_camera(cameras)
+        return cameras
 
     def sinusoidal(
         self,
@@ -210,7 +201,7 @@ class OrbitPath:
 
             cameras.append(camera)
 
-        return self._apply_pin_first_camera(cameras)
+        return cameras
 
     def helical(
         self,
@@ -288,12 +279,6 @@ class OrbitPath:
 
             cameras.append(camera)
 
-        return self._apply_pin_first_camera(cameras)
-
-    def _apply_pin_first_camera(self, cameras: List[Camera]) -> List[Camera]:
-        """Replace cameras[0] with the pinned camera if one was provided."""
-        if self.pin_first_camera is not None and len(cameras) > 0:
-            cameras[0] = self.pin_first_camera
         return cameras
 
     def _create_camera(
