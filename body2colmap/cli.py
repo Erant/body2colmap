@@ -320,10 +320,9 @@ def main(argv: Optional[list] = None) -> int:
 
         # Build orbit kwargs based on pattern
         orbit_kwargs = {
-            'framing': config.path.framing
+            'framing': config.path.framing,
+            'fill_ratio': config.camera.fill_ratio
         }
-        if original_fl_for_orbit is None:
-            orbit_kwargs['fill_ratio'] = config.camera.fill_ratio
 
         if config.path.pattern == "circular":
             orbit_kwargs['elevation_deg'] = config.path.elevation_deg

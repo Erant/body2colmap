@@ -224,28 +224,45 @@ class OrbitPipeline:
         """
         if original_focal_length is not None:
             # --- Original-camera mode ---
-            # Derive orbit geometry from mesh position relative to origin.
+            # Auto-frame using the same logic as render_original_view so
+            # that frame 0 matches the debug output (zoomed + centered).
+            fill_ratio = kwargs.pop('fill_ratio', 0.8)
+            framing_info = self.compute_original_view_framing(
+                original_focal_length, fill_ratio
+            )
+            framed_fl = framing_info['framed_focal_length']
+            cx_new, cy_new = framing_info['framed_principal_point']
+
+            # Derive orbit start position from mesh geometry
             framing_bounds = self.scene.get_framing_bounds(preset=framing)
             target = (framing_bounds[0] + framing_bounds[1]) / 2.0
 
             orbit_params = compute_original_camera_orbit_params(target)
-            radius = orbit_params['radius']
             start_azimuth_deg = orbit_params['start_azimuth_deg']
-            # Use derived elevation for circular; for sinusoidal/helical
-            # the elevation varies per-frame so start_azimuth is the key param.
             derived_elevation_deg = orbit_params['elevation_deg']
 
-            # All cameras share the original focal length
-            focal = original_focal_length
+            # Compute orbit radius using the framed focal length so
+            # the subject fills the viewport consistently across all frames
+            radius = compute_auto_orbit_radius(
+                bounds=framing_bounds,
+                render_size=self.render_size,
+                focal_length=framed_fl,
+                fill_ratio=fill_ratio
+            )
+
+            # Orbit cameras use the framed focal length with centered
+            # principal point (look_at handles centering for orbit frames)
             camera_template = Camera(
-                focal_length=(focal, focal),
+                focal_length=(framed_fl, framed_fl),
                 image_size=self.render_size
             )
 
-            # Build the exact original camera for frame 0 pinning
+            # Frame 0 pin: framed focal length AND shifted principal point
+            # so it matches the auto-framed original view exactly
             pin_camera = Camera(
-                focal_length=(focal, focal),
+                focal_length=(framed_fl, framed_fl),
                 image_size=self.render_size,
+                principal_point=(cx_new, cy_new),
                 position=np.zeros(3, dtype=np.float32),
                 rotation=np.eye(3, dtype=np.float32)
             )
@@ -300,13 +317,15 @@ class OrbitPipeline:
                 'n_frames': n_frames,
                 'radius': radius,
                 'original_focal_length': original_focal_length,
+                'framed_focal_length': framed_fl,
                 'start_azimuth_deg': start_azimuth_deg,
                 'derived_elevation_deg': derived_elevation_deg,
+                'framing_info': framing_info,
                 **kwargs
             }
 
-            # Store the pipeline focal length as the original
-            self.focal_length = focal
+            # Store the pipeline focal length as the framed value
+            self.focal_length = framed_fl
 
             return self
 
