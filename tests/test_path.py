@@ -1,5 +1,5 @@
 """
-Tests for orbit path generation and original-camera pinning.
+Tests for orbit path generation, original-camera orbit, and warp homography.
 """
 
 import numpy as np
@@ -8,6 +8,7 @@ import pytest
 from body2colmap import coordinates
 from body2colmap.camera import Camera
 from body2colmap.path import OrbitPath, compute_original_camera_orbit_params
+from body2colmap.utils import compute_warp_to_camera
 
 
 class TestCartesianToSpherical:
@@ -262,26 +263,18 @@ class TestOrbitPathCircular:
 
 
 class TestEndToEndOriginalCameraOrbit:
-    """Integration test: compute params + create orbit with pin."""
+    """Integration test: compute params + create orbit without pin."""
 
-    def test_frame0_matches_original_camera(self):
-        """Full workflow: params -> orbit -> frame 0 is exact original camera."""
+    def test_frame0_at_origin_via_geometric_radius(self):
+        """Geometric radius places frame 0 at the origin via spherical roundtrip."""
         # Simulate SAM-3D-Body: mesh centered at [0.02, -0.15, -1.8]
         target = np.array([0.02, -0.15, -1.8], dtype=np.float32)
         original_fl = 600.0
 
-        # Step 1: compute orbit params
+        # Step 1: compute orbit params (geometric radius + start angles)
         params = compute_original_camera_orbit_params(target)
 
-        # Step 2: build pin camera
-        pin = Camera(
-            focal_length=(original_fl, original_fl),
-            image_size=(512, 512),
-            position=np.zeros(3, dtype=np.float32),
-            rotation=np.eye(3, dtype=np.float32)
-        )
-
-        # Step 3: create orbit with pin
+        # Step 2: create orbit with geometric radius (no pin)
         template = Camera(
             focal_length=(original_fl, original_fl),
             image_size=(512, 512)
@@ -289,7 +282,6 @@ class TestEndToEndOriginalCameraOrbit:
         orbit = OrbitPath(
             target=params['target'],
             radius=params['radius'],
-            pin_first_camera=pin
         )
         cameras = orbit.circular(
             n_frames=30,
@@ -299,10 +291,12 @@ class TestEndToEndOriginalCameraOrbit:
             camera_template=template
         )
 
-        # Frame 0 is the exact original camera
-        assert np.allclose(cameras[0].position, [0, 0, 0])
-        assert np.allclose(cameras[0].rotation, np.eye(3))
-        assert cameras[0].fx == original_fl
+        # Frame 0 is at the origin (spherical roundtrip)
+        assert np.allclose(cameras[0].position, [0, 0, 0], atol=1e-4)
+
+        # Frame 0 has near-identity rotation (look_at from origin to
+        # nearby-on-axis target), NOT exact identity
+        assert np.allclose(cameras[0].rotation, np.eye(3), atol=0.1)
 
         # Frame 1 is NOT at origin (it's the next orbit position)
         assert not np.allclose(cameras[1].position, [0, 0, 0])
@@ -311,7 +305,126 @@ class TestEndToEndOriginalCameraOrbit:
         for cam in cameras:
             assert cam.fx == original_fl
 
-        # All non-pinned frames are at the correct radius
-        for cam in cameras[1:]:
+        # ALL frames are at the correct radius (no special-casing)
+        for cam in cameras:
             dist = np.linalg.norm(cam.position - target)
             assert np.isclose(dist, params['radius'], atol=1e-4)
+
+    def test_rotation_smooth_between_frame0_and_frame1(self):
+        """Rotation should change smoothly (no discontinuity) across all frames."""
+        target = np.array([0.02, -0.15, -1.8], dtype=np.float32)
+        params = compute_original_camera_orbit_params(target)
+
+        template = Camera(
+            focal_length=(600.0, 600.0),
+            image_size=(512, 512)
+        )
+        orbit = OrbitPath(target=params['target'], radius=params['radius'])
+        cameras = orbit.circular(
+            n_frames=60,
+            elevation_deg=params['elevation_deg'],
+            start_azimuth_deg=params['start_azimuth_deg'],
+            overlap=0,
+            camera_template=template
+        )
+
+        # Compute angular difference between consecutive frames
+        # using Frobenius norm of rotation difference
+        max_delta = 0.0
+        for i in range(len(cameras) - 1):
+            R_diff = cameras[i + 1].rotation - cameras[i].rotation
+            delta = np.linalg.norm(R_diff, 'fro')
+            max_delta = max(max_delta, delta)
+
+        # All consecutive rotation differences should be similar
+        # (no single jump much larger than the average)
+        avg_delta = 0.0
+        for i in range(len(cameras) - 1):
+            R_diff = cameras[i + 1].rotation - cameras[i].rotation
+            avg_delta += np.linalg.norm(R_diff, 'fro')
+        avg_delta /= (len(cameras) - 1)
+
+        # Max should be within 2x of average (no outlier jumps)
+        assert max_delta < 2.0 * avg_delta
+
+
+class TestComputeWarpToCamera:
+    """Test homography computation for original image warping."""
+
+    def test_identity_camera_gives_scale_only(self):
+        """Identity rotation camera → homography is pure scale + translate."""
+        cam = Camera(
+            focal_length=(1200.0, 1200.0),
+            image_size=(512, 512),
+            position=np.zeros(3, dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32)
+        )
+        H = compute_warp_to_camera(
+            original_focal_length=600.0,
+            original_image_size=(512, 512),
+            target_camera=cam,
+        )
+        # For identity rotation, H should be an affine-like matrix:
+        # [[s, 0, tx], [0, s, ty], [0, 0, 1]]
+        assert np.isclose(H[2, 0], 0.0, atol=1e-10)
+        assert np.isclose(H[2, 1], 0.0, atol=1e-10)
+        assert np.isclose(H[2, 2], 1.0, atol=1e-10)
+        # Scale should be 1200/600 = 2.0
+        assert np.isclose(H[0, 0], 2.0, atol=1e-5)
+        assert np.isclose(H[1, 1], 2.0, atol=1e-5)
+
+    def test_look_at_camera_maps_mesh_center_correctly(self):
+        """Homography should map the mesh center projection to image center."""
+        target = np.array([0.02, -0.15, -1.8], dtype=np.float32)
+        original_fl = 600.0
+        framed_fl = 1086.0
+
+        # Create a look_at camera at origin
+        cam = Camera(
+            focal_length=(framed_fl, framed_fl),
+            image_size=(720, 1280),
+            position=np.zeros(3, dtype=np.float32),
+        )
+        cam.look_at(target)
+
+        H = compute_warp_to_camera(
+            original_focal_length=original_fl,
+            original_image_size=(720, 1280),
+            target_camera=cam,
+        )
+
+        # Project mesh center through original camera (identity, original FL)
+        # OpenCV projection: u = fx * x/(-z) + cx, v = fy * (-y)/(-z) + cy
+        cx_orig = 720 / 2.0
+        cy_orig = 1280 / 2.0
+        u_orig = original_fl * target[0] / (-target[2]) + cx_orig
+        v_orig = original_fl * (-target[1]) / (-target[2]) + cy_orig
+
+        # Apply homography to this point
+        p_orig = np.array([u_orig, v_orig, 1.0])
+        p_warped = H @ p_orig
+        p_warped = p_warped[:2] / p_warped[2]
+
+        # Project mesh center through look_at camera
+        points_2d = cam.project(target.reshape(1, 3))
+        u_cam, v_cam = points_2d[0]
+
+        # The warped point should match the camera projection
+        assert np.isclose(p_warped[0], u_cam, atol=1.0)
+        assert np.isclose(p_warped[1], v_cam, atol=1.0)
+
+    def test_homography_is_invertible(self):
+        """Homography should be invertible (non-singular)."""
+        cam = Camera(
+            focal_length=(1000.0, 1000.0),
+            image_size=(512, 512),
+            position=np.zeros(3, dtype=np.float32),
+        )
+        cam.look_at(np.array([0.1, -0.2, -2.0]))
+
+        H = compute_warp_to_camera(
+            original_focal_length=600.0,
+            original_image_size=(512, 512),
+            target_camera=cam,
+        )
+        assert np.linalg.det(H) != 0.0

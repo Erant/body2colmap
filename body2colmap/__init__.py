@@ -28,6 +28,7 @@ from .utils import (
     compute_auto_orbit_radius,
     compute_default_focal_length,
     compute_original_view_framing,
+    compute_warp_to_camera,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "compute_default_focal_length",
     "compute_original_camera_orbit_params",
     "compute_original_view_framing",
+    "compute_warp_to_camera",
 ]

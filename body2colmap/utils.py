@@ -8,7 +8,7 @@ This module provides helper functions used across the library:
 """
 
 import numpy as np
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 from numpy.typing import NDArray
 
 
@@ -86,6 +86,66 @@ def compute_auto_orbit_radius(
 
     # Use the larger radius to ensure scene fits in both dimensions
     return max(radius_h, radius_v)
+
+
+def compute_warp_to_camera(
+    original_focal_length: float,
+    original_image_size: Tuple[int, int],
+    target_camera: "Camera",
+) -> NDArray[np.float64]:
+    """
+    Compute 3x3 homography that warps the original image to align with a
+    target camera's view.
+
+    Both cameras are at the origin.  The original camera has identity
+    rotation and the given focal length with centered principal point.
+    The target camera may have a different focal length, principal point,
+    and/or a non-identity rotation (e.g. from look_at).
+
+    For pure zoom + shift (identity rotation target), this reduces to an
+    affine transform.  For a rotated target (e.g. orbit frame 0 with
+    look_at), the homography accounts for the perspective change.
+
+    Use with ``cv2.warpPerspective(image, H, (w, h))``.
+
+    Args:
+        original_focal_length: Focal length of the original image.
+        original_image_size: (width, height) of the original image.
+        target_camera: The camera whose rendered view the warped image
+            should match.  Must be at the origin.
+
+    Returns:
+        3x3 homography matrix (float64).
+    """
+    w_orig, h_orig = original_image_size
+
+    # Original camera intrinsics (identity rotation, centered PP)
+    K_orig = np.array([
+        [original_focal_length, 0.0, w_orig / 2.0],
+        [0.0, original_focal_length, h_orig / 2.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+    # Target camera intrinsics
+    K_target = np.array([
+        [target_camera.fx, 0.0, target_camera.cx],
+        [0.0, target_camera.fy, target_camera.cy],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+    # Rotation from original camera → target camera.
+    # Both are c2w rotations:  R_orig = I,  R_target = R_look_at.
+    # The relative w2c rotation is  R_target^T @ R_orig = R_target^T.
+    #
+    # In the projection pipeline (camera.py project()), the OpenGL→OpenCV
+    # flip [1, -1, -1] is applied before projection.  To get the correct
+    # homography we must sandwich the rotation between these flips.
+    R_c2w = np.array(target_camera.rotation, dtype=np.float64)
+    flip = np.diag([1.0, -1.0, -1.0])
+    R_cv = flip @ R_c2w.T @ flip
+
+    H = K_target @ R_cv @ np.linalg.inv(K_orig)
+    return H
 
 
 def compute_original_view_framing(

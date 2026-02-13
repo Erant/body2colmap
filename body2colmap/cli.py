@@ -97,7 +97,9 @@ def main(argv: Optional[list] = None) -> int:
             print(f"  Loaded: {pipeline.scene}")
 
         # --- Debug: render from original SAM-3D-Body viewpoint ---
-        if args.debug_original_view:
+        # When --use-original-camera is also active, skip the standalone debug
+        # path; the compositing will happen on orbit frame 0 instead.
+        if args.debug_original_view and not config.path.use_original_camera:
             if is_splat:
                 raise ValueError("--debug-original-view is only supported for .npz input")
 
@@ -454,6 +456,57 @@ def main(argv: Optional[list] = None) -> int:
             )
             if args.verbose:
                 print(f"  {mode} images ({len(saved_paths)}) → {config.export.output_dir}")
+
+        # --- Debug: composite frame 0 with warped original image ---
+        if (args.debug_original_view
+                and config.path.use_original_camera
+                and args.original_image is not None
+                and pipeline.orbit_params is not None):
+            import cv2
+
+            if args.verbose:
+                print("\n[DEBUG] Compositing orbit frame 0 with warped original image...")
+
+            orig_img = cv2.imread(args.original_image, cv2.IMREAD_COLOR)
+            if orig_img is None:
+                raise FileNotFoundError(f"Could not read image: {args.original_image}")
+
+            frame0_camera = pipeline.orbit_params['frame0_camera']
+
+            # Background color for padding
+            bg_r, bg_g, bg_b = config.render.bg_color
+            border_bgr = (int(bg_b * 255), int(bg_g * 255), int(bg_r * 255))
+
+            warped = pipeline.renderer.warp_original_image(
+                orig_img,
+                camera=frame0_camera,
+                original_focal_length=pipeline.orbit_params['original_focal_length'],
+                border_color=border_bgr,
+            )
+
+            output_dir = Path(config.export.output_dir)
+
+            warped_path = output_dir / "frame0_warped.png"
+            cv2.imwrite(str(warped_path), warped)
+            print(f"  Saved: {warped_path}")
+
+            # Composite each rendered mode's frame 0 on top of warped image
+            warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+            for mode, images in rendered.items():
+                if not images:
+                    continue
+                frame0_rgba = images[0]
+                alpha = frame0_rgba[:, :, 3:4].astype(np.float32) / 255.0
+                render_rgb = frame0_rgba[:, :, :3].astype(np.float32)
+                base_rgb = warped_rgb.astype(np.float32)
+                composite = (alpha * render_rgb + (1.0 - alpha) * base_rgb)
+                composite = np.clip(composite, 0, 255).astype(np.uint8)
+
+                safe_mode = mode.replace('+', '_')
+                overlay_path = output_dir / f"frame0_overlay_{safe_mode}.png"
+                overlay_bgr = cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(overlay_path), overlay_bgr)
+                print(f"  Saved: {overlay_path}")
 
         # Success
         if args.verbose:

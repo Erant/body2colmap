@@ -24,6 +24,7 @@ from .utils import (
     compute_default_focal_length,
     compute_auto_orbit_radius,
     compute_original_view_framing as _compute_original_view_framing,
+    compute_warp_to_camera,
 )
 
 
@@ -235,7 +236,6 @@ class OrbitPipeline:
                 original_focal_length, fill_ratio
             )
             framed_fl = framing_info['framed_focal_length']
-            cx_new, cy_new = framing_info['framed_principal_point']
 
             # Derive orbit start position from mesh geometry
             framing_bounds = self.scene.get_framing_bounds(preset=framing)
@@ -245,35 +245,24 @@ class OrbitPipeline:
             start_azimuth_deg = orbit_params['start_azimuth_deg']
             derived_elevation_deg = orbit_params['elevation_deg']
 
-            # Compute orbit radius using the framed focal length so
-            # the subject fills the viewport consistently across all frames
-            radius = compute_auto_orbit_radius(
-                bounds=framing_bounds,
-                render_size=self.render_size,
-                focal_length=framed_fl,
-                fill_ratio=fill_ratio
-            )
+            # Use the geometric distance (||target||) as orbit radius.
+            # This ensures frame 0 lands exactly at the origin (the
+            # original camera position) via the spherical-coordinate
+            # roundtrip, so there is NO position or rotation discontinuity
+            # between frame 0 and frame 1.  The framed_fl was computed to
+            # frame the subject at exactly this distance, so framing is
+            # correct by construction.
+            radius = float(orbit_params['radius'])
 
-            # Orbit cameras use the framed focal length with centered
-            # principal point (look_at handles centering for orbit frames)
+            # All frames (including frame 0) share the same template:
+            # framed focal length, centered principal point.  look_at()
+            # handles centering for every frame including frame 0.
             camera_template = Camera(
                 focal_length=(framed_fl, framed_fl),
                 image_size=self.render_size
             )
 
-            # Frame 0 pin: framed focal length AND shifted principal point
-            # so it matches the auto-framed original view exactly
-            pin_camera = Camera(
-                focal_length=(framed_fl, framed_fl),
-                image_size=self.render_size,
-                principal_point=(cx_new, cy_new),
-                position=np.zeros(3, dtype=np.float32),
-                rotation=np.eye(3, dtype=np.float32)
-            )
-
-            orbit = OrbitPath(
-                target=target, radius=radius, pin_first_camera=pin_camera
-            )
+            orbit = OrbitPath(target=target, radius=radius)
 
             # Inject start_azimuth_deg into kwargs for all patterns
             kwargs['start_azimuth_deg'] = start_azimuth_deg
@@ -316,6 +305,16 @@ class OrbitPipeline:
             else:
                 raise ValueError(f"Unknown orbit pattern: {pattern}")
 
+            # Compute the homography that warps the original image to
+            # align with frame 0's look_at view.  This accounts for both
+            # the focal-length zoom and the slight rotation correction.
+            frame0_camera = self.cameras[0]
+            warp_homography = compute_warp_to_camera(
+                original_focal_length=original_focal_length,
+                original_image_size=self.render_size,
+                target_camera=frame0_camera,
+            )
+
             self.orbit_params = {
                 'pattern': pattern,
                 'n_frames': n_frames,
@@ -325,6 +324,8 @@ class OrbitPipeline:
                 'start_azimuth_deg': start_azimuth_deg,
                 'derived_elevation_deg': derived_elevation_deg,
                 'framing_info': framing_info,
+                'frame0_camera': frame0_camera,
+                'warp_homography': warp_homography,
                 **kwargs
             }
 

@@ -734,17 +734,21 @@ class Renderer:
         """
         Warp an original image to align with renders from the given camera.
 
-        Computes and applies the affine transform that maps pixels from the
-        original image (taken at the SAM-3D-Body viewpoint) into the render
-        frame defined by ``camera``. The camera may have a scaled focal length
-        and/or shifted principal point (e.g. from auto-framing); the affine
-        accounts for both.
+        Computes and applies a transform that maps pixels from the original
+        image (taken at the SAM-3D-Body viewpoint) into the render frame
+        defined by ``camera``.  The camera must be at the origin but may
+        have a non-identity rotation (e.g. from look_at) as well as a
+        scaled focal length and/or shifted principal point.
+
+        When the camera has identity rotation, the transform is a pure
+        affine (scale + translate).  When the camera has a non-identity
+        rotation (e.g. orbit frame 0 using look_at), a 3x3 homography is
+        used instead to account for the perspective change.
 
         Args:
             image: Original image, shape (H_img, W_img, C) where C is 3 or 4.
-            camera: Camera used for rendering. Must be at the identity pose
-                (origin position, identity rotation) — i.e. the original
-                SAM-3D-Body viewpoint, optionally with adjusted intrinsics.
+            camera: Camera used for rendering.  Must be at the origin.
+                May have identity or non-identity rotation.
             original_focal_length: Focal length stored in the SAM-3D-Body
                 .npz, corresponding to the original image resolution.
             border_color: Fill color for pixels outside the original image.
@@ -755,37 +759,51 @@ class Renderer:
             of channels as the input.
 
         Raises:
-            ValueError: If the camera is not at the identity pose.
+            ValueError: If the camera is not at the origin.
         """
         import cv2
+        from .utils import compute_warp_to_camera
 
-        # --- Assert identity pose ---
-        if not (np.allclose(camera.position, 0.0, atol=1e-5)
-                and np.allclose(camera.rotation, np.eye(3), atol=1e-5)):
+        # --- Assert origin position ---
+        if not np.allclose(camera.position, 0.0, atol=1e-5):
             raise ValueError(
-                "warp_original_image requires a camera at the identity pose "
-                "(origin position, identity rotation).  Got position="
-                f"{camera.position.tolist()}, rotation=\n{camera.rotation.tolist()}"
+                "warp_original_image requires a camera at the origin. "
+                f"Got position={camera.position.tolist()}"
             )
 
         h_img, w_img = image.shape[:2]
 
-        # Scale: ratio of render focal length to original focal length
-        s = float(camera.fx / original_focal_length)
-
-        # Translation: map original-image center to camera principal point
-        tx = camera.cx - s * w_img / 2.0
-        ty = camera.cy - s * h_img / 2.0
-
-        M = np.array([[s, 0.0, tx],
-                       [0.0, s, ty]], dtype=np.float64)
-
-        warped = cv2.warpAffine(
-            image, M, (self.width, self.height),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=border_color,
+        is_identity_rotation = np.allclose(
+            camera.rotation, np.eye(3), atol=1e-5
         )
+
+        if is_identity_rotation:
+            # Pure affine: scale + translate (fast path, exact)
+            s = float(camera.fx / original_focal_length)
+            tx = camera.cx - s * w_img / 2.0
+            ty = camera.cy - s * h_img / 2.0
+            M = np.array([[s, 0.0, tx],
+                           [0.0, s, ty]], dtype=np.float64)
+            warped = cv2.warpAffine(
+                image, M, (self.width, self.height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=border_color,
+            )
+        else:
+            # Homography: accounts for rotation + intrinsic change
+            H = compute_warp_to_camera(
+                original_focal_length=original_focal_length,
+                original_image_size=(w_img, h_img),
+                target_camera=camera,
+            )
+            warped = cv2.warpPerspective(
+                image, H, (self.width, self.height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=border_color,
+            )
+
         return warped
 
     def __del__(self):
