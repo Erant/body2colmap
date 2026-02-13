@@ -190,9 +190,9 @@ class Renderer:
         pr_scene = self._create_pyrender_scene(mesh_color=mesh_color)
 
         # Add camera to scene
-        pr_camera = pyrender.PerspectiveCamera(
-            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
-            aspectRatio=self.width / self.height
+        pr_camera = pyrender.IntrinsicsCamera(
+            fx=camera.fx, fy=camera.fy,
+            cx=camera.cx, cy=camera.cy
         )
         camera_pose = camera.get_c2w()
         pr_scene.add(pr_camera, pose=camera_pose)
@@ -246,9 +246,9 @@ class Renderer:
         pr_scene = self._create_pyrender_scene()
 
         # Add camera
-        pr_camera = pyrender.PerspectiveCamera(
-            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
-            aspectRatio=self.width / self.height
+        pr_camera = pyrender.IntrinsicsCamera(
+            fx=camera.fx, fy=camera.fy,
+            cx=camera.cx, cy=camera.cy
         )
         pr_scene.add(pr_camera, pose=camera.get_c2w())
 
@@ -473,9 +473,9 @@ class Renderer:
             pr_scene.add(mesh)
 
         # Add camera
-        pr_camera = pyrender.PerspectiveCamera(
-            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
-            aspectRatio=self.width / self.height
+        pr_camera = pyrender.IntrinsicsCamera(
+            fx=camera.fx, fy=camera.fy,
+            cx=camera.cx, cy=camera.cy
         )
         pr_scene.add(pr_camera, pose=camera.get_c2w())
 
@@ -615,9 +615,9 @@ class Renderer:
             pr_scene.add(mesh)
 
         # Add camera and render
-        pr_camera = pyrender.PerspectiveCamera(
-            yfov=2 * np.arctan(self.height / (2 * camera.fy)),
-            aspectRatio=self.width / self.height
+        pr_camera = pyrender.IntrinsicsCamera(
+            fx=camera.fx, fy=camera.fy,
+            cx=camera.cx, cy=camera.cy
         )
         pr_scene.add(pr_camera, pose=camera.get_c2w())
 
