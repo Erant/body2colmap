@@ -190,6 +190,94 @@ def main(argv: Optional[list] = None) -> int:
                 cv2.imwrite(str(filepath), image_bgr)
                 print(f"  Saved: {filepath}")
 
+            # --- Warp original image if provided ---
+            original_image_path = args.original_image
+            if original_image_path is not None:
+                if not auto_frame:
+                    print("  WARNING: --original-image requires auto-framing; ignoring --no-auto-frame")
+                    # Re-render with auto-framing enabled
+                    rendered, framing_info = pipeline.render_original_view(
+                        original_focal_length=original_fl,
+                        modes=modes,
+                        auto_frame=True,
+                        fill_ratio=config.camera.fill_ratio,
+                        **render_kwargs
+                    )
+                    # Re-save the auto-framed renders
+                    for mode, image in rendered.items():
+                        safe_mode = mode.replace('+', '_')
+                        filename = f"original_view_{safe_mode}.png"
+                        filepath = output_dir / filename
+                        if image.shape[2] == 4:
+                            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGBA2BGRA)
+                        else:
+                            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(str(filepath), image_bgr)
+
+                orig_img = cv2.imread(original_image_path, cv2.IMREAD_COLOR)
+                if orig_img is None:
+                    raise FileNotFoundError(f"Could not read image: {original_image_path}")
+
+                h_img, w_img = orig_img.shape[:2]
+                w_r, h_r = config.render.resolution
+
+                if args.verbose:
+                    print(f"\n  Original image: {original_image_path} ({w_img}x{h_img})")
+                    if (w_img, h_img) != (w_r, h_r):
+                        print(f"  Image size differs from render size ({w_r}x{h_r}); "
+                              "adjusting affine to compensate.")
+
+                # Compute combined affine: original-image coords → auto-framed output coords
+                # The render projection uses principal point at (W_r/2, H_r/2).
+                # The original image has principal point at (W_img/2, H_img/2).
+                # The offset between them is (W_r - W_img)/2 in each axis.
+                # Combined: u_out = s * u_img + s*(W_r - W_img)/2 + tx
+                s = framing_info['scale_factor']
+                tx_render = framing_info['affine_matrix'][0][2]
+                ty_render = framing_info['affine_matrix'][1][2]
+                tx_img = s * (w_r - w_img) / 2.0 + tx_render
+                ty_img = s * (h_r - h_img) / 2.0 + ty_render
+                M_img = np.array([[s, 0.0, tx_img], [0.0, s, ty_img]], dtype=np.float64)
+
+                # Background color for padding (convert 0-1 float RGB → 0-255 int BGR)
+                bg_r, bg_g, bg_b = config.render.bg_color
+                border_bgr = (int(bg_b * 255), int(bg_g * 255), int(bg_r * 255))
+
+                warped = cv2.warpAffine(
+                    orig_img, M_img, (w_r, h_r),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=border_bgr
+                )
+
+                warped_path = output_dir / "original_view_warped.png"
+                cv2.imwrite(str(warped_path), warped)
+                print(f"  Saved: {warped_path}")
+
+                # Create overlay composites (render on top of warped original)
+                warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+                for mode, render_rgba in rendered.items():
+                    alpha = render_rgba[:, :, 3:4].astype(np.float32) / 255.0
+                    render_rgb = render_rgba[:, :, :3].astype(np.float32)
+                    base_rgb = warped_rgb.astype(np.float32)
+                    composite = (alpha * render_rgb + (1.0 - alpha) * base_rgb)
+                    composite = np.clip(composite, 0, 255).astype(np.uint8)
+
+                    safe_mode = mode.replace('+', '_')
+                    overlay_path = output_dir / f"original_view_overlay_{safe_mode}.png"
+                    overlay_bgr = cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(str(overlay_path), overlay_bgr)
+                    print(f"  Saved: {overlay_path}")
+
+                # Add image affine to framing info
+                framing_info['image_size'] = [w_img, h_img]
+                framing_info['image_affine_matrix'] = M_img.tolist()
+                inv_s = 1.0 / s
+                framing_info['image_inverse_affine_matrix'] = [
+                    [inv_s, 0.0, -tx_img / s],
+                    [0.0, inv_s, -ty_img / s]
+                ]
+
             # Save framing metadata
             if framing_info is not None:
                 import json
@@ -210,12 +298,6 @@ def main(argv: Optional[list] = None) -> int:
 
             if args.verbose:
                 print("\n[DEBUG] Done.")
-                if framing_info:
-                    print("  To transform the original image to match:")
-                    print("    import cv2, json, numpy as np")
-                    print(f"    info = json.load(open('{framing_path}'))")
-                    print("    M = np.array(info['affine_matrix'])")
-                    print(f"    warped = cv2.warpAffine(img, M, ({config.render.resolution[0]}, {config.render.resolution[1]}))")
 
             return 0
 

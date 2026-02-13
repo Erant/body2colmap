@@ -743,6 +743,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
              "without auto-framing. By default, the subject is zoomed and centered "
              "to fill the frame, and a framing.json with the affine transform is saved."
     )
+    debug_group.add_argument(
+        "--original-image",
+        metavar="PATH",
+        help="Path to the original input image (the SAM-3D-Body crop). "
+             "Used with --debug-original-view to produce a warped version of "
+             "the original that matches the auto-framed render, plus overlay "
+             "composites for visual alignment verification."
+    )
 
     # Other options
     parser.add_argument(
