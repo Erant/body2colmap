@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from .config import create_argument_parser, Config
 from .face import FaceLandmarkIngest
 from .pipeline import OrbitPipeline
