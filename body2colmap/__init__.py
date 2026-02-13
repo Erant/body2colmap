@@ -24,7 +24,11 @@ from .face import FaceLandmarkIngest
 from .scene import Scene
 from .pipeline import OrbitPipeline
 from .path import OrbitPath, compute_original_camera_orbit_params
-from .utils import compute_auto_orbit_radius, compute_default_focal_length
+from .utils import (
+    compute_auto_orbit_radius,
+    compute_default_focal_length,
+    compute_original_view_framing,
+)
 
 __all__ = [
     "Camera",
@@ -35,4 +39,5 @@ __all__ = [
     "compute_auto_orbit_radius",
     "compute_default_focal_length",
     "compute_original_camera_orbit_params",
+    "compute_original_view_framing",
 ]
