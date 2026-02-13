@@ -166,6 +166,8 @@ class Config:
         # Camera overrides
         if args.focal_length is not None:
             config.camera.focal_length = args.focal_length
+        if args.fill_ratio is not None:
+            config.camera.fill_ratio = args.fill_ratio
 
         # Path overrides
         if args.orbit_pattern:
@@ -610,6 +612,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--focal-length",
         type=float,
         help="Focal length in pixels (default: auto for ~47° FOV)"
+    )
+    camera_group.add_argument(
+        "--fill-ratio",
+        type=float,
+        metavar="RATIO",
+        help="How much of the viewport the scene should fill (0.0-1.0, default: 0.8)"
     )
     camera_group.add_argument(
         "--n-frames",
