@@ -16,6 +16,51 @@ from .camera import Camera
 from . import coordinates
 
 
+def compute_original_camera_orbit_params(
+    target: NDArray[np.float32],
+    camera_position: Optional[NDArray[np.float32]] = None
+) -> dict:
+    """
+    Compute orbit parameters that place the original camera at frame 0.
+
+    Given a look-at target (typically mesh bbox center) and the original
+    camera position (typically the origin for SAM-3D-Body), computes the
+    radius, start_azimuth_deg, and elevation_deg that would place
+    the first orbit frame at the original camera's location.
+
+    This is a standalone utility so it can be used outside of OrbitPipeline.
+
+    Args:
+        target: 3D point the orbit centers on (look-at target)
+        camera_position: Original camera position in world coords.
+                        Defaults to origin [0, 0, 0] (SAM-3D-Body convention).
+
+    Returns:
+        Dictionary with keys:
+            radius: Distance from target to camera
+            start_azimuth_deg: Azimuth angle of camera relative to target
+            elevation_deg: Elevation angle of camera relative to target
+            target: The target point (pass-through)
+            camera_position: The camera position used
+    """
+    if camera_position is None:
+        camera_position = np.zeros(3, dtype=np.float32)
+
+    # Vector from target to camera
+    offset = np.array(camera_position, dtype=np.float32) - np.array(target, dtype=np.float32)
+
+    # Convert to spherical coordinates
+    radius, azimuth_deg, elevation_deg = coordinates.cartesian_to_spherical(offset)
+
+    return {
+        'radius': radius,
+        'start_azimuth_deg': azimuth_deg,
+        'elevation_deg': elevation_deg,
+        'target': np.array(target, dtype=np.float32),
+        'camera_position': np.array(camera_position, dtype=np.float32),
+    }
+
+
 class OrbitPath:
     """
     Generate camera orbit paths around a target point.
@@ -33,7 +78,8 @@ class OrbitPath:
         self,
         target: NDArray[np.float32],
         radius: float,
-        up_vector: Optional[NDArray[np.float32]] = None
+        up_vector: Optional[NDArray[np.float32]] = None,
+        pin_first_camera: Optional[Camera] = None
     ):
         """
         Initialize OrbitPath.
@@ -43,10 +89,18 @@ class OrbitPath:
             radius: Distance from target to camera
             up_vector: World up direction for elevation reference
                       Default: [0, 1, 0] (Y-up)
+            pin_first_camera: If provided, replaces cameras[0] with this
+                exact camera after orbit generation. Use this to ensure
+                frame 0 is pixel-identical to the original camera (e.g.
+                identity pose at origin for SAM-3D-Body) rather than the
+                look_at approximation which may be off by a fraction of
+                a degree. Only affects frame 0; all other frames are
+                generated normally.
         """
         self.target = np.array(target, dtype=np.float32)
         self.radius = radius
         self.up_vector = up_vector if up_vector is not None else coordinates.WorldCoordinates.UP_AXIS
+        self.pin_first_camera = pin_first_camera
 
     def circular(
         self,
@@ -109,7 +163,7 @@ class OrbitPath:
         for i in range(overlap):
             cameras.append(cameras[i])
 
-        return cameras
+        return self._apply_pin_first_camera(cameras)
 
     def sinusoidal(
         self,
@@ -156,7 +210,7 @@ class OrbitPath:
 
             cameras.append(camera)
 
-        return cameras
+        return self._apply_pin_first_camera(cameras)
 
     def helical(
         self,
@@ -234,6 +288,12 @@ class OrbitPath:
 
             cameras.append(camera)
 
+        return self._apply_pin_first_camera(cameras)
+
+    def _apply_pin_first_camera(self, cameras: List[Camera]) -> List[Camera]:
+        """Replace cameras[0] with the pinned camera if one was provided."""
+        if self.pin_first_camera is not None and len(cameras) > 0:
+            cameras[0] = self.pin_first_camera
         return cameras
 
     def _create_camera(

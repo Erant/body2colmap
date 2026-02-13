@@ -250,6 +250,32 @@ def look_at_matrix(
     return c2w
 
 
+def cartesian_to_spherical(
+    position: NDArray[np.float32]
+) -> Tuple[float, float, float]:
+    """
+    Convert Cartesian coordinates to spherical (Y-up convention).
+
+    Inverse of spherical_to_cartesian().
+
+    Args:
+        position: Cartesian coordinates [x, y, z]
+
+    Returns:
+        Tuple of (radius, azimuth_deg, elevation_deg) where:
+            radius: Distance from origin
+            azimuth_deg: Angle in XZ plane from +Z axis (degrees)
+            elevation_deg: Angle above XZ plane (degrees)
+    """
+    x, y, z = float(position[0]), float(position[1]), float(position[2])
+    radius = float(np.sqrt(x * x + y * y + z * z))
+    if radius < 1e-10:
+        return 0.0, 0.0, 0.0
+    elevation_deg = float(np.degrees(np.arcsin(np.clip(y / radius, -1.0, 1.0))))
+    azimuth_deg = float(np.degrees(np.arctan2(x, z)))
+    return radius, azimuth_deg, elevation_deg
+
+
 def spherical_to_cartesian(
     radius: float,
     azimuth_deg: float,

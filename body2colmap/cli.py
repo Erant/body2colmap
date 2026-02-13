@@ -293,8 +293,23 @@ def main(argv: Optional[list] = None) -> int:
             if args.verbose:
                 print(f"  Converted to OpenPose Face 70 ({face_landmarks_70.shape})")
 
+        # Determine original_focal_length for use-original-camera mode
+        original_fl_for_orbit = None
+        if config.path.use_original_camera and not is_splat:
+            metadata = Scene.load_npz_metadata(config.input_file)
+            if 'focal_length' not in metadata:
+                raise ValueError(
+                    "--use-original-camera requires 'focal_length' in .npz file, "
+                    f"but it only contains: {metadata['_all_keys']}"
+                )
+            original_fl_for_orbit = float(metadata['focal_length'])
+            if args.verbose:
+                print(f"  Original-camera mode: focal_length={original_fl_for_orbit:.2f} px")
+                print(f"  Skipping auto-orient (mesh stays in original position)")
+
         # Auto-orient: rotate body to face camera, plus any user offset
-        if not is_splat:
+        # Skip when using original camera (mesh must stay in its original position)
+        if not is_splat and original_fl_for_orbit is None:
             pipeline.auto_orient(rotation_offset_deg=config.path.initial_rotation)
             if args.verbose:
                 print(f"  Auto-oriented body (offset: {config.path.initial_rotation}°)")
@@ -305,9 +320,10 @@ def main(argv: Optional[list] = None) -> int:
 
         # Build orbit kwargs based on pattern
         orbit_kwargs = {
-            'fill_ratio': config.camera.fill_ratio,
             'framing': config.path.framing
         }
+        if original_fl_for_orbit is None:
+            orbit_kwargs['fill_ratio'] = config.camera.fill_ratio
 
         if config.path.pattern == "circular":
             orbit_kwargs['elevation_deg'] = config.path.elevation_deg
@@ -324,6 +340,7 @@ def main(argv: Optional[list] = None) -> int:
             pattern=config.path.pattern,
             n_frames=config.path.n_frames,
             radius=config.path.radius,
+            original_focal_length=original_fl_for_orbit,
             **orbit_kwargs
         )
 

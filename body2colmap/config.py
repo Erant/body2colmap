@@ -40,6 +40,7 @@ class PathConfig:
     radius: Optional[float] = None  # None = auto-compute
     framing: str = "full"  # "full", "torso", "bust", "head"
     crop_to_viewport: bool = False  # Filter mesh to first camera's viewport
+    use_original_camera: bool = False  # Pin frame 0 to original SAM-3D-Body camera
 
     # Initial body orientation
     initial_rotation: float = 0.0  # Additional degrees offset after auto-facing
@@ -186,6 +187,8 @@ class Config:
             config.path.crop_to_viewport = True
         if args.initial_rotation is not None:
             config.path.initial_rotation = args.initial_rotation
+        if args.use_original_camera:
+            config.path.use_original_camera = True
 
         # Skeleton overrides
         if args.skeleton:
@@ -273,6 +276,7 @@ class Config:
             radius=path_data.get('radius'),
             framing=path_data.get('framing', 'full'),
             crop_to_viewport=path_data.get('crop_to_viewport', False),
+            use_original_camera=path_data.get('use_original_camera', False),
             initial_rotation=path_data.get('initial_rotation', 0.0),
             elevation_deg=path_data.get('elevation_deg', 0.0),
             sinusoidal_amplitude_deg=path_data.get('sinusoidal_amplitude_deg', 30.0),
@@ -349,6 +353,7 @@ class Config:
                 'radius': self.path.radius,
                 'framing': self.path.framing,
                 'crop_to_viewport': self.path.crop_to_viewport,
+                'use_original_camera': self.path.use_original_camera,
                 'initial_rotation': self.path.initial_rotation,
                 'elevation_deg': self.path.elevation_deg,
                 'sinusoidal_amplitude_deg': self.path.sinusoidal_amplitude_deg,
@@ -449,6 +454,13 @@ path:
   # The body is auto-rotated to face the camera at frame 0.
   # This value adds additional rotation (0 = face camera, 90 = right side, etc.)
   initial_rotation: 0.0
+
+  # Pin frame 0 to the original SAM-3D-Body camera.
+  # When true, the orbit radius, target, and start azimuth are derived from
+  # the mesh's position relative to the origin (the original camera). All
+  # cameras share the original focal length. Skips auto-orient.
+  # Requires 'focal_length' in the .npz file.
+  use_original_camera: false
 
   # Crop mesh to initial viewport
   # When true, removes vertices not visible in the first camera's viewport.
@@ -656,6 +668,15 @@ def create_argument_parser() -> argparse.ArgumentParser:
         metavar="DEGREES",
         help="Additional rotation (degrees) after auto-facing the body toward "
              "the camera. 0 = face camera (default), 90 = right side, etc."
+    )
+    path_group.add_argument(
+        "--use-original-camera",
+        action="store_true",
+        help="Pin frame 0 to the original SAM-3D-Body camera. The orbit "
+             "radius, target, and start azimuth are derived from the mesh's "
+             "position so the path smoothly continues from the original "
+             "viewpoint. All cameras share the original focal length. "
+             "Skips auto-orient. Requires 'focal_length' in the .npz file."
     )
 
     # Skeleton options

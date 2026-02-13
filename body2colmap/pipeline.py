@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 
 from .scene import Scene
 from .camera import Camera
-from .path import OrbitPath
+from .path import OrbitPath, compute_original_camera_orbit_params
 from .renderer import Renderer
 from .exporter import ColmapExporter, ImageExporter
 from .utils import compute_default_focal_length, compute_auto_orbit_radius
@@ -193,6 +193,7 @@ class OrbitPipeline:
         n_frames: int = 120,
         radius: Optional[float] = None,
         framing: str = "full",
+        original_focal_length: Optional[float] = None,
         **kwargs
     ) -> "OrbitPipeline":
         """
@@ -206,6 +207,13 @@ class OrbitPipeline:
             framing: Body framing preset ("full", "torso", "bust", "head")
                     Non-full presets use skeleton joints to determine Y threshold
                     and filter mesh vertices for accurate framing bounds.
+            original_focal_length: When set, pins frame 0 to the original
+                SAM-3D-Body camera (identity pose at origin). The orbit
+                radius, target, and start azimuth are derived from the
+                mesh's position relative to the origin, so the orbit
+                smoothly continues from the original viewpoint.
+                All cameras (including frame 0) share this focal length.
+                The scene must NOT have been auto-oriented.
             **kwargs: Pattern-specific parameters:
                 - circular: elevation_deg
                 - sinusoidal: amplitude_deg, n_cycles
@@ -214,6 +222,95 @@ class OrbitPipeline:
         Returns:
             self (for method chaining)
         """
+        if original_focal_length is not None:
+            # --- Original-camera mode ---
+            # Derive orbit geometry from mesh position relative to origin.
+            framing_bounds = self.scene.get_framing_bounds(preset=framing)
+            target = (framing_bounds[0] + framing_bounds[1]) / 2.0
+
+            orbit_params = compute_original_camera_orbit_params(target)
+            radius = orbit_params['radius']
+            start_azimuth_deg = orbit_params['start_azimuth_deg']
+            # Use derived elevation for circular; for sinusoidal/helical
+            # the elevation varies per-frame so start_azimuth is the key param.
+            derived_elevation_deg = orbit_params['elevation_deg']
+
+            # All cameras share the original focal length
+            focal = original_focal_length
+            camera_template = Camera(
+                focal_length=(focal, focal),
+                image_size=self.render_size
+            )
+
+            # Build the exact original camera for frame 0 pinning
+            pin_camera = Camera(
+                focal_length=(focal, focal),
+                image_size=self.render_size,
+                position=np.zeros(3, dtype=np.float32),
+                rotation=np.eye(3, dtype=np.float32)
+            )
+
+            orbit = OrbitPath(
+                target=target, radius=radius, pin_first_camera=pin_camera
+            )
+
+            # Inject start_azimuth_deg into kwargs for all patterns
+            kwargs['start_azimuth_deg'] = start_azimuth_deg
+
+            if pattern == "circular":
+                # Default to the derived elevation so frame 1 is near frame 0
+                if 'elevation_deg' not in kwargs:
+                    kwargs['elevation_deg'] = derived_elevation_deg
+                elevation_deg = kwargs.pop('elevation_deg')
+                self.cameras = orbit.circular(
+                    n_frames=n_frames,
+                    elevation_deg=elevation_deg,
+                    camera_template=camera_template,
+                    **kwargs
+                )
+            elif pattern == "sinusoidal":
+                amplitude_deg = kwargs.pop('amplitude_deg', 30.0)
+                n_cycles = kwargs.pop('n_cycles', 2)
+                self.cameras = orbit.sinusoidal(
+                    n_frames=n_frames,
+                    amplitude_deg=amplitude_deg,
+                    n_cycles=n_cycles,
+                    camera_template=camera_template,
+                    **kwargs
+                )
+            elif pattern == "helical":
+                n_loops = kwargs.pop('n_loops', 3)
+                amplitude_deg = kwargs.pop('amplitude_deg', 30.0)
+                lead_in_deg = kwargs.pop('lead_in_deg', 45.0)
+                lead_out_deg = kwargs.pop('lead_out_deg', 45.0)
+                self.cameras = orbit.helical(
+                    n_frames=n_frames,
+                    n_loops=n_loops,
+                    amplitude_deg=amplitude_deg,
+                    lead_in_deg=lead_in_deg,
+                    lead_out_deg=lead_out_deg,
+                    camera_template=camera_template,
+                    **kwargs
+                )
+            else:
+                raise ValueError(f"Unknown orbit pattern: {pattern}")
+
+            self.orbit_params = {
+                'pattern': pattern,
+                'n_frames': n_frames,
+                'radius': radius,
+                'original_focal_length': original_focal_length,
+                'start_azimuth_deg': start_azimuth_deg,
+                'derived_elevation_deg': derived_elevation_deg,
+                **kwargs
+            }
+
+            # Store the pipeline focal length as the original
+            self.focal_length = focal
+
+            return self
+
+        # --- Standard orbit mode ---
         # Get framing bounds based on preset
         # For partial body presets, this filters mesh vertices by Y coordinate
         framing_bounds = self.scene.get_framing_bounds(preset=framing)
