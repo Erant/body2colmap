@@ -165,7 +165,7 @@ def main(argv: Optional[list] = None) -> int:
                 **render_kwargs
             )
 
-            if framing_info and args.verbose:
+            if auto_frame and args.verbose:
                 s = framing_info['scale_factor']
                 f_new = framing_info['framed_focal_length']
                 cx, cy = framing_info['framed_principal_point']
@@ -229,27 +229,15 @@ def main(argv: Optional[list] = None) -> int:
                         print(f"  Image size differs from render size ({w_r}x{h_r}); "
                               "adjusting affine to compensate.")
 
-                # Compute combined affine: original-image coords → auto-framed output coords
-                # The render projection uses principal point at (W_r/2, H_r/2).
-                # The original image has principal point at (W_img/2, H_img/2).
-                # The offset between them is (W_r - W_img)/2 in each axis.
-                # Combined: u_out = s * u_img + s*(W_r - W_img)/2 + tx
-                s = framing_info['scale_factor']
-                tx_render = framing_info['affine_matrix'][0][2]
-                ty_render = framing_info['affine_matrix'][1][2]
-                tx_img = s * (w_r - w_img) / 2.0 + tx_render
-                ty_img = s * (h_r - h_img) / 2.0 + ty_render
-                M_img = np.array([[s, 0.0, tx_img], [0.0, s, ty_img]], dtype=np.float64)
-
                 # Background color for padding (convert 0-1 float RGB → 0-255 int BGR)
                 bg_r, bg_g, bg_b = config.render.bg_color
                 border_bgr = (int(bg_b * 255), int(bg_g * 255), int(bg_r * 255))
 
-                warped = cv2.warpAffine(
-                    orig_img, M_img, (w_r, h_r),
-                    flags=cv2.INTER_LINEAR,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=border_bgr
+                warped = pipeline.renderer.warp_original_image(
+                    orig_img,
+                    camera=framing_info['camera'],
+                    original_focal_length=original_fl,
+                    border_color=border_bgr,
                 )
 
                 warped_path = output_dir / "original_view_warped.png"
@@ -271,22 +259,15 @@ def main(argv: Optional[list] = None) -> int:
                     cv2.imwrite(str(overlay_path), overlay_bgr)
                     print(f"  Saved: {overlay_path}")
 
-                # Add image affine to framing info
                 framing_info['image_size'] = [w_img, h_img]
-                framing_info['image_affine_matrix'] = M_img.tolist()
-                inv_s = 1.0 / s
-                framing_info['image_inverse_affine_matrix'] = [
-                    [inv_s, 0.0, -tx_img / s],
-                    [0.0, inv_s, -ty_img / s]
-                ]
 
-            # Save framing metadata
-            if framing_info is not None:
-                import json
-                framing_path = output_dir / "original_view_framing.json"
-                with open(framing_path, 'w') as f:
-                    json.dump(framing_info, f, indent=2)
-                print(f"  Saved: {framing_path}")
+            # Save framing metadata (exclude non-serializable camera object)
+            import json
+            serializable = {k: v for k, v in framing_info.items() if k != 'camera'}
+            framing_path = output_dir / "original_view_framing.json"
+            with open(framing_path, 'w') as f:
+                json.dump(serializable, f, indent=2)
+            print(f"  Saved: {framing_path}")
 
             # Save 2D keypoints if available
             if 'pred_keypoints_2d' in metadata:

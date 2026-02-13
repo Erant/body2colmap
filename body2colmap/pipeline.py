@@ -147,21 +147,15 @@ class OrbitPipeline:
         except ImportError:
             return False
 
-    def _get_renderer(self):
-        """
-        Get or create appropriate renderer for scene type.
-
-        Returns mesh Renderer for Scene, SplatRenderer for SplatScene.
-        """
-        if self._renderer is not None:
-            return self._renderer
-
-        if self._is_splat_scene():
-            from .splat_renderer import SplatRenderer
-            self._renderer = SplatRenderer(self.scene, self.render_size)
-        else:
-            self._renderer = Renderer(self.scene, self.render_size)
-
+    @property
+    def renderer(self):
+        """Get or create the renderer for this pipeline's scene type."""
+        if self._renderer is None:
+            if self._is_splat_scene():
+                from .splat_renderer import SplatRenderer
+                self._renderer = SplatRenderer(self.scene, self.render_size)
+            else:
+                self._renderer = Renderer(self.scene, self.render_size)
         return self._renderer
 
     def auto_orient(self, rotation_offset_deg: float = 0.0) -> None:
@@ -321,7 +315,7 @@ class OrbitPipeline:
             raise RuntimeError("Cameras not set. Call set_orbit_params() first.")
 
         # Get appropriate renderer for scene type
-        renderer = self._get_renderer()
+        renderer = self.renderer
         is_splat = self._is_splat_scene()
 
         results = {}
@@ -402,7 +396,7 @@ class OrbitPipeline:
             raise ValueError("Composite rendering not supported for SplatScene")
 
         # Create renderer if needed (mesh renderer for composites)
-        renderer = self._get_renderer()
+        renderer = self.renderer
 
         images = []
         for camera in self.cameras:
@@ -538,10 +532,9 @@ class OrbitPipeline:
         Returns:
             Tuple of (rendered_images, framing_info):
                 rendered_images: Dict mapping mode name to single rendered image
-                framing_info: Dict with affine transform metadata, or None
+                framing_info: Dict with framing metadata including the Camera
+                    object used for rendering (key ``'camera'``).
         """
-        framing_info = None
-
         if auto_frame:
             framing_info = self.compute_original_view_framing(
                 original_focal_length, fill_ratio
@@ -549,9 +542,19 @@ class OrbitPipeline:
             fl = framing_info['framed_focal_length']
             cx, cy = framing_info['framed_principal_point']
         else:
+            w, h = self.render_size
             fl = original_focal_length
-            cx = self.render_size[0] / 2.0
-            cy = self.render_size[1] / 2.0
+            cx = w / 2.0
+            cy = h / 2.0
+            framing_info = {
+                'scale_factor': 1.0,
+                'framed_focal_length': float(fl),
+                'framed_principal_point': [float(cx), float(cy)],
+                'original_focal_length': float(original_focal_length),
+                'original_principal_point': [float(cx), float(cy)],
+                'affine_matrix': [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                'inverse_affine_matrix': [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            }
 
         # Camera at origin, identity rotation, chosen intrinsics
         camera = Camera(
@@ -561,8 +564,9 @@ class OrbitPipeline:
             position=np.array([0.0, 0.0, 0.0], dtype=np.float32),
             rotation=np.eye(3, dtype=np.float32)
         )
+        framing_info['camera'] = camera
 
-        renderer = self._get_renderer()
+        renderer = self.renderer
         results = {}
 
         for mode in modes:

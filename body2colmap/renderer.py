@@ -724,6 +724,70 @@ class Renderer:
 
         return base_image
 
+    def warp_original_image(
+        self,
+        image: NDArray[np.uint8],
+        camera: Camera,
+        original_focal_length: float,
+        border_color: Tuple[int, ...] = (255, 255, 255),
+    ) -> NDArray[np.uint8]:
+        """
+        Warp an original image to align with renders from the given camera.
+
+        Computes and applies the affine transform that maps pixels from the
+        original image (taken at the SAM-3D-Body viewpoint) into the render
+        frame defined by ``camera``. The camera may have a scaled focal length
+        and/or shifted principal point (e.g. from auto-framing); the affine
+        accounts for both.
+
+        Args:
+            image: Original image, shape (H_img, W_img, C) where C is 3 or 4.
+            camera: Camera used for rendering. Must be at the identity pose
+                (origin position, identity rotation) — i.e. the original
+                SAM-3D-Body viewpoint, optionally with adjusted intrinsics.
+            original_focal_length: Focal length stored in the SAM-3D-Body
+                .npz, corresponding to the original image resolution.
+            border_color: Fill color for pixels outside the original image.
+                Length must match the channel count of ``image``.
+
+        Returns:
+            Warped image at ``(self.width, self.height)`` with the same number
+            of channels as the input.
+
+        Raises:
+            ValueError: If the camera is not at the identity pose.
+        """
+        import cv2
+
+        # --- Assert identity pose ---
+        if not (np.allclose(camera.position, 0.0, atol=1e-5)
+                and np.allclose(camera.rotation, np.eye(3), atol=1e-5)):
+            raise ValueError(
+                "warp_original_image requires a camera at the identity pose "
+                "(origin position, identity rotation).  Got position="
+                f"{camera.position.tolist()}, rotation=\n{camera.rotation.tolist()}"
+            )
+
+        h_img, w_img = image.shape[:2]
+
+        # Scale: ratio of render focal length to original focal length
+        s = float(camera.fx / original_focal_length)
+
+        # Translation: map original-image center to camera principal point
+        tx = camera.cx - s * w_img / 2.0
+        ty = camera.cy - s * h_img / 2.0
+
+        M = np.array([[s, 0.0, tx],
+                       [0.0, s, ty]], dtype=np.float64)
+
+        warped = cv2.warpAffine(
+            image, M, (self.width, self.height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border_color,
+        )
+        return warped
+
     def __del__(self):
         """Clean up renderer resources."""
         if self._renderer is not None:
