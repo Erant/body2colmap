@@ -268,10 +268,11 @@ class OrbitPipeline:
             kwargs['start_azimuth_deg'] = start_azimuth_deg
 
             if pattern == "circular":
-                # Default to the derived elevation so frame 1 is near frame 0
-                if 'elevation_deg' not in kwargs:
-                    kwargs['elevation_deg'] = derived_elevation_deg
-                elevation_deg = kwargs.pop('elevation_deg')
+                # In original-camera mode the elevation is geometrically
+                # determined — it's not a user-tunable parameter.  Always
+                # use the derived value so frame 0 lands at the origin.
+                kwargs.pop('elevation_deg', None)
+                elevation_deg = derived_elevation_deg
                 self.cameras = orbit.circular(
                     n_frames=n_frames,
                     elevation_deg=elevation_deg,

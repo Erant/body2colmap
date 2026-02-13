@@ -765,7 +765,9 @@ class Renderer:
         from .utils import compute_warp_to_camera
 
         # --- Assert origin position ---
-        if not np.allclose(camera.position, 0.0, atol=1e-5):
+        # Tolerance is generous (1e-3) because the orbit's spherical-coordinate
+        # roundtrip can introduce small floating-point drift.
+        if not np.allclose(camera.position, 0.0, atol=1e-3):
             raise ValueError(
                 "warp_original_image requires a camera at the origin. "
                 f"Got position={camera.position.tolist()}"
