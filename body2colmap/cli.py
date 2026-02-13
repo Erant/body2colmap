@@ -422,10 +422,21 @@ def main(argv: Optional[list] = None) -> int:
                         print(f"  Rendered {len(mode_images)} {mode_str} frames")
                 else:
                     # Single mode rendering
+                    render_kwargs = {
+                        'mesh_color': config.render.mesh_color,
+                        'bg_color': config.render.bg_color,
+                    }
+                    if mode_str == "skeleton":
+                        render_kwargs['joint_radius'] = config.skeleton.joint_radius
+                        render_kwargs['bone_radius'] = config.skeleton.bone_radius
+                        render_kwargs['target_format'] = config.skeleton.format
+                        if face_landmarks_70 is not None:
+                            render_kwargs['face_landmarks'] = face_landmarks_70
+                        if config.skeleton.face_mode:
+                            render_kwargs['face_mode'] = config.skeleton.face_mode
                     mode_rendered = pipeline.render_all(
                         modes=[mode_str],
-                        mesh_color=config.render.mesh_color,
-                        bg_color=config.render.bg_color
+                        **render_kwargs
                     )
                     rendered.update(mode_rendered)
 
