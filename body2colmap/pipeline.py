@@ -479,7 +479,8 @@ class OrbitPipeline:
                         joint_radius=render_kwargs.get('joint_radius', 0.015),
                         bone_radius=render_kwargs.get('bone_radius', 0.008),
                         face_mode=render_kwargs.get('face_mode'),
-                        face_landmarks=render_kwargs.get('face_landmarks')
+                        face_landmarks=render_kwargs.get('face_landmarks'),
+                        bg_color=render_kwargs.get('bg_color'),
                     )
                 else:
                     raise ValueError(f"Unknown render mode: {mode}")
@@ -663,7 +664,8 @@ class OrbitPipeline:
                     joint_radius=render_kwargs.get('joint_radius', 0.015),
                     bone_radius=render_kwargs.get('bone_radius', 0.008),
                     face_mode=render_kwargs.get('face_mode'),
-                    face_landmarks=render_kwargs.get('face_landmarks')
+                    face_landmarks=render_kwargs.get('face_landmarks'),
+                    bg_color=render_kwargs.get('bg_color'),
                 )
             else:
                 raise ValueError(f"Unknown render mode: {mode}")

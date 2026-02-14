@@ -303,6 +303,7 @@ class Renderer:
         face_mode: str = None,
         face_landmarks: Optional[NDArray[np.float32]] = None,
         face_max_angle: float = 90.0,
+        bg_color: Optional[Tuple[float, float, float]] = None,
     ) -> NDArray[np.uint8]:
         """
         Render 3D skeleton as spheres (joints) and cylinders (bones).
@@ -325,13 +326,17 @@ class Renderer:
                 canonical face model for Procrustes fitting.
             face_max_angle: Maximum angle (degrees) off the face normal at which
                 face landmarks are rendered. 90 = full frontal hemisphere.
+            bg_color: RGB color (0-1 range) for background. If None,
+                background remains transparent (alpha=0).
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8
 
         Note:
-            Skeleton does NOT contribute to alpha for masking purposes.
-            This is intentional - skeleton is overlay only.
+            When bg_color is None, skeleton does NOT contribute to alpha
+            for masking purposes. This is intentional - skeleton is
+            overlay only. When bg_color is set, background pixels are
+            filled with the specified color (alpha remains 0).
 
         Raises:
             ValueError: If scene has no skeleton data
@@ -498,6 +503,19 @@ class Renderer:
                 skel_color[:, :, 3] = np.maximum(
                     skel_color[:, :, 3], face_image[:, :, 3]
                 )
+
+        # Fill background with specified color (where alpha=0)
+        if bg_color is not None:
+            if not skel_color.flags.writeable:
+                skel_color = np.array(skel_color, copy=True)
+            bg_rgba = np.array([
+                int(bg_color[0] * 255),
+                int(bg_color[1] * 255),
+                int(bg_color[2] * 255),
+                0
+            ], dtype=np.uint8)
+            mask = skel_color[:, :, 3] == 0
+            skel_color[mask] = bg_rgba
 
         return skel_color
 
@@ -690,6 +708,7 @@ class Renderer:
                 face_mode=face_mode,
                 face_landmarks=custom_face_landmarks,
                 face_max_angle=face_max_angle,
+                bg_color=skel_opts.get("bg_color"),
             )
 
         # Overlay skeleton if requested
