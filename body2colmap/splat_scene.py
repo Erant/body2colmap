@@ -261,6 +261,74 @@ class SplatScene:
 
         return points, colors
 
+    def to_ply(self, filepath: str) -> None:
+        """
+        Write to PLY file in standard 3DGS format.
+
+        Produces a file compatible with from_ply() and standard 3DGS tools.
+        All values are written in their native spaces (log-scale, logit-opacity,
+        raw SH coefficients).
+
+        Args:
+            filepath: Path to output .ply file
+        """
+        try:
+            from plyfile import PlyData, PlyElement
+        except ImportError:
+            raise ImportError(
+                "plyfile is required for writing PLY files. "
+                "Install with: pip install plyfile"
+            )
+
+        n_gaussians = len(self.means)
+        n_sh_rest = self.sh_coeffs.shape[1] - 1  # Total coeffs minus DC
+
+        # Build structured dtype
+        props = [
+            ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+            ('scale_0', 'f4'), ('scale_1', 'f4'), ('scale_2', 'f4'),
+            ('rot_0', 'f4'), ('rot_1', 'f4'), ('rot_2', 'f4'), ('rot_3', 'f4'),
+            ('opacity', 'f4'),
+            ('f_dc_0', 'f4'), ('f_dc_1', 'f4'), ('f_dc_2', 'f4'),
+        ]
+        for i in range(n_sh_rest * 3):
+            props.append((f'f_rest_{i}', 'f4'))
+
+        vertex_data = np.empty(n_gaussians, dtype=props)
+
+        # Positions
+        vertex_data['x'] = self.means[:, 0]
+        vertex_data['y'] = self.means[:, 1]
+        vertex_data['z'] = self.means[:, 2]
+
+        # Scales (log-space)
+        vertex_data['scale_0'] = self.scales[:, 0]
+        vertex_data['scale_1'] = self.scales[:, 1]
+        vertex_data['scale_2'] = self.scales[:, 2]
+
+        # Rotations (quaternion wxyz)
+        vertex_data['rot_0'] = self.quats[:, 0]
+        vertex_data['rot_1'] = self.quats[:, 1]
+        vertex_data['rot_2'] = self.quats[:, 2]
+        vertex_data['rot_3'] = self.quats[:, 3]
+
+        # Opacity (logit-space)
+        vertex_data['opacity'] = self.opacities
+
+        # SH DC component
+        vertex_data['f_dc_0'] = self.sh_coeffs[:, 0, 0]
+        vertex_data['f_dc_1'] = self.sh_coeffs[:, 0, 1]
+        vertex_data['f_dc_2'] = self.sh_coeffs[:, 0, 2]
+
+        # SH rest coefficients (interleaved: all ch0, then all ch1, then all ch2)
+        for i in range(n_sh_rest):
+            vertex_data[f'f_rest_{i}'] = self.sh_coeffs[:, i + 1, 0]
+            vertex_data[f'f_rest_{i + n_sh_rest}'] = self.sh_coeffs[:, i + 1, 1]
+            vertex_data[f'f_rest_{i + 2 * n_sh_rest}'] = self.sh_coeffs[:, i + 1, 2]
+
+        element = PlyElement.describe(vertex_data, 'vertex')
+        PlyData([element]).write(filepath)
+
     def __repr__(self) -> str:
         """String representation for debugging."""
         return (
