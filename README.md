@@ -122,7 +122,9 @@ This ensures consistent starting orientation regardless of how the subject was p
 
 ### Original-Camera Orbit (`--use-original-camera`)
 
-When you have the original input image, `--use-original-camera` generates an orbit where **frame 0 matches the SAM-3D-Body camera viewpoint**. This is useful for diffusion-based pipelines where the input image serves as a conditioning frame.
+When you have the original input image, `--use-original-camera` generates an orbit where **one frame matches the SAM-3D-Body camera viewpoint**. This is useful for diffusion-based pipelines where the input image serves as a conditioning frame anchoring the generation to a known-good view.
+
+For circular orbits that frame is frame 0. For **helical** orbits the elevation ramp determines where in the sequence the original viewpoint can occur, so the index is solved for — read it from `orbit_params['anchor_frame_index']` rather than assuming 0 (the CLI names its debug output `frame{index}_warped.png` accordingly). Sinusoidal orbits are not anchored.
 
 ```bash
 # Original-camera orbit with the source image composited at frame 0
@@ -138,9 +140,12 @@ body2colmap --input estimation.npz --output-dir ./output \
 
 How it works:
 
-1. The orbit radius is derived from the geometric distance between the origin (SAM-3D-Body camera) and the mesh bbox center, so frame 0 lands exactly at the original camera position via a spherical-coordinate roundtrip
-2. All cameras (including frame 0) use `look_at()` with a centered principal point and an auto-framed focal length that zooms the subject to fill the viewport
-3. The original image is warped via a homography to align with frame 0's look-at view, accounting for both the focal-length zoom and the slight rotation correction
+1. The orbit radius is derived from the geometric distance between the origin (SAM-3D-Body camera) and the mesh bbox center, so the anchor frame lands exactly at the original camera position via a spherical-coordinate roundtrip
+2. All cameras use `look_at()` with a centered principal point and an auto-framed focal length that zooms the subject to fill the viewport
+3. For helical orbits, the start azimuth is solved so the anchor frame hits the original azimuth exactly, and a sub-degree uniform elevation offset is applied to the whole helix so it also hits the original elevation. The path stays a smooth helix with no discontinuity at the anchor
+4. The original image is warped via a homography to align with the anchor frame's look-at view, accounting for both the focal-length zoom and the slight rotation correction
+
+If the original camera sits outside the helix's elevation band (`±helical_amplitude_deg`), the run fails with an error telling you how far to raise the amplitude, rather than producing a degenerate path.
 
 **Important**: Do not use `--initial-rotation` / `auto_orient()` with `--use-original-camera`. The orbit geometry depends on the unrotated mesh position to place frame 0 at the origin.
 
@@ -155,15 +160,21 @@ pipeline = OrbitPipeline.from_npz_file("estimation.npz")
 
 # original_focal_length triggers original-camera orbit
 pipeline.set_orbit_params(
-    pattern="circular",
-    n_frames=60,
+    pattern="helical",
+    n_frames=81,
+    n_loops=2,
+    amplitude_deg=40.0,
     original_focal_length=500.0,  # from .npz file
     fill_ratio=0.8,
 )
 
+# Which rendered frame corresponds to the original camera
+k = pipeline.orbit_params['anchor_frame_index']
+
 # The orbit_params dict contains the warp homography for the input image
 H = pipeline.orbit_params['warp_homography']  # 3x3 numpy array
 # Use with: cv2.warpPerspective(original_image, H, (w, h))
+# The result aligns with rendered frame k, ready to inject as a conditioning frame
 
 images = pipeline.render_all(modes=["mesh"])
 pipeline.export_colmap("./output")

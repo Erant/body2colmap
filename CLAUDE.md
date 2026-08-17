@@ -246,7 +246,23 @@ where `R_cv = flip @ R_c2w^T @ flip` with `flip = diag(1, -1, -1)` to account fo
 This is used with `cv2.warpPerspective()` to align the original image with frame 0's rendered view.
 
 ### Key Design: Elevation Override
-In original-camera mode, the `elevation_deg` parameter for circular orbits is **not user-tunable** — it is geometrically determined by the mesh position. The pipeline forces the derived elevation to ensure frame 0 lands at the origin. This follows the same pattern as the "Configuration Override Issues" lesson below.
+In original-camera mode, the `elevation_deg` parameter for circular orbits is **not user-tunable** — it is geometrically determined by the mesh position. The pipeline forces the derived elevation to ensure frame 0 lands at the origin. The same applies to `start_azimuth_deg` for helical orbits (see below). This follows the same pattern as the "Configuration Override Issues" lesson below.
+
+### Helical Anchoring (2026-08)
+
+**Problem**: The frame-0 guarantee only works for circular orbits. A helix sweeps elevation monotonically, so the original camera's elevation dictates *where in the sequence* the anchor can occur — it is generally not frame 0. Previously `pattern: helical` + `use_original_camera` silently produced an orbit where frame 0 had the right azimuth but the wrong elevation, and `Renderer.warp_original_image()` would reject it (it asserts the camera is at the origin).
+
+**Solution**: `path.compute_helical_anchor_params()` solves for the frame that can land on the anchor, using three steps:
+
+1. **Elevation → frame index.** The elevation ramp (`path.helical_elevation_deg()`) is monotone piecewise-linear in progress `i / n_frames`. Invert it at the anchor's elevation, then round to the nearest frame `k`.
+2. **Azimuth → `start_azimuth_deg`.** Azimuth is a pure linear ramp, so `start_azimuth = azimuth_anchor - (k / n_frames) * total_deg` makes frame `k` hit the anchor azimuth exactly.
+3. **Residual → `elevation_offset_deg`.** Rounding in step 1 leaves a residual `δ`, applied to *every* frame. The path stays a perfect helix (its band shifts from `[-A, +A]` to `[-A+δ, +A+δ]`) while frame `k` lands exactly on the anchor. For the shipped `helical.yaml` (81 frames, 2 loops, A=40°, lead 30/90) the elevation step is ~1.15°/frame, so `|δ| ≤ ~0.58°`.
+
+**Key contract**: `pipeline.orbit_params['anchor_frame_index']` — always read it rather than assuming 0. It is 0 for circular (and for sinusoidal, which is *not* anchored) and solved for on helical. The matching camera is `orbit_params['anchor_camera']` and the tilt applied is `orbit_params['anchor_elevation_offset_deg']`.
+
+**Errors instead of degenerate paths**: the solver raises `ValueError` when the anchor's elevation is outside `±amplitude_deg` (fix: raise `helical_amplitude_deg`), when there is no ramp to solve on (`n_loops < 1` or `amplitude_deg <= 0`), or when the helix is sampled too coarsely to reach the anchor within `max_elevation_error_deg` (default 2°).
+
+**Shared ramp function**: `helical()` and the solver both call `helical_elevation_deg()` so the generator and its inverse cannot drift apart.
 
 ### Spherical Coordinate Convention
 Used by `coordinates.cartesian_to_spherical()` / `spherical_to_cartesian()`:

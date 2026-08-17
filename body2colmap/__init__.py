@@ -24,7 +24,12 @@ from .coordinates import cartesian_to_spherical, spherical_to_cartesian
 from .face import FaceLandmarkIngest
 from .scene import Scene
 from .pipeline import OrbitPipeline
-from .path import OrbitPath, compute_original_camera_orbit_params
+from .path import (
+    OrbitPath,
+    compute_helical_anchor_params,
+    compute_original_camera_orbit_params,
+    helical_elevation_deg,
+)
 from .utils import (
     compute_auto_orbit_radius,
     compute_default_focal_length,
@@ -41,8 +46,10 @@ __all__ = [
     "cartesian_to_spherical",
     "compute_auto_orbit_radius",
     "compute_default_focal_length",
+    "compute_helical_anchor_params",
     "compute_original_camera_orbit_params",
     "compute_original_view_framing",
     "compute_warp_to_camera",
+    "helical_elevation_deg",
     "spherical_to_cartesian",
 ]

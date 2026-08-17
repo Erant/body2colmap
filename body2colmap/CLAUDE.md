@@ -82,7 +82,17 @@ cli.py  (depends on: pipeline, config)
 - `OrbitPath` class:
   - `circular()`: Fixed elevation, rotating azimuth
   - `sinusoidal()`: Oscillating elevation
-  - `helical()`: Multiple loops with linear elevation change
+  - `helical()`: Multiple loops with linear elevation change, plus a uniform
+    `elevation_offset_deg` shift used by anchored orbits
+- Module-level helpers (usable outside `OrbitPipeline`):
+  - `helical_elevation_deg()`: The helix elevation ramp as a pure function of
+    fractional progress. Single source of truth shared by `helical()` and the
+    anchor solver — do NOT re-inline this logic.
+  - `compute_original_camera_orbit_params()`: Radius/azimuth/elevation that put
+    a circular orbit's frame 0 on a given camera (default: the origin)
+  - `compute_helical_anchor_params()`: Solves `start_azimuth_deg`,
+    `elevation_offset_deg` and `anchor_frame_index` so a helix passes through a
+    given camera. Raises `ValueError` rather than emitting a degenerate path.
 
 **Returns**: List[Camera] with positions and orientations set
 
@@ -119,6 +129,21 @@ cli.py  (depends on: pipeline, config)
   - Generate orbit path
   - Render frames
   - Export COLMAP and images
+
+**`orbit_params` contract** (populated by `set_orbit_params()`; the
+original-camera keys only appear when `original_focal_length` is set):
+- `anchor_frame_index`: Index of the frame sitting at the original camera.
+  0 for circular and sinusoidal, solved for on helical — **always read this
+  key, never assume 0.**
+- `anchor_camera`: The `Camera` at that index (was `frame0_camera` before
+  helical anchoring landed).
+- `anchor_elevation_offset_deg`: Uniform tilt applied to the helix to make the
+  anchor exact. 0.0 for non-helical patterns.
+- `warp_homography`: 3x3 matrix aligning the original image with the anchor
+  frame's view, for `cv2.warpPerspective()`.
+- Also: `pattern`, `n_frames`, `radius`, `original_focal_length`,
+  `framed_focal_length`, `start_azimuth_deg`, `derived_elevation_deg`,
+  `framing_info`.
 
 **Testing priority**: MEDIUM - integration tests cover this
 

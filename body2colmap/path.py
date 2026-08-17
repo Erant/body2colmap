@@ -61,6 +61,189 @@ def compute_original_camera_orbit_params(
     }
 
 
+def helical_elevation_deg(
+    progress: float,
+    amplitude_deg: float,
+    n_loops: int,
+    lead_in_deg: float,
+    lead_out_deg: float
+) -> float:
+    """
+    Elevation of a helical orbit at a given fractional progress.
+
+    Single source of truth for the helix elevation ramp, shared by
+    :meth:`OrbitPath.helical` and :func:`compute_helical_anchor_params`.
+
+    Args:
+        progress: Position in the sequence, 0.0 (first frame) to 1.0 (end)
+        amplitude_deg: Elevation range (ramp goes from -amplitude to +amplitude)
+        n_loops: Number of full 360 degree rotations
+        lead_in_deg: Degrees of rotation before the ramp starts
+        lead_out_deg: Degrees of rotation after the ramp ends
+
+    Returns:
+        Elevation angle in degrees (before any elevation offset is applied)
+    """
+    total_deg = lead_in_deg + (n_loops * 360.0) + lead_out_deg
+
+    if progress < (lead_in_deg / total_deg):
+        # Lead-in: stay at bottom
+        return -amplitude_deg
+    if progress > (1.0 - lead_out_deg / total_deg):
+        # Lead-out: stay at top
+        return amplitude_deg
+
+    # Main loops: linear elevation change
+    loop_progress = (progress - lead_in_deg / total_deg) / (
+        1.0 - (lead_in_deg + lead_out_deg) / total_deg
+    )
+    return -amplitude_deg + (2 * amplitude_deg * loop_progress)
+
+
+def compute_helical_anchor_params(
+    target: NDArray[np.float32],
+    camera_position: Optional[NDArray[np.float32]] = None,
+    *,
+    n_frames: int,
+    n_loops: int = 3,
+    amplitude_deg: float = 30.0,
+    lead_in_deg: float = 45.0,
+    lead_out_deg: float = 45.0,
+    max_elevation_error_deg: float = 2.0
+) -> dict:
+    """
+    Compute helical orbit parameters that make one frame land on a given camera.
+
+    Unlike a circular orbit — where the anchor can always be frame 0 because
+    elevation is constant — a helix sweeps elevation monotonically, so the
+    anchor's elevation dictates *where in the sequence* it can occur.
+
+    Two knobs make the helix pass through the anchor pose:
+
+    1. Inverting the elevation ramp at the anchor's elevation gives a
+       fractional progress, which rounds to the nearest frame index ``k``.
+    2. ``start_azimuth_deg`` is solved so frame ``k`` hits the anchor's
+       azimuth exactly.
+    3. The rounding in step 1 leaves a small elevation residual, returned as
+       ``elevation_offset_deg``.  Applying it to *every* frame keeps the path
+       a perfect helix (its band just shifts by that offset) while placing
+       frame ``k`` exactly on the anchor.
+
+    Use the returned ``radius``, ``start_azimuth_deg`` and
+    ``elevation_offset_deg`` with :meth:`OrbitPath.helical` to generate the
+    path; ``anchor_frame_index`` tells the caller which rendered frame
+    corresponds to the anchor camera.
+
+    Args:
+        target: 3D point the orbit centers on (look-at target)
+        camera_position: Anchor camera position in world coords.
+                        Defaults to origin [0, 0, 0] (SAM-3D-Body convention).
+        n_frames: Number of frames the helix will be sampled at
+        n_loops: Number of full 360 degree rotations
+        amplitude_deg: Elevation range (ramp goes from -amplitude to +amplitude)
+        lead_in_deg: Degrees of rotation before the ramp starts
+        lead_out_deg: Degrees of rotation after the ramp ends
+        max_elevation_error_deg: Largest elevation correction tolerated before
+                        raising, in degrees.  Guards against silently shifting
+                        the elevation band by a large amount.
+
+    Returns:
+        Dictionary with keys:
+            radius: Distance from target to anchor camera
+            anchor_frame_index: Index of the frame that lands on the anchor
+            start_azimuth_deg: Azimuth to start the helix at
+            elevation_offset_deg: Uniform elevation correction to apply
+            anchor_azimuth_deg: Anchor azimuth relative to target
+            anchor_elevation_deg: Anchor elevation relative to target
+            target: The target point (pass-through)
+            camera_position: The anchor camera position used
+
+    Raises:
+        ValueError: If the anchor coincides with the target, the helix has no
+            elevation ramp to solve on, the anchor lies outside the helix's
+            elevation band, or the helix is sampled too coarsely to reach the
+            anchor within ``max_elevation_error_deg``.
+    """
+    if camera_position is None:
+        camera_position = np.zeros(3, dtype=np.float32)
+
+    if n_frames < 1:
+        raise ValueError(f"n_frames must be at least 1, got {n_frames}")
+
+    # Vector from target to anchor camera
+    offset = np.array(camera_position, dtype=np.float32) - np.array(target, dtype=np.float32)
+    radius, anchor_azimuth_deg, anchor_elevation_deg = coordinates.cartesian_to_spherical(offset)
+
+    if radius < 1e-6:
+        raise ValueError(
+            "Anchor camera coincides with the orbit target; cannot derive "
+            "orbit parameters from a zero-length offset."
+        )
+
+    if n_loops < 1:
+        raise ValueError(
+            f"Helical anchoring requires at least 1 loop, got n_loops={n_loops}. "
+            "With no loops the helix has no elevation ramp to solve on."
+        )
+
+    if amplitude_deg <= 0.0:
+        raise ValueError(
+            f"Helical anchoring requires a positive amplitude, got "
+            f"amplitude_deg={amplitude_deg}."
+        )
+
+    if abs(anchor_elevation_deg) > amplitude_deg + max_elevation_error_deg:
+        raise ValueError(
+            f"Anchor camera sits at elevation {anchor_elevation_deg:.2f}deg, outside "
+            f"the helix elevation band of +/-{amplitude_deg:.2f}deg. Increase "
+            f"helical_amplitude_deg to at least {int(np.ceil(abs(anchor_elevation_deg)))}."
+        )
+
+    total_deg = lead_in_deg + (n_loops * 360.0) + lead_out_deg
+    lead_in_frac = lead_in_deg / total_deg
+    lead_out_frac = lead_out_deg / total_deg
+    ramp_frac = 1.0 - lead_in_frac - lead_out_frac
+
+    # Invert the elevation ramp: elevation -> fractional progress
+    clamped_elevation = float(np.clip(anchor_elevation_deg, -amplitude_deg, amplitude_deg))
+    ramp_t = (clamped_elevation + amplitude_deg) / (2.0 * amplitude_deg)
+    progress_exact = lead_in_frac + ramp_t * ramp_frac
+
+    # Snap to the nearest actual frame
+    anchor_frame_index = int(np.clip(round(progress_exact * n_frames), 0, n_frames - 1))
+    progress_frame = anchor_frame_index / n_frames
+
+    # Residual elevation, applied uniformly to shift the whole helix
+    base_elevation = helical_elevation_deg(
+        progress_frame, amplitude_deg, n_loops, lead_in_deg, lead_out_deg
+    )
+    elevation_offset_deg = float(anchor_elevation_deg - base_elevation)
+
+    if abs(elevation_offset_deg) > max_elevation_error_deg:
+        raise ValueError(
+            f"Helix is sampled too coarsely to reach the anchor: nearest frame "
+            f"({anchor_frame_index}) is {elevation_offset_deg:.2f}deg off in elevation, "
+            f"above the {max_elevation_error_deg:.2f}deg limit. Increase n_frames, "
+            f"reduce helical_amplitude_deg, or raise max_elevation_error_deg."
+        )
+
+    # Solve start azimuth so frame `anchor_frame_index` hits the anchor azimuth
+    start_azimuth_deg = anchor_azimuth_deg - progress_frame * total_deg
+    # Wrap to (-180, 180] for readability; azimuth is modulo 360
+    start_azimuth_deg = float((start_azimuth_deg + 180.0) % 360.0 - 180.0)
+
+    return {
+        'radius': radius,
+        'anchor_frame_index': anchor_frame_index,
+        'start_azimuth_deg': start_azimuth_deg,
+        'elevation_offset_deg': elevation_offset_deg,
+        'anchor_azimuth_deg': anchor_azimuth_deg,
+        'anchor_elevation_deg': anchor_elevation_deg,
+        'target': np.array(target, dtype=np.float32),
+        'camera_position': np.array(camera_position, dtype=np.float32),
+    }
+
+
 class OrbitPath:
     """
     Generate camera orbit paths around a target point.
@@ -211,6 +394,7 @@ class OrbitPath:
         lead_in_deg: float = 45.0,
         lead_out_deg: float = 45.0,
         start_azimuth_deg: float = 0.0,
+        elevation_offset_deg: float = 0.0,
         camera_template: Optional[Camera] = None
     ) -> List[Camera]:
         """
@@ -229,6 +413,11 @@ class OrbitPath:
             lead_in_deg: Degrees of rotation before first loop starts
             lead_out_deg: Degrees of rotation after last loop ends
             start_azimuth_deg: Starting azimuth angle in degrees
+            elevation_offset_deg: Uniform elevation shift applied to every
+                                 frame. Used by anchored orbits (see
+                                 :func:`compute_helical_anchor_params`) to
+                                 make one frame land exactly on a given
+                                 camera pose without breaking the helix.
             camera_template: Camera with intrinsics to copy
 
         Returns:
@@ -254,18 +443,9 @@ class OrbitPath:
             # Compute elevation based on position in sequence
             progress = i / n_frames  # 0 to 1
 
-            if progress < (lead_in_deg / total_deg):
-                # Lead-in: stay at bottom
-                elevation_deg = -amplitude_deg
-            elif progress > (1.0 - lead_out_deg / total_deg):
-                # Lead-out: stay at top
-                elevation_deg = amplitude_deg
-            else:
-                # Main loops: linear elevation change
-                loop_progress = (progress - lead_in_deg / total_deg) / (
-                    1.0 - (lead_in_deg + lead_out_deg) / total_deg
-                )
-                elevation_deg = -amplitude_deg + (2 * amplitude_deg * loop_progress)
+            elevation_deg = helical_elevation_deg(
+                progress, amplitude_deg, n_loops, lead_in_deg, lead_out_deg
+            ) + elevation_offset_deg
 
             # Convert to Cartesian
             position_rel = coordinates.spherical_to_cartesian(

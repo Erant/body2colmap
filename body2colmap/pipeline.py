@@ -17,7 +17,11 @@ from numpy.typing import NDArray
 
 from .scene import Scene
 from .camera import Camera
-from .path import OrbitPath, compute_original_camera_orbit_params
+from .path import (
+    OrbitPath,
+    compute_helical_anchor_params,
+    compute_original_camera_orbit_params,
+)
 from .renderer import Renderer
 from .exporter import ColmapExporter, ImageExporter
 from .utils import (
@@ -212,13 +216,19 @@ class OrbitPipeline:
             framing: Body framing preset ("full", "torso", "bust", "head")
                     Non-full presets use skeleton joints to determine Y threshold
                     and filter mesh vertices for accurate framing bounds.
-            original_focal_length: When set, pins frame 0 to the original
-                SAM-3D-Body camera (identity pose at origin). The orbit
+            original_focal_length: When set, anchors one frame of the orbit to
+                the original SAM-3D-Body camera (at the origin). The orbit
                 radius, target, and start azimuth are derived from the
                 mesh's position relative to the origin, so the orbit
-                smoothly continues from the original viewpoint.
-                All cameras (including frame 0) share this focal length.
+                smoothly passes through the original viewpoint.
+                All cameras share the auto-framed focal length.
                 The scene must NOT have been auto-oriented.
+
+                For "circular" the anchor is frame 0. For "helical" the
+                elevation ramp determines where the anchor can occur, so the
+                index is solved for and reported as
+                ``orbit_params['anchor_frame_index']``; always read it rather
+                than assuming 0. "sinusoidal" is not anchored.
             **kwargs: Pattern-specific parameters:
                 - circular: elevation_deg
                 - sinusoidal: amplitude_deg, n_cycles
@@ -267,6 +277,12 @@ class OrbitPipeline:
             # Inject start_azimuth_deg into kwargs for all patterns
             kwargs['start_azimuth_deg'] = start_azimuth_deg
 
+            # Which frame lands on the original camera.  Circular orbits have
+            # constant elevation, so frame 0 always works; helical orbits sweep
+            # elevation and must solve for the index (see below).
+            anchor_frame_index = 0
+            anchor_info: Optional[Dict[str, Any]] = None
+
             if pattern == "circular":
                 # In original-camera mode the elevation is geometrically
                 # determined — it's not a user-tunable parameter.  Always
@@ -294,26 +310,46 @@ class OrbitPipeline:
                 amplitude_deg = kwargs.pop('amplitude_deg', 30.0)
                 lead_in_deg = kwargs.pop('lead_in_deg', 45.0)
                 lead_out_deg = kwargs.pop('lead_out_deg', 45.0)
+
+                # A helix sweeps elevation, so the original camera can only be
+                # reached at the frame whose elevation matches it.  Solve for
+                # that frame, the start azimuth that lands on it, and the small
+                # uniform elevation shift that makes it exact.
+                anchor_info = compute_helical_anchor_params(
+                    target=target,
+                    n_frames=n_frames,
+                    n_loops=n_loops,
+                    amplitude_deg=amplitude_deg,
+                    lead_in_deg=lead_in_deg,
+                    lead_out_deg=lead_out_deg,
+                )
+                anchor_frame_index = anchor_info['anchor_frame_index']
+
+                # Overrides the circular-mode value injected above, which
+                # only places frame 0 correctly for a constant elevation.
+                kwargs['start_azimuth_deg'] = anchor_info['start_azimuth_deg']
+
                 self.cameras = orbit.helical(
                     n_frames=n_frames,
                     n_loops=n_loops,
                     amplitude_deg=amplitude_deg,
                     lead_in_deg=lead_in_deg,
                     lead_out_deg=lead_out_deg,
+                    elevation_offset_deg=anchor_info['elevation_offset_deg'],
                     camera_template=camera_template,
                     **kwargs
                 )
             else:
                 raise ValueError(f"Unknown orbit pattern: {pattern}")
 
-            # Compute the homography that warps the original image to
-            # align with frame 0's look_at view.  This accounts for both
+            # Compute the homography that warps the original image to align
+            # with the anchor frame's look_at view.  This accounts for both
             # the focal-length zoom and the slight rotation correction.
-            frame0_camera = self.cameras[0]
+            anchor_camera = self.cameras[anchor_frame_index]
             warp_homography = compute_warp_to_camera(
                 original_focal_length=original_focal_length,
                 original_image_size=self.render_size,
-                target_camera=frame0_camera,
+                target_camera=anchor_camera,
             )
 
             self.orbit_params = {
@@ -322,10 +358,15 @@ class OrbitPipeline:
                 'radius': radius,
                 'original_focal_length': original_focal_length,
                 'framed_focal_length': framed_fl,
-                'start_azimuth_deg': start_azimuth_deg,
+                # start_azimuth_deg arrives via **kwargs below, so it always
+                # reflects the value actually used (helical solves its own).
                 'derived_elevation_deg': derived_elevation_deg,
                 'framing_info': framing_info,
-                'frame0_camera': frame0_camera,
+                'anchor_frame_index': anchor_frame_index,
+                'anchor_camera': anchor_camera,
+                'anchor_elevation_offset_deg': (
+                    anchor_info['elevation_offset_deg'] if anchor_info else 0.0
+                ),
                 'warp_homography': warp_homography,
                 **kwargs
             }

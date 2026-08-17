@@ -7,7 +7,12 @@ import pytest
 
 from body2colmap import coordinates
 from body2colmap.camera import Camera
-from body2colmap.path import OrbitPath, compute_original_camera_orbit_params
+from body2colmap.path import (
+    OrbitPath,
+    compute_helical_anchor_params,
+    compute_original_camera_orbit_params,
+    helical_elevation_deg,
+)
 from body2colmap.utils import compute_warp_to_camera
 
 
@@ -233,6 +238,221 @@ class TestEndToEndOriginalCameraOrbit:
 
         # Max should be within 2x of average (no outlier jumps)
         assert max_delta < 2.0 * avg_delta
+
+
+def _elevations(cameras, target):
+    """Elevation of each camera relative to target, in degrees."""
+    return np.array([
+        coordinates.cartesian_to_spherical(cam.position - target)[2]
+        for cam in cameras
+    ])
+
+
+class TestHelicalElevationRamp:
+    """Test the helix elevation ramp and its uniform offset."""
+
+    RAMP = dict(amplitude_deg=30.0, n_loops=3, lead_in_deg=45.0, lead_out_deg=45.0)
+
+    def test_ramp_endpoints_and_midpoint(self):
+        """Ramp starts at -A, ends at +A, crosses 0 in the middle."""
+        assert helical_elevation_deg(0.0, **self.RAMP) == -30.0
+        assert helical_elevation_deg(1.0, **self.RAMP) == 30.0
+        assert np.isclose(helical_elevation_deg(0.5, **self.RAMP), 0.0)
+
+    def test_lead_in_and_lead_out_are_flat(self):
+        """Elevation holds at the extremes during lead-in/lead-out."""
+        total = 45.0 + 3 * 360.0 + 45.0
+        # Well inside the lead-in / lead-out sections
+        assert helical_elevation_deg(0.5 * 45.0 / total, **self.RAMP) == -30.0
+        assert helical_elevation_deg(1.0 - 0.5 * 45.0 / total, **self.RAMP) == 30.0
+
+    def test_ramp_is_monotonic(self):
+        """Elevation never decreases across the sequence."""
+        values = [helical_elevation_deg(i / 200.0, **self.RAMP) for i in range(201)]
+        assert all(b >= a - 1e-9 for a, b in zip(values, values[1:]))
+
+    def test_generator_matches_ramp_function(self):
+        """helical() positions agree with helical_elevation_deg()."""
+        target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        orbit = OrbitPath(target=target, radius=3.0)
+        cameras = orbit.helical(n_frames=40, **self.RAMP)
+
+        expected = np.array([
+            helical_elevation_deg(i / 40.0, **self.RAMP) for i in range(40)
+        ])
+        assert np.allclose(_elevations(cameras, target), expected, atol=1e-3)
+
+    def test_elevation_offset_shifts_every_frame(self):
+        """elevation_offset_deg is a uniform shift, not a reshape."""
+        target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        orbit = OrbitPath(target=target, radius=3.0)
+
+        base = orbit.helical(n_frames=40, **self.RAMP)
+        shifted = orbit.helical(n_frames=40, elevation_offset_deg=5.0, **self.RAMP)
+
+        delta = _elevations(shifted, target) - _elevations(base, target)
+        assert np.allclose(delta, 5.0, atol=1e-3)
+
+        # Positions of the shifted path are still on the same sphere
+        for cam in shifted:
+            assert np.isclose(np.linalg.norm(cam.position - target), 3.0, atol=1e-4)
+
+
+class TestHelicalAnchor:
+    """Test that a helical orbit can be made to pass through a given camera."""
+
+    # (target, n_frames, n_loops, amplitude, lead_in, lead_out)
+    CASES = [
+        # Typical SAM-3D-Body layout: mesh in front of the camera
+        (np.array([0.02, -0.15, -1.8], dtype=np.float32), 81, 2, 40.0, 30.0, 90.0),
+        # Package defaults
+        (np.array([0.0, 0.0, -2.5], dtype=np.float32), 120, 3, 30.0, 45.0, 45.0),
+        # Anchor well above the target (mesh center below the camera)
+        (np.array([0.1, -0.8, -2.0], dtype=np.float32), 60, 2, 40.0, 0.0, 0.0),
+        # Anchor below the target (mesh center above the camera)
+        (np.array([-0.3, 0.7, -2.2], dtype=np.float32), 100, 3, 35.0, 45.0, 45.0),
+    ]
+
+    @pytest.mark.parametrize("target,n_frames,n_loops,amp,lead_in,lead_out", CASES)
+    def test_anchor_frame_lands_on_original_camera(
+        self, target, n_frames, n_loops, amp, lead_in, lead_out
+    ):
+        """The reported frame index sits exactly at the anchor camera."""
+        params = compute_helical_anchor_params(
+            target=target,
+            n_frames=n_frames,
+            n_loops=n_loops,
+            amplitude_deg=amp,
+            lead_in_deg=lead_in,
+            lead_out_deg=lead_out,
+        )
+
+        orbit = OrbitPath(target=target, radius=params['radius'])
+        cameras = orbit.helical(
+            n_frames=n_frames,
+            n_loops=n_loops,
+            amplitude_deg=amp,
+            lead_in_deg=lead_in,
+            lead_out_deg=lead_out,
+            start_azimuth_deg=params['start_azimuth_deg'],
+            elevation_offset_deg=params['elevation_offset_deg'],
+        )
+
+        assert len(cameras) == n_frames
+        k = params['anchor_frame_index']
+        assert 0 <= k < n_frames
+
+        # The anchor camera position is the origin (default anchor)
+        assert np.allclose(cameras[k].position, [0, 0, 0], atol=1e-4)
+
+        # Every frame is on the same sphere around the target
+        for cam in cameras:
+            dist = np.linalg.norm(cam.position - target)
+            assert np.isclose(dist, params['radius'], atol=1e-3)
+
+    @pytest.mark.parametrize("target,n_frames,n_loops,amp,lead_in,lead_out", CASES)
+    def test_offset_below_half_elevation_step(
+        self, target, n_frames, n_loops, amp, lead_in, lead_out
+    ):
+        """The helix is tilted by at most half an elevation step."""
+        params = compute_helical_anchor_params(
+            target=target,
+            n_frames=n_frames,
+            n_loops=n_loops,
+            amplitude_deg=amp,
+            lead_in_deg=lead_in,
+            lead_out_deg=lead_out,
+        )
+
+        total_deg = lead_in + n_loops * 360.0 + lead_out
+        ramp_frac = 1.0 - (lead_in + lead_out) / total_deg
+        step_deg = (2.0 * amp) / (ramp_frac * n_frames)
+
+        assert abs(params['elevation_offset_deg']) <= 0.5 * step_deg + 1e-6
+
+    def test_custom_anchor_position(self):
+        """A non-origin anchor camera is honored."""
+        target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        anchor = np.array([1.0, 0.5, 2.0], dtype=np.float32)
+
+        params = compute_helical_anchor_params(
+            target, anchor, n_frames=90, n_loops=2, amplitude_deg=30.0
+        )
+
+        orbit = OrbitPath(target=target, radius=params['radius'])
+        cameras = orbit.helical(
+            n_frames=90,
+            n_loops=2,
+            amplitude_deg=30.0,
+            start_azimuth_deg=params['start_azimuth_deg'],
+            elevation_offset_deg=params['elevation_offset_deg'],
+        )
+
+        k = params['anchor_frame_index']
+        assert np.allclose(cameras[k].position, anchor, atol=1e-4)
+
+    def test_rotation_smooth_across_anchor(self):
+        """No rotation discontinuity at or around the anchor frame."""
+        target = np.array([0.02, -0.15, -1.8], dtype=np.float32)
+        params = compute_helical_anchor_params(
+            target=target, n_frames=81, n_loops=2, amplitude_deg=40.0,
+            lead_in_deg=30.0, lead_out_deg=90.0,
+        )
+
+        orbit = OrbitPath(target=target, radius=params['radius'])
+        cameras = orbit.helical(
+            n_frames=81, n_loops=2, amplitude_deg=40.0,
+            lead_in_deg=30.0, lead_out_deg=90.0,
+            start_azimuth_deg=params['start_azimuth_deg'],
+            elevation_offset_deg=params['elevation_offset_deg'],
+        )
+
+        deltas = np.array([
+            np.linalg.norm(cameras[i + 1].rotation - cameras[i].rotation, 'fro')
+            for i in range(len(cameras) - 1)
+        ])
+        assert deltas.max() < 2.0 * deltas.mean()
+
+    def test_anchor_elevation_outside_band_raises(self):
+        """An anchor steeper than the helix amplitude is rejected."""
+        # Target directly below the origin -> anchor elevation is +90 degrees
+        target = np.array([0.0, -2.0, 0.0], dtype=np.float32)
+        with pytest.raises(ValueError, match="outside"):
+            compute_helical_anchor_params(
+                target, n_frames=60, n_loops=2, amplitude_deg=30.0
+            )
+
+    def test_no_loops_raises(self):
+        """A helix with no loops has no ramp to solve on."""
+        target = np.array([0.0, 0.0, -2.0], dtype=np.float32)
+        with pytest.raises(ValueError, match="at least 1 loop"):
+            compute_helical_anchor_params(
+                target, n_frames=60, n_loops=0, amplitude_deg=30.0
+            )
+
+    def test_zero_amplitude_raises(self):
+        """A flat helix cannot be anchored by elevation."""
+        target = np.array([0.0, 0.0, -2.0], dtype=np.float32)
+        with pytest.raises(ValueError, match="positive amplitude"):
+            compute_helical_anchor_params(
+                target, n_frames=60, n_loops=2, amplitude_deg=0.0
+            )
+
+    def test_anchor_at_target_raises(self):
+        """A zero-length offset gives no orbit geometry."""
+        with pytest.raises(ValueError, match="coincides"):
+            compute_helical_anchor_params(
+                np.zeros(3, dtype=np.float32), n_frames=60, n_loops=2
+            )
+
+    def test_coarse_sampling_raises(self):
+        """Too few frames to reach the anchor within tolerance is rejected."""
+        target = np.array([0.0, -0.4, -2.0], dtype=np.float32)
+        with pytest.raises(ValueError, match="too coarsely"):
+            compute_helical_anchor_params(
+                target, n_frames=6, n_loops=2, amplitude_deg=40.0,
+                lead_in_deg=0.0, lead_out_deg=0.0,
+            )
 
 
 class TestComputeWarpToCamera:

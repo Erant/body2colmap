@@ -475,14 +475,18 @@ def main(argv: Optional[list] = None) -> int:
                 and pipeline.orbit_params is not None):
             import cv2
 
+            # The frame that sits at the original camera is 0 for circular
+            # orbits but solved for on helical ones.
+            anchor_idx = pipeline.orbit_params['anchor_frame_index']
+
             if args.verbose:
-                print("\n[DEBUG] Compositing orbit frame 0 with warped original image...")
+                print(f"\n[DEBUG] Compositing orbit frame {anchor_idx} with warped original image...")
 
             orig_img = cv2.imread(args.original_image, cv2.IMREAD_COLOR)
             if orig_img is None:
                 raise FileNotFoundError(f"Could not read image: {args.original_image}")
 
-            frame0_camera = pipeline.orbit_params['frame0_camera']
+            anchor_camera = pipeline.orbit_params['anchor_camera']
 
             # Background color for padding
             bg_r, bg_g, bg_b = config.render.bg_color
@@ -490,31 +494,31 @@ def main(argv: Optional[list] = None) -> int:
 
             warped = pipeline.renderer.warp_original_image(
                 orig_img,
-                camera=frame0_camera,
+                camera=anchor_camera,
                 original_focal_length=pipeline.orbit_params['original_focal_length'],
                 border_color=border_bgr,
             )
 
             output_dir = Path(config.export.output_dir)
 
-            warped_path = output_dir / "frame0_warped.png"
+            warped_path = output_dir / f"frame{anchor_idx}_warped.png"
             cv2.imwrite(str(warped_path), warped)
             print(f"  Saved: {warped_path}")
 
-            # Composite each rendered mode's frame 0 on top of warped image
+            # Composite each rendered mode's anchor frame on top of warped image
             warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
             for mode, images in rendered.items():
                 if not images:
                     continue
-                frame0_rgba = images[0]
-                alpha = frame0_rgba[:, :, 3:4].astype(np.float32) / 255.0
-                render_rgb = frame0_rgba[:, :, :3].astype(np.float32)
+                anchor_rgba = images[anchor_idx]
+                alpha = anchor_rgba[:, :, 3:4].astype(np.float32) / 255.0
+                render_rgb = anchor_rgba[:, :, :3].astype(np.float32)
                 base_rgb = warped_rgb.astype(np.float32)
                 composite = (alpha * render_rgb + (1.0 - alpha) * base_rgb)
                 composite = np.clip(composite, 0, 255).astype(np.uint8)
 
                 safe_mode = mode.replace('+', '_')
-                overlay_path = output_dir / f"frame0_overlay_{safe_mode}.png"
+                overlay_path = output_dir / f"frame{anchor_idx}_overlay_{safe_mode}.png"
                 overlay_bgr = cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(overlay_path), overlay_bgr)
                 print(f"  Saved: {overlay_path}")

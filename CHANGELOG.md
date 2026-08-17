@@ -2,6 +2,31 @@
 
 All notable changes to body2colmap will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Helical anchoring for original-camera mode**: `--use-original-camera` now works with
+  `pattern: helical`, not just `circular`. One frame of the helix lands exactly on the
+  SAM-3D-Body camera so the input image can be injected as a conditioning frame for
+  diffusion pipelines.
+  - `path.compute_helical_anchor_params()` solves the start azimuth, a sub-degree uniform
+    elevation offset, and the resulting anchor frame index
+  - `path.helical_elevation_deg()` exposes the elevation ramp as a pure function, shared
+    by the generator and the solver
+  - `OrbitPath.helical()` gained `elevation_offset_deg` (defaults to 0.0, backwards compatible)
+  - Raises `ValueError` with actionable messages instead of emitting a degenerate path when
+    the anchor is outside the helix elevation band, when there is no ramp to solve on, or
+    when the helix is sampled too coarsely to reach the anchor
+- First test coverage for `OrbitPath.helical()` (previously untested): elevation ramp,
+  offset uniformity, anchor round-trips, smoothness, and all error paths
+
+### Changed
+- **Breaking**: `orbit_params['frame0_camera']` renamed to `orbit_params['anchor_camera']`.
+  Read `orbit_params['anchor_frame_index']` for the conditioning frame rather than assuming 0
+  — it is 0 for circular but solved for on helical.
+- `--debug-original-view` writes `frame{index}_warped.png` / `frame{index}_overlay_{mode}.png`
+  for the anchor frame (unchanged filenames when the index is 0)
+
 ## [0.2.0] - 2026-02-09
 
 ### Changed
