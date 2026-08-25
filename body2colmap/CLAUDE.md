@@ -105,7 +105,10 @@ cli.py  (depends on: pipeline, config)
 - `Renderer` class:
   - `render_mesh()`: Color mesh with lighting
   - `render_depth()`: Depth buffer
+  - `render_mask()`: Boolean silhouette coverage from the depth buffer
+  - `render_outline()`: Flat two-tone silhouette (`filled` or `stroke`)
   - `render_skeleton()`: Joints and bones
+  - `render_composite()`: Base layer (`mesh`/`depth`/`outline`) + overlays
   - Alpha channel handling
 
 **Testing priority**: MEDIUM - mainly wraps pyrender
@@ -218,7 +221,7 @@ Each module has isolated tests:
   - For rotation only: R_w2c = R_c2w.T
 
 ### Alpha Channel
-- Mesh/depth = 1.0 where surface exists, 0.0 background
+- Mesh/depth/outline = 1.0 where surface exists, 0.0 background
 - Skeleton does NOT contribute to alpha (for masking)
 - Use RGBA throughout, convert to RGB if needed for export
 
@@ -479,7 +482,10 @@ elif args.width is not None or args.height is not None:
 
 ### Composite Rendering Pattern (`renderer.py`, `pipeline.py`)
 
-**Composite modes** (e.g., "depth+skeleton", "depth+skeleton+face"):
+**Composite modes** (e.g., "depth+skeleton", "outline+skeleton", "depth+skeleton+face"):
+
+Recognized base layers are `mesh`, `depth` and `outline` (checked in that
+order in `render_composite()`); recognized overlays are `skeleton` and `face`.
 
 1. Parse composite string: `"depth+skeleton+face"` → base="depth", overlays=["skeleton", "face"]
 2. Render base mode to RGBA
@@ -494,6 +500,66 @@ elif args.width is not None or args.height is not None:
 4. Return composite RGBA
 
 **Key**: Skeleton renders with transparent background, so it only appears over mesh/depth.
+
+## Outline Mode (2026-08)
+
+### What it is
+`outline` renders the mesh as a **flat two-tone image**: every pixel the mesh
+covers gets `fg_color`, everything else gets `bg_color`. There is no lighting,
+no shading and no gradient, so the only information in the image is the shape
+of the silhouette. Intended as a control/conditioning image, and combinable
+with the skeleton overlay as `outline+skeleton`.
+
+### Key design: silhouette comes from the depth buffer
+`render_mask()` derives coverage from `depth > 0`, **not** from the color
+buffer's alpha. The depth buffer is unaffected by mesh color, lighting or
+anti-aliasing, so the mask is exact and binary. `render_outline()` and any
+future mask-consuming code should go through `render_mask()` rather than
+re-deriving coverage from a color render.
+
+### Key design: two styles from one mask
+- `filled` (default): the whole silhouette gets `fg_color`.
+- `stroke`: only a band along the silhouette boundary gets `fg_color`; the
+  interior gets `bg_color`. The band is `dilate(mask) & ~erode(mask)` with an
+  elliptical kernel of radius `round(thickness / 2)`, so it straddles the
+  boundary and comes out ~`thickness` px across. Disconnected components and
+  interior holes are stroked correctly for free.
+
+OpenCV's default morphology border handling treats outside-the-image as
+neutral, so a silhouette running off the edge of the frame is **not** given a
+spurious stroke along the image border. Do not "fix" this by passing an
+explicit border value.
+
+### Key design: blur lives in `render_outline()`, not `render_composite()`
+`blur` (radius in px, default 4, `0` disables) applies a Gaussian to color and
+alpha together so the two edges stay in step. It is deliberately applied at the
+end of `render_outline()` rather than to the finished composite: overlays are
+blended on top of the already-blurred base, so the skeleton in
+`outline+skeleton` stays pixel-sharp. Do not move this to the composite stage —
+that would smear the skeleton too.
+
+Kernel size is `2 * blur + 1` with OpenCV's auto-derived sigma.
+
+### Key design: alpha tracks mesh coverage, not the drawn foreground
+Alpha is `mask | fg_mask`, i.e. the silhouette plus (for `stroke`) the outward
+half of the band. Two reasons:
+1. **Consistency**: `mesh` and `depth` set alpha to mesh coverage, so `outline`
+   drops into `render_composite()` as a base layer and works as a 3DGS training
+   mask, with the same semantics.
+2. **No clipping**: half a stroke band lies *outside* the silhouette. If alpha
+   were just the drawn foreground, `outline+skeleton` in `stroke` style would
+   render the skeleton into pixels with alpha=0 — invisible in the saved RGBA.
+
+For `filled` the union is exactly the silhouette, so the two rules coincide;
+the distinction only matters for `stroke`, where it costs a ~`thickness/2` px
+dilation of the mask.
+
+### Configuration
+`RenderConfig.outline_color` (foreground), `outline_bg_color`,
+`outline_style`, `outline_thickness`, `outline_blur` — plumbed through YAML,
+`--outline-*` CLI flags, `pipeline.render_all()`,
+`pipeline.render_original_view()` and `renderer.render_composite()` (where the
+keys are `fg_color`, `bg_color`, `style`, `thickness`, `blur`).
 
 ## Next Steps
 

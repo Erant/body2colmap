@@ -2,8 +2,8 @@
 Rendering engine using pyrender.
 
 This module provides the Renderer class which handles actual image generation
-using pyrender. Supports multiple rendering modes: mesh, depth, skeleton, and
-composite modes.
+using pyrender. Supports multiple rendering modes: mesh, depth, outline,
+skeleton, and composite modes.
 
 All rendering happens in world coordinates (no coordinate conversion needed
 since pyrender uses OpenGL convention matching our world coords).
@@ -24,6 +24,7 @@ class Renderer:
     Supports multiple rendering modes:
     - mesh: Colored mesh with lighting
     - depth: Depth buffer
+    - outline: Flat two-tone silhouette (no shading)
     - skeleton: 3D skeleton as spheres (joints) and cylinders (bones)
     - composite: Combinations of the above
 
@@ -289,6 +290,139 @@ class Renderer:
         rgba = np.dstack([depth_colored, alpha])
 
         return rgba
+
+    def render_mask(
+        self,
+        camera: Camera
+    ) -> NDArray[np.bool_]:
+        """
+        Render the mesh silhouette as a boolean coverage mask.
+
+        Uses the depth buffer rather than the color buffer, so the result is
+        independent of lighting, mesh color and anti-aliasing.
+
+        Args:
+            camera: Camera to render from
+
+        Returns:
+            Boolean array, shape (height, width). True where the mesh covers
+            the pixel.
+        """
+        try:
+            import pyrender
+        except ImportError:
+            raise ImportError("pyrender is required")
+
+        pr_scene = self._create_pyrender_scene()
+
+        pr_camera = pyrender.IntrinsicsCamera(
+            fx=camera.fx, fy=camera.fy,
+            cx=camera.cx, cy=camera.cy
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        renderer = self._get_pyrender_renderer()
+        _, depth = renderer.render(pr_scene)
+
+        return depth > 0
+
+    def render_outline(
+        self,
+        camera: Camera,
+        fg_color: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        bg_color: Optional[Tuple[float, float, float]] = (1.0, 1.0, 1.0),
+        style: str = "filled",
+        thickness: int = 3,
+        blur: int = 4,
+    ) -> NDArray[np.uint8]:
+        """
+        Render the mesh as a flat two-tone outline.
+
+        The mesh carries no shading at all: every covered pixel gets the same
+        foreground color, so the only information in the image is the shape of
+        the silhouette. Useful as a control/conditioning image.
+
+        Args:
+            camera: Camera to render from
+            fg_color: RGB color (0-1 range) for the mesh
+            bg_color: RGB color (0-1 range) for the background. If None, the
+                background RGB is left black (alpha is 0 there either way).
+            style: Outline style:
+                - "filled": the whole silhouette is filled with fg_color
+                - "stroke": only a band along the silhouette boundary is drawn
+                  in fg_color; the interior gets bg_color
+            thickness: Stroke width in pixels. Only used when style="stroke".
+            blur: Blur radius in pixels, applied to both color and alpha so
+                the edge softens consistently. 0 disables blurring, leaving
+                hard two-tone edges.
+
+        Returns:
+            RGBA image, shape (height, width, 4), dtype uint8.
+            Alpha = 255 over the mesh silhouette, matching mesh/depth mode so
+            the result works as a composite base layer and as a training mask.
+            For style="stroke" the alpha additionally covers the outer half of
+            the boundary band (a ~thickness/2 px dilation of the silhouette),
+            so no part of the stroke is clipped by the alpha channel.
+            With blur > 0 both edges become gradients rather than hard steps.
+
+        Raises:
+            ValueError: If style is not "filled" or "stroke", or if blur is
+                negative.
+        """
+        if style not in ("filled", "stroke"):
+            raise ValueError(
+                f"Unknown outline style: {style!r}. Use 'filled' or 'stroke'."
+            )
+        if blur < 0:
+            raise ValueError(f"Outline blur must be >= 0, got {blur}")
+
+        mask = self.render_mask(camera)
+
+        if style == "stroke":
+            import cv2
+
+            # Kernel radius is half the requested width so the band straddles
+            # the silhouette boundary and ends up ~thickness px across.
+            radius = max(1, int(round(thickness / 2.0)))
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+            )
+            mask_u8 = mask.astype(np.uint8)
+            # Default morphology border handling treats outside-the-image as
+            # neutral, so a silhouette running off the edge is not given a
+            # spurious stroke along the image border.
+            outer = cv2.dilate(mask_u8, kernel)
+            inner = cv2.erode(mask_u8, kernel)
+            fg_mask = (outer > 0) & (inner == 0)
+        else:
+            fg_mask = mask
+
+        fg_rgb = np.array([int(c * 255) for c in fg_color], dtype=np.uint8)
+        if bg_color is None:
+            bg_rgb = np.zeros(3, dtype=np.uint8)
+        else:
+            bg_rgb = np.array([int(c * 255) for c in bg_color], dtype=np.uint8)
+
+        # Alpha tracks mesh coverage (not the drawn foreground) so "outline"
+        # behaves like "mesh"/"depth" as a composite base and as a mask. The
+        # union keeps the outward half of a stroke from being clipped.
+        alpha_mask = mask | fg_mask
+
+        image = np.empty((self.height, self.width, 4), dtype=np.uint8)
+        image[:, :, :3] = np.where(fg_mask[:, :, None], fg_rgb, bg_rgb)
+        image[:, :, 3] = alpha_mask.astype(np.uint8) * 255
+
+        if blur > 0:
+            import cv2
+
+            # Blur color and alpha together so the two edges stay in step.
+            # Applied here rather than in render_composite() so that overlays
+            # (e.g. the skeleton in "outline+skeleton") stay sharp: they are
+            # composited on top of the already-blurred base.
+            ksize = 2 * int(blur) + 1
+            image = cv2.GaussianBlur(image, (ksize, ksize), 0)
+
+        return image
 
     def render_skeleton(
         self,
@@ -655,15 +789,19 @@ class Renderer:
                       "skeleton": {"joint_radius": 0.015}
                   }
 
+                  Recognized base layers: "mesh", "depth", "outline"
+                  (checked in that order). Recognized overlays: "skeleton",
+                  "face".
+
         Returns:
             RGBA image with composited modes
 
         Note:
             Modes are composited in order:
-            1. mesh or depth (base layer)
+            1. mesh, depth or outline (base layer)
             2. skeleton (overlay)
 
-            Alpha channel comes from base layer only (mesh or depth).
+            Alpha channel comes from base layer only.
         """
         # Render base layer
         base_image = None
@@ -682,6 +820,16 @@ class Renderer:
                 normalize=depth_opts.get("normalize", True),
                 colormap=depth_opts.get("colormap")
             )
+        elif "outline" in modes:
+            outline_opts = modes["outline"] if isinstance(modes["outline"], dict) else {}
+            base_image = self.render_outline(
+                camera,
+                fg_color=outline_opts.get("fg_color", (0.0, 0.0, 0.0)),
+                bg_color=outline_opts.get("bg_color", (1.0, 1.0, 1.0)),
+                style=outline_opts.get("style", "filled"),
+                thickness=outline_opts.get("thickness", 3),
+                blur=outline_opts.get("blur", 4),
+            )
 
         # Determine face mode and custom landmarks from composite modes
         face_mode = None
@@ -696,7 +844,10 @@ class Renderer:
         # If skeleton is present but no mesh/depth base, render skeleton directly
         if base_image is None:
             if "skeleton" not in modes:
-                raise ValueError("Must specify 'mesh', 'depth', or 'skeleton' as base layer")
+                raise ValueError(
+                    "Must specify 'mesh', 'depth', 'outline', or 'skeleton' "
+                    "as base layer"
+                )
 
             skel_opts = modes["skeleton"] if isinstance(modes["skeleton"], dict) else {}
             return self.render_skeleton(

@@ -5,6 +5,25 @@ All notable changes to body2colmap will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`outline` render mode**: renders the mesh as a flat two-tone silhouette — one
+  color for every pixel the mesh covers, another for the background, with no
+  lighting or shading. Combinable with the skeleton overlay as `outline+skeleton`.
+  - `Renderer.render_outline()` and `Renderer.render_mask()` (boolean silhouette
+    coverage taken from the depth buffer, so it is exact and unaffected by
+    lighting, mesh color or anti-aliasing)
+  - `renderer.render_composite()` accepts `outline` as a base layer alongside
+    `mesh` and `depth`
+  - `style="stroke"` draws only a band along the silhouette boundary instead of a
+    solid fill, with a configurable pixel width
+  - Alpha marks mesh coverage (as in `mesh`/`depth`), so outline renders work as
+    3DGS training masks and as composite base layers
+  - `blur` softens the outline edge (color and alpha together), defaulting to a
+    4 px radius; `0` restores hard two-tone edges. Applied inside
+    `render_outline()`, so a skeleton overlay composited on top stays sharp.
+  - Config: `render.outline_color` (foreground), `render.outline_bg_color`,
+    `render.outline_style`, `render.outline_thickness`, `render.outline_blur`
+  - CLI: `--outline-color`, `--outline-bg-color`, `--outline-style`,
+    `--outline-thickness`, `--outline-blur`
 - **Helical anchoring for original-camera mode**: `--use-original-camera` now works with
   `pattern: helical`, not just `circular`. One frame of the helix lands exactly on the
   SAM-3D-Body camera so the input image can be injected as a conditioning frame for

@@ -459,12 +459,17 @@ class OrbitPipeline:
 
         Args:
             modes: List of render modes
-                - For mesh scenes: "mesh", "depth", "skeleton"
+                - For mesh scenes: "mesh", "depth", "outline", "skeleton"
                 - For splat scenes: "splat"
             **render_kwargs: Mode-specific rendering options:
                 - mesh_color: RGB tuple (0-1) for mesh
                 - bg_color: RGB tuple (0-1) for background
                 - normalize_depth: bool for depth rendering
+                - outline_color: RGB tuple (0-1) for the outline foreground
+                - outline_bg_color: RGB tuple (0-1) for the outline background
+                - outline_style: "filled" or "stroke"
+                - outline_thickness: stroke width in px (style="stroke" only)
+                - outline_blur: blur radius in px for the outline (0 = off)
                 - etc.
 
         Returns:
@@ -511,6 +516,17 @@ class OrbitPipeline:
                         camera,
                         normalize=render_kwargs.get('normalize_depth', True),
                         colormap=render_kwargs.get('depth_colormap')
+                    )
+                elif mode == "outline":
+                    if is_splat:
+                        raise ValueError("'outline' mode not yet supported for SplatScene")
+                    image = renderer.render_outline(
+                        camera,
+                        fg_color=render_kwargs.get('outline_color', (0.0, 0.0, 0.0)),
+                        bg_color=render_kwargs.get('outline_bg_color', (1.0, 1.0, 1.0)),
+                        style=render_kwargs.get('outline_style', 'filled'),
+                        thickness=render_kwargs.get('outline_thickness', 3),
+                        blur=render_kwargs.get('outline_blur', 4),
                     )
                 elif mode == "skeleton":
                     if is_splat:
@@ -673,6 +689,14 @@ class OrbitPipeline:
                     }
                 elif base_mode == "depth":
                     composite_modes["depth"] = {}
+                elif base_mode == "outline":
+                    composite_modes["outline"] = {
+                        "fg_color": render_kwargs.get('outline_color', (0.0, 0.0, 0.0)),
+                        "bg_color": render_kwargs.get('outline_bg_color', (1.0, 1.0, 1.0)),
+                        "style": render_kwargs.get('outline_style', 'filled'),
+                        "thickness": render_kwargs.get('outline_thickness', 3),
+                        "blur": render_kwargs.get('outline_blur', 4),
+                    }
 
                 for overlay in overlays:
                     if overlay == "skeleton":
@@ -698,6 +722,15 @@ class OrbitPipeline:
                     camera,
                     normalize=render_kwargs.get('normalize_depth', True),
                     colormap=render_kwargs.get('depth_colormap')
+                )
+            elif mode == "outline":
+                image = renderer.render_outline(
+                    camera,
+                    fg_color=render_kwargs.get('outline_color', (0.0, 0.0, 0.0)),
+                    bg_color=render_kwargs.get('outline_bg_color', (1.0, 1.0, 1.0)),
+                    style=render_kwargs.get('outline_style', 'filled'),
+                    thickness=render_kwargs.get('outline_thickness', 3),
+                    blur=render_kwargs.get('outline_blur', 4),
                 )
             elif mode == "skeleton":
                 image = renderer.render_skeleton(

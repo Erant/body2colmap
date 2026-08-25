@@ -22,6 +22,13 @@ class RenderConfig:
     bg_color: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     modes: List[str] = field(default_factory=lambda: ["mesh"])
 
+    # Outline mode: flat two-tone silhouette
+    outline_color: Tuple[float, float, float] = (0.0, 0.0, 0.0)      # foreground
+    outline_bg_color: Tuple[float, float, float] = (1.0, 1.0, 1.0)   # background
+    outline_style: str = "filled"  # "filled" or "stroke"
+    outline_thickness: int = 3     # stroke width in px (style="stroke" only)
+    outline_blur: int = 4          # blur radius in px (0 = hard edges)
+
 
 @dataclass
 class CameraConfig:
@@ -163,6 +170,29 @@ class Config:
             except ValueError:
                 raise ValueError(f"Invalid bg-color format: {args.bg_color}. Use R,G,B (e.g., 1.0,1.0,1.0)")
 
+        if args.outline_color:
+            try:
+                r, g, b = [float(x) for x in args.outline_color.split(',')]
+                config.render.outline_color = (r, g, b)
+            except ValueError:
+                raise ValueError(f"Invalid outline-color format: {args.outline_color}. Use R,G,B (e.g., 0.0,0.0,0.0)")
+
+        if args.outline_bg_color:
+            try:
+                r, g, b = [float(x) for x in args.outline_bg_color.split(',')]
+                config.render.outline_bg_color = (r, g, b)
+            except ValueError:
+                raise ValueError(f"Invalid outline-bg-color format: {args.outline_bg_color}. Use R,G,B (e.g., 1.0,1.0,1.0)")
+
+        if args.outline_style:
+            config.render.outline_style = args.outline_style
+
+        if args.outline_thickness is not None:
+            config.render.outline_thickness = args.outline_thickness
+
+        if args.outline_blur is not None:
+            config.render.outline_blur = args.outline_blur
+
         # Camera overrides
         if args.focal_length is not None:
             config.camera.focal_length = args.focal_length
@@ -258,7 +288,12 @@ class Config:
             resolution=tuple(render_data.get('resolution', [512, 512])),
             mesh_color=tuple(render_data.get('mesh_color', [0.65, 0.74, 0.86])),
             bg_color=tuple(render_data.get('bg_color', [1.0, 1.0, 1.0])),
-            modes=render_data.get('modes', ['mesh'])
+            modes=render_data.get('modes', ['mesh']),
+            outline_color=tuple(render_data.get('outline_color', [0.0, 0.0, 0.0])),
+            outline_bg_color=tuple(render_data.get('outline_bg_color', [1.0, 1.0, 1.0])),
+            outline_style=render_data.get('outline_style', 'filled'),
+            outline_thickness=render_data.get('outline_thickness', 3),
+            outline_blur=render_data.get('outline_blur', 4)
         )
 
         # Parse camera config
@@ -341,7 +376,12 @@ class Config:
                 'resolution': list(self.render.resolution),
                 'mesh_color': list(self.render.mesh_color),
                 'bg_color': list(self.render.bg_color),
-                'modes': self.render.modes
+                'modes': self.render.modes,
+                'outline_color': list(self.render.outline_color),
+                'outline_bg_color': list(self.render.outline_bg_color),
+                'outline_style': self.render.outline_style,
+                'outline_thickness': self.render.outline_thickness,
+                'outline_blur': self.render.outline_blur
             },
             'camera': {
                 'focal_length': self.camera.focal_length,
@@ -416,9 +456,27 @@ render:
   # Background color [R, G, B] in range 0-1
   bg_color: [1.0, 1.0, 1.0]
 
-  # Render modes (for .npz): mesh, depth, skeleton, depth+skeleton, skeleton+face, depth+skeleton+face
+  # Render modes (for .npz): mesh, depth, outline, skeleton,
+  #   depth+skeleton, outline+skeleton, skeleton+face, depth+skeleton+face
   # For .ply files, "splat" mode is automatically used
   modes: ["mesh"]
+
+  # Outline mode: flat two-tone silhouette of the mesh (no shading)
+  # Foreground (mesh) color [R, G, B] in range 0-1
+  outline_color: [0.0, 0.0, 0.0]
+
+  # Background color [R, G, B] in range 0-1
+  outline_bg_color: [1.0, 1.0, 1.0]
+
+  # "filled" = solid silhouette, "stroke" = boundary band only
+  outline_style: "filled"
+
+  # Stroke width in pixels (only used when outline_style is "stroke")
+  outline_thickness: 3
+
+  # Blur radius in pixels applied to the outline (0 = hard two-tone edges).
+  # Does not affect a skeleton overlay in "outline+skeleton" mode.
+  outline_blur: 4
 
 # Camera configuration
 camera:
@@ -591,7 +649,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--render-modes",
         type=str,
         metavar="MODE[,MODE...]",
-        help="Comma-separated render modes: mesh, depth, skeleton, depth+skeleton, skeleton+face, depth+skeleton+face (for .npz); splat mode auto-selected for .ply"
+        help="Comma-separated render modes: mesh, depth, outline, skeleton, "
+             "depth+skeleton, outline+skeleton, skeleton+face, "
+             "depth+skeleton+face (for .npz); splat mode auto-selected for .ply"
     )
     render_group.add_argument(
         "--mesh-color",
@@ -604,6 +664,37 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=str,
         metavar="R,G,B",
         help="Background color as RGB floats 0-1 (e.g., 1.0,1.0,1.0)"
+    )
+    render_group.add_argument(
+        "--outline-color",
+        type=str,
+        metavar="R,G,B",
+        help="Outline foreground (mesh) color as RGB floats 0-1 (default: 0,0,0)"
+    )
+    render_group.add_argument(
+        "--outline-bg-color",
+        type=str,
+        metavar="R,G,B",
+        help="Outline background color as RGB floats 0-1 (default: 1,1,1)"
+    )
+    render_group.add_argument(
+        "--outline-style",
+        type=str,
+        choices=["filled", "stroke"],
+        help="Outline style: filled silhouette or boundary stroke (default: filled)"
+    )
+    render_group.add_argument(
+        "--outline-thickness",
+        type=int,
+        metavar="PIXELS",
+        help="Outline stroke width in pixels (only for --outline-style stroke)"
+    )
+    render_group.add_argument(
+        "--outline-blur",
+        type=int,
+        metavar="PIXELS",
+        help="Blur radius in pixels for the outline, 0 to disable (default: 4). "
+             "Does not blur a skeleton overlay."
     )
 
     # Camera options

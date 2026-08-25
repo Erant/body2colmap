@@ -284,10 +284,16 @@ render:
 Supported composite modes:
 - `mesh+skeleton`
 - `depth+skeleton`
+- `outline+skeleton`
+- `skeleton+face`
+- `depth+skeleton+face`
+
+Base layers are `mesh`, `depth` and `outline`; overlays are `skeleton` and `face`.
 
 NOT supported:
 - `skeleton+mesh` (order matters - base first)
 - `mesh+depth` (no alpha channel to blend)
+- `outline+depth` (two base layers)
 
 ## Performance Issues
 

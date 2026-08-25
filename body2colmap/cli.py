@@ -142,6 +142,11 @@ def main(argv: Optional[list] = None) -> int:
             render_kwargs = {
                 'mesh_color': config.render.mesh_color,
                 'bg_color': config.render.bg_color,
+                'outline_color': config.render.outline_color,
+                'outline_bg_color': config.render.outline_bg_color,
+                'outline_style': config.render.outline_style,
+                'outline_thickness': config.render.outline_thickness,
+                'outline_blur': config.render.outline_blur,
                 'joint_radius': config.skeleton.joint_radius,
                 'bone_radius': config.skeleton.bone_radius,
             }
@@ -395,6 +400,12 @@ def main(argv: Optional[list] = None) -> int:
                     if base_mode == "mesh":
                         composite_modes[base_mode]["color"] = config.render.mesh_color
                         composite_modes[base_mode]["bg_color"] = config.render.bg_color
+                    elif base_mode == "outline":
+                        composite_modes[base_mode]["fg_color"] = config.render.outline_color
+                        composite_modes[base_mode]["bg_color"] = config.render.outline_bg_color
+                        composite_modes[base_mode]["style"] = config.render.outline_style
+                        composite_modes[base_mode]["thickness"] = config.render.outline_thickness
+                        composite_modes[base_mode]["blur"] = config.render.outline_blur
 
                     # Add overlays
                     for overlay in overlay_modes:
@@ -425,6 +436,11 @@ def main(argv: Optional[list] = None) -> int:
                     render_kwargs = {
                         'mesh_color': config.render.mesh_color,
                         'bg_color': config.render.bg_color,
+                        'outline_color': config.render.outline_color,
+                        'outline_bg_color': config.render.outline_bg_color,
+                        'outline_style': config.render.outline_style,
+                        'outline_thickness': config.render.outline_thickness,
+                        'outline_blur': config.render.outline_blur,
                     }
                     if mode_str == "skeleton":
                         render_kwargs['joint_radius'] = config.skeleton.joint_radius

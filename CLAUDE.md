@@ -30,7 +30,7 @@ Each module has a single, clear responsibility:
 - `camera.py`: Camera intrinsics/extrinsics representation
 - `path.py`: Orbit path pattern generation
 - `scene.py`: 3D scene management (mesh, skeleton, lighting)
-- `renderer.py`: Image rendering (mesh, depth, skeleton modes)
+- `renderer.py`: Image rendering (mesh, depth, outline, skeleton modes)
 - `exporter.py`: Export to COLMAP and other formats
 - `utils.py`: Auto-framing, homography warp, focal length utilities
 - `pipeline.py`: High-level orchestration
@@ -273,6 +273,46 @@ Used by `coordinates.cartesian_to_spherical()` / `spherical_to_cartesian()`:
 
 These are the inverse of each other: `spherical_to_cartesian(cartesian_to_spherical(v)) ≈ v`.
 
+## Outline Rendering Mode (2026-08)
+
+### Overview
+`outline` renders the mesh as a **flat two-tone image** — one color for every
+pixel the mesh covers, another for the background — with no lighting, shading
+or gradient. The only information in the frame is the silhouette shape, which
+makes it useful as a control/conditioning image. It composites with the
+skeleton overlay as `outline+skeleton`.
+
+Configurable via `render.outline_color` (foreground), `render.outline_bg_color`,
+`render.outline_style`, `render.outline_thickness` and `render.outline_blur`,
+or the matching `--outline-*` CLI flags.
+
+### Key Design: Coverage From the Depth Buffer
+`Renderer.render_mask()` derives the silhouette from `depth > 0` rather than
+from the color buffer's alpha. The depth buffer does not depend on mesh color,
+lighting or anti-aliasing, so the mask is exact and strictly binary — which is
+what a flat two-tone render needs. Anything else needing mesh coverage should
+call `render_mask()` instead of re-deriving it from a color render.
+
+### Key Design: One Mask, Two Styles
+`style="filled"` (default) fills the whole silhouette. `style="stroke"` draws
+only a band along the boundary, computed morphologically as
+`dilate(mask) & ~erode(mask)`, which handles disconnected components and
+interior holes without any contour bookkeeping.
+
+### Key Design: Blur Is Applied Inside `render_outline()`
+`outline_blur` (radius in px, default 4) Gaussian-blurs color and alpha
+together. It runs at the end of `render_outline()`, **not** on the finished
+composite, so overlays land on top of the already-blurred base and stay sharp —
+the skeleton in `outline+skeleton` is never blurred. Moving this to the
+composite stage would smear the skeleton as well.
+
+### Key Design: Alpha Means Mesh Coverage
+Alpha is the silhouette (union the outward half of a stroke band), **not** the
+drawn foreground. This keeps `outline` interchangeable with `mesh` and `depth`
+as a composite base layer and as a 3DGS training mask, and it stops
+`outline+skeleton` in stroke style from writing the skeleton into
+fully-transparent pixels. See `body2colmap/CLAUDE.md` for the full rationale.
+
 ## Critical Implementation Details
 
 ### Skeleton Rendering
@@ -297,7 +337,7 @@ For proper framing across all aspect ratios:
 - **Format**: YAML for human readability
 - **Override precedence**: CLI args > config file > defaults
 - **Pattern**: Load config from YAML, then selectively override with CLI args that are `not None`
-- **Composite modes**: Support "depth+skeleton", "skeleton+face", "depth+skeleton+face" rendering
+- **Composite modes**: Support "depth+skeleton", "outline+skeleton", "skeleton+face", "depth+skeleton+face" rendering
 
 ## Known Limitations
 

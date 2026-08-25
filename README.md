@@ -54,6 +54,11 @@ body2colmap --input estimation.npz --output-dir ./output
 body2colmap --input estimation.npz --output-dir ./output \
   --skeleton --render-modes depth+skeleton
 
+# Flat outline of the mesh with a skeleton overlay
+body2colmap --input estimation.npz --output-dir ./output \
+  --skeleton --render-modes outline+skeleton \
+  --outline-color 1,1,1 --outline-bg-color 0,0,0
+
 # With face landmarks from a photo of the subject
 python tools/extract_face_landmarks.py photo.jpg -o face.json
 body2colmap --input estimation.npz --output-dir ./output \
@@ -77,6 +82,22 @@ pipeline.set_orbit_params(pattern="helical", n_frames=120)
 # Render frames
 images = pipeline.render_all(modes=["mesh"])
 
+# Outline mode takes its options as render_kwargs
+outlines = pipeline.render_all(
+    modes=["outline"],
+    outline_color=(0.0, 0.0, 0.0),      # foreground (the mesh)
+    outline_bg_color=(1.0, 1.0, 1.0),   # background
+    outline_style="filled",             # or "stroke"
+    outline_thickness=3,                # stroke width in px
+    outline_blur=4,                     # edge blur radius in px, 0 = hard
+)["outline"]
+
+# Composites take them under an "outline" base layer, with shorter keys
+composites = pipeline.render_composite_all({
+    "outline": {"fg_color": (1, 1, 1), "bg_color": (0, 0, 0), "blur": 4},
+    "skeleton": {"joint_radius": 0.015, "bone_radius": 0.008},
+})
+
 # Export
 pipeline.export_colmap("./output")
 pipeline.export_images("./output", images["mesh"])
@@ -95,11 +116,54 @@ pipeline.export_images("./output", images["mesh"])
 Single modes:
 - **mesh**: Colored mesh with lighting
 - **depth**: Depth maps (with optional colormaps)
+- **outline**: Flat two-tone silhouette of the mesh (no shading)
+- **skeleton**: Skeleton joints and bones
 
 Composite modes (overlays combined via `+`):
 - **depth+skeleton**: Depth map with skeleton overlay
+- **outline+skeleton**: Flat silhouette with skeleton overlay
 - **skeleton+face**: Skeleton with face landmark overlay
 - **depth+skeleton+face**: All three combined
+
+#### Outline Mode
+
+`outline` renders the mesh as a single flat color with no lighting or shading,
+so the only information in the image is the shape of the silhouette. Both
+colors are configurable, and the silhouette can be drawn solid or as a
+boundary stroke:
+
+```bash
+# Solid black figure on white (default)
+body2colmap --input estimation.npz --output-dir ./out --render-modes outline
+
+# White figure on dark blue, with a skeleton overlay
+body2colmap --input estimation.npz --output-dir ./out \
+  --skeleton --render-modes outline+skeleton \
+  --outline-color 1,1,1 --outline-bg-color 0.08,0.08,0.16
+
+# Hard-edged silhouette (blur off)
+body2colmap --input estimation.npz --output-dir ./out \
+  --render-modes outline --outline-blur 0
+
+# Line-art contour instead of a solid fill
+body2colmap --input estimation.npz --output-dir ./out \
+  --render-modes outline --outline-style stroke --outline-thickness 4
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--outline-color R,G,B` | `0,0,0` | Foreground (mesh) color, floats 0-1 |
+| `--outline-bg-color R,G,B` | `1,1,1` | Background color, floats 0-1 |
+| `--outline-style {filled,stroke}` | `filled` | Solid silhouette, or boundary band only |
+| `--outline-thickness PIXELS` | `3` | Stroke width; only used with `--outline-style stroke` |
+| `--outline-blur PIXELS` | `4` | Blur radius softening the outline edge; `0` for hard edges |
+
+The alpha channel marks mesh coverage (as in `mesh` and `depth` modes), so
+outline renders can be used as training masks and as composite base layers.
+
+The blur softens both color and alpha together, and is applied to the outline
+only — in `outline+skeleton` the skeleton is composited on top afterwards and
+stays sharp.
 
 ### Auto-Orient
 
@@ -312,6 +376,11 @@ The `image_size` field is important: it allows `body2colmap` to denormalize coor
 | `--face-max-angle DEGREES` | 90 | Max degrees off face normal to render. 90 = full hemisphere, 45 = only within 45 degrees of straight-on. |
 | `--skeleton` | off | Enable skeleton rendering (required for face) |
 | `--render-modes MODES` | `mesh` | Comma-separated list, e.g. `skeleton+face,depth+skeleton+face` |
+| `--outline-color R,G,B` | `0,0,0` | Outline foreground color (see [Outline Mode](#outline-mode)) |
+| `--outline-bg-color R,G,B` | `1,1,1` | Outline background color |
+| `--outline-style {filled,stroke}` | `filled` | Outline fill style |
+| `--outline-thickness PIXELS` | `3` | Outline stroke width (`stroke` style only) |
+| `--outline-blur PIXELS` | `4` | Outline blur radius; `0` disables. Never blurs the skeleton. |
 
 ### Config File
 
