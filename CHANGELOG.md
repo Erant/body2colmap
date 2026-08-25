@@ -5,6 +5,22 @@ All notable changes to body2colmap will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Eyes rendered as shapes, not dots**: face landmark rendering now draws each eye as
+  a filled two-tone shape — a flat sclera with a pupil disc centered on the pupil
+  landmark — instead of the 6-point contour dots and their outline. Dots carry almost
+  no gaze information at video-diffusion resolutions; an eye with a visible pupil does.
+  - `face.build_eye_geometry()` builds both eyes from the fitted OpenPose Face 70
+    landmarks; the contour is Catmull-Rom smoothed and flattened into its own plane
+  - `pupil_scale` sets the pupil diameter as a fraction of the eye height measured at
+    the pupil, so `1.0` is a disc touching the upper and lower lid. Values above 1.0
+    are rejected rather than clipped.
+  - The eye contour points, the pupil points and the 12 eye-loop bones are no longer
+    drawn on top of the shapes
+  - `skeleton.eye_style: "dots"` (`--eye-style dots`) restores the previous
+    landmark-dot rendering
+  - Config: `skeleton.eye_style`, `skeleton.eye_color`, `skeleton.pupil_color`,
+    `skeleton.pupil_scale`
+  - CLI: `--eye-style`, `--eye-color`, `--pupil-color`, `--pupil-scale`
 - **`outline` render mode**: renders the mesh as a flat two-tone silhouette — one
   color for every pixel the mesh covers, another for the background, with no
   lighting or shading. Combinable with the skeleton overlay as `outline+skeleton`.

@@ -367,10 +367,40 @@ from seeing facial features on the back of the head.
 These two vectors span the face plane horizontally and vertically; their cross product
 gives the outward-facing normal.
 
-**Rendering**: White points (icospheres) + optional white cylinders for 63 OpenPose
+**Rendering**: White points (icospheres) + optional white cylinders for the OpenPose
 face bone connections. Smaller geometry than body skeleton (~35% of body joint/bone radii).
+The eyes are the exception — see below.
 
-**CLI**: `--face-mode full|points|none`, composite mode `skeleton+face`.
+**Eye Rendering**: The eyes are drawn as filled two-tone shapes, not landmark dots.
+`build_eye_geometry()` turns each 6-point eye contour (36-41, 42-47) into a flat
+sclera surface with a pupil disc centered on the pupil landmark (68/69).
+`get_face_draw_lists(eye_style)` is what the renderer iterates, so the dots and the
+eye outline segments the shapes replace are never drawn on top of them.
+
+`eye_style="dots"` is the escape hatch back to the original rendering: it makes
+`get_face_draw_lists()` return every point and bone, and `_render_face()` returns
+before building any eye geometry. There is no duplicated draw loop.
+
+Three properties matter:
+1. **The contour is flattened into its own plane.** The eye opening curves around
+   the eyeball, and that curvature bulges in front of the (flat) pupil disc and
+   clips it into a bowtie. Both shapes read as flat areas anyway, so the
+   projection costs nothing visually. Do not remove it.
+2. **Eye height is measured at the pupil**, as twice the distance from the pupil
+   center to the nearest lid segment — not as the height of the whole contour. The
+   pupil sits off-center, so a disc sized from the tallest part of the opening
+   would poke through a lid near the corners. With this definition,
+   `pupil_scale = 1.0` touches both lids exactly and `pupil_scale <= 1.0`
+   (asserted) is what guarantees the pupil never spills out.
+3. **Winding is decided from the geometry**, not assumed: the left and right
+   contours run in opposite directions, and pyrender backface-culls by default.
+
+The 6 contour points are Catmull-Rom resampled to `EYE_CONTOUR_SEGMENTS` before
+filling — a raw hexagon reads as angular and its straight edges cut the corners
+off the opening.
+
+**CLI**: `--face-mode full|points|none`, `--eye-style shape|dots`, `--eye-color`,
+`--pupil-color`, `--pupil-scale`, composite mode `skeleton+face`.
 
 **Standalone utility**: `tools/extract_face_landmarks.py` runs MediaPipe Face Mesh on
 an image and outputs JSON with 70 OpenPose-format keypoints. Only dependency on

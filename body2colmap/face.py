@@ -29,7 +29,7 @@ import json
 import logging
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Optional, List, Union
+from typing import Tuple, Optional, List, NamedTuple, Union
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -181,6 +181,394 @@ OPENPOSE_FACE_BONES = [
 
 # Face color: solid white (OpenPose convention)
 FACE_COLOR = (1.0, 1.0, 1.0)
+
+# =============================================================================
+# Eye Geometry
+# =============================================================================
+# The eyes are not drawn as landmark dots.  A ring of dots plus a pupil dot
+# carries almost no gaze information at video-diffusion resolutions, so the
+# eye contour is instead filled as a flat two-tone shape: a solid sclera in
+# `eye_color` with a `pupil_color` disc sitting on top of it.  The pupil
+# position comes from landmarks 68/69, which is where gaze direction lives.
+
+RIGHT_EYE_CONTOUR_INDICES = [36, 37, 38, 39, 40, 41]
+LEFT_EYE_CONTOUR_INDICES = [42, 43, 44, 45, 46, 47]
+RIGHT_PUPIL_INDEX = 68
+LEFT_PUPIL_INDEX = 69
+
+# Landmarks consumed by the eye shapes.  Drawing these as dots as well would
+# just speckle the sclera.
+EYE_LANDMARK_INDICES = frozenset(
+    RIGHT_EYE_CONTOUR_INDICES + LEFT_EYE_CONTOUR_INDICES
+    + [RIGHT_PUPIL_INDEX, LEFT_PUPIL_INDEX]
+)
+
+# All face keypoints, drawn as dots under eye_style="dots".
+ALL_FACE_POINT_INDICES = list(range(len(CANONICAL_FACE_LANDMARKS_70)))
+
+# Face keypoints still rendered as dots under eye_style="shape"
+# (everything except the eyes).
+FACE_POINT_INDICES_EXCLUDING_EYES = [
+    i for i in ALL_FACE_POINT_INDICES if i not in EYE_LANDMARK_INDICES
+]
+
+# Face bones still rendered as cylinders under eye_style="shape".  The two
+# eye loops are dropped: the filled eye surface already draws that outline.
+FACE_BONES_EXCLUDING_EYES = [
+    (start, end) for (start, end) in OPENPOSE_FACE_BONES
+    if start not in EYE_LANDMARK_INDICES and end not in EYE_LANDMARK_INDICES
+]
+
+# Eye rendering styles:
+#   "shape" - filled sclera with a pupil disc (default)
+#   "dots"  - the original OpenPose landmark dots and eye outline
+EYE_STYLES = ("shape", "dots")
+DEFAULT_EYE_STYLE = "shape"
+
+# Eye rendering defaults
+DEFAULT_EYE_COLOR = (1.0, 1.0, 1.0)     # sclera, matches FACE_COLOR
+DEFAULT_PUPIL_COLOR = (0.0, 0.0, 0.0)
+DEFAULT_PUPIL_SCALE = 0.75              # fraction of eye height (1.0 = full)
+PUPIL_SEGMENTS = 32                     # disc tessellation
+
+# The 6-point eye contour is resampled to this many points before filling.
+# A raw hexagon reads as angular and its straight edges cut the corners off
+# the opening, which would shrink the largest pupil that fits inside it.
+EYE_CONTOUR_SEGMENTS = 48
+
+# The pupil disc is pushed this fraction of the eye height along the eye
+# normal so it never z-fights with the sclera it sits on.
+PUPIL_LIFT_RATIO = 0.05
+
+
+def get_face_draw_lists(
+    eye_style: str = DEFAULT_EYE_STYLE,
+) -> Tuple[List[int], List[Tuple[int, int]]]:
+    """
+    Get the face keypoints and bones to draw for an eye rendering style.
+
+    Under "shape" the eye landmarks and the eye contour bones are withheld,
+    because build_eye_geometry() draws filled eye shapes in their place.
+    Under "dots" everything is drawn, which is the original OpenPose Face 70
+    rendering.
+
+    Args:
+        eye_style: "shape" or "dots"
+
+    Returns:
+        point_indices: Landmark indices to draw as spheres
+        bones: (start, end) landmark index pairs to draw as cylinders
+
+    Raises:
+        ValueError: If eye_style is not a known style
+    """
+    if eye_style == "shape":
+        return FACE_POINT_INDICES_EXCLUDING_EYES, FACE_BONES_EXCLUDING_EYES
+    if eye_style == "dots":
+        return ALL_FACE_POINT_INDICES, OPENPOSE_FACE_BONES
+
+    raise ValueError(
+        f"Unknown eye_style: {eye_style!r}. Expected one of {EYE_STYLES}"
+    )
+
+
+class EyeGeometry(NamedTuple):
+    """
+    Renderable geometry for a single eye, in world coordinates.
+
+    Both meshes are flat (they lie in the eye's own least-squares plane) and
+    are wound so their front faces point along `normal`, i.e. out of the face.
+
+    Attributes:
+        eye_vertices: Sclera vertices, shape (N + 1, 3) — centroid then
+            resampled contour
+        eye_faces: Sclera triangle fan, shape (N, 3)
+        pupil_vertices: Pupil disc vertices, shape (segments + 1, 3)
+        pupil_faces: Pupil triangle fan, shape (segments, 3)
+        normal: Unit outward normal of the eye plane, shape (3,)
+        pupil_center: Disc center in world coords, shape (3,)
+        pupil_radius: Disc radius in world units
+        eye_height: Height of the eye opening at the pupil, in world units
+    """
+    eye_vertices: NDArray[np.float32]
+    eye_faces: NDArray[np.int32]
+    pupil_vertices: NDArray[np.float32]
+    pupil_faces: NDArray[np.int32]
+    normal: NDArray[np.float32]
+    pupil_center: NDArray[np.float32]
+    pupil_radius: float
+    eye_height: float
+
+
+def _fit_plane_normal(
+    points: NDArray[np.float32],
+    reference: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """
+    Least-squares plane normal of a point set, oriented to agree with a reference.
+
+    Args:
+        points: Points to fit, shape (N, 3)
+        reference: Direction the returned normal must point along (dot > 0)
+
+    Returns:
+        Unit normal, shape (3,)
+    """
+    centered = points - points.mean(axis=0)
+    # Smallest singular vector = plane normal
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    normal = vt[-1]
+
+    norm = np.linalg.norm(normal)
+    if norm < 1e-10:
+        return np.asarray(reference, dtype=np.float32)
+
+    normal = normal / norm
+    if np.dot(normal, reference) < 0:
+        normal = -normal
+
+    return normal.astype(np.float32)
+
+
+def _distance_to_polygon_edges(
+    point: NDArray[np.float32],
+    polygon: NDArray[np.float32],
+) -> float:
+    """
+    Minimum distance from a 2D point to the edges of a closed 2D polygon.
+
+    Args:
+        point: Query point, shape (2,)
+        polygon: Closed polygon vertices in order, shape (N, 2)
+
+    Returns:
+        Distance to the nearest edge
+    """
+    starts = polygon
+    ends = np.roll(polygon, -1, axis=0)
+
+    edges = ends - starts
+    lengths_sq = np.sum(edges ** 2, axis=1)
+    lengths_sq = np.maximum(lengths_sq, 1e-20)
+
+    # Project the point onto each edge, clamped to the segment
+    t = np.sum((point - starts) * edges, axis=1) / lengths_sq
+    t = np.clip(t, 0.0, 1.0)
+    closest = starts + t[:, np.newaxis] * edges
+
+    return float(np.min(np.linalg.norm(point - closest, axis=1)))
+
+
+def _resample_closed_curve(
+    points: NDArray[np.float32],
+    n_samples: int,
+) -> NDArray[np.float32]:
+    """
+    Smooth a closed polygon with a Catmull-Rom spline through its vertices.
+
+    The spline passes through every input point, so the eye corners and lid
+    midpoints stay exactly where the landmarks put them; only the straight
+    edges between them become curved.
+
+    Args:
+        points: Closed loop vertices in order, shape (N, 3)
+        n_samples: Total number of output samples (>= N)
+
+    Returns:
+        Resampled loop, shape (n_samples, 3)
+    """
+    n = len(points)
+    per_segment = max(1, int(round(n_samples / n)))
+
+    # Catmull-Rom needs the neighbours on both sides of each segment
+    p0 = np.roll(points, 1, axis=0)
+    p1 = points
+    p2 = np.roll(points, -1, axis=0)
+    p3 = np.roll(points, -2, axis=0)
+
+    t = np.linspace(0.0, 1.0, per_segment, endpoint=False)[:, np.newaxis, np.newaxis]
+    t2 = t * t
+    t3 = t2 * t
+
+    # Uniform Catmull-Rom basis
+    samples = 0.5 * (
+        (2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    )
+
+    # samples is (per_segment, N, 3); interleave so the loop stays in order
+    return samples.transpose(1, 0, 2).reshape(-1, 3).astype(np.float32)
+
+
+def _build_single_eye(
+    contour: NDArray[np.float32],
+    pupil_landmark: NDArray[np.float32],
+    face_normal: NDArray[np.float32],
+    pupil_scale: float,
+    segments: int,
+) -> EyeGeometry:
+    """
+    Build sclera and pupil meshes for one eye.
+
+    Args:
+        contour: Eye contour landmarks in loop order, shape (6, 3)
+            (outer corner, upper lid, inner corner, lower lid)
+        pupil_landmark: Pupil landmark, shape (3,)
+        face_normal: Outward face normal, used to orient the eye plane
+        pupil_scale: Pupil diameter as a fraction of the eye height (0, 1]
+        segments: Number of segments in the pupil disc
+
+    Returns:
+        EyeGeometry for this eye
+    """
+    normal = _fit_plane_normal(contour, face_normal)
+
+    # Corner indices are needed for the in-plane basis before resampling
+    outer_corner = contour[0]
+    inner_corner = contour[3]
+
+    contour = _resample_closed_curve(contour, EYE_CONTOUR_SEGMENTS)
+    center = contour.mean(axis=0)
+
+    # Flatten the contour into its own plane.  The real eye opening curves
+    # around the eyeball, and that curvature would bulge in front of the
+    # (flat) pupil disc and clip it.  Both shapes are meant to read as flat
+    # two-tone areas anyway, so the projection costs nothing visually.
+    contour = contour - ((contour - center) @ normal)[:, np.newaxis] * normal
+
+    # In-plane basis: u runs corner to corner, v is the perpendicular
+    # (roughly vertical) axis the eye height is measured along.
+    u = inner_corner - outer_corner
+    u = u - np.dot(u, normal) * normal
+    u_norm = np.linalg.norm(u)
+    if u_norm < 1e-10:
+        # Degenerate contour: fall back to any in-plane axis
+        u = np.cross(normal, [0.0, 1.0, 0.0])
+        u_norm = np.linalg.norm(u)
+        if u_norm < 1e-10:
+            u = np.cross(normal, [1.0, 0.0, 0.0])
+            u_norm = np.linalg.norm(u)
+    u = (u / u_norm).astype(np.float32)
+    v = np.cross(normal, u).astype(np.float32)
+
+    # Project the contour and the pupil into the plane
+    offsets = contour - center
+    contour_2d = np.stack([offsets @ u, offsets @ v], axis=1)
+    pupil_offset = pupil_landmark - center
+    pupil_2d = np.array([pupil_offset @ u, pupil_offset @ v], dtype=np.float32)
+
+    # Eye height is measured at the pupil, not across the whole contour: the
+    # pupil sits off-center, so the tallest part of the opening is elsewhere
+    # and a disc sized from it would poke through a lid.  The distance from
+    # the pupil to the nearest lid is half the opening it sits in, so at
+    # pupil_scale = 1.0 the disc touches both lids and never spills out.
+    eye_height = 2.0 * _distance_to_polygon_edges(pupil_2d, contour_2d)
+    radius = pupil_scale * eye_height / 2.0
+
+    # Sclera: triangle fan from the contour centroid
+    n_contour = len(contour)
+    eye_vertices = np.vstack([center[np.newaxis], contour]).astype(np.float32)
+    eye_faces = np.array(
+        [(0, i + 1, (i + 1) % n_contour + 1) for i in range(n_contour)],
+        dtype=np.int32
+    )
+
+    # Pupil: triangle fan disc, lifted off the sclera to avoid z-fighting
+    lift = normal * (eye_height * PUPIL_LIFT_RATIO)
+    pupil_center = (center + pupil_2d[0] * u + pupil_2d[1] * v + lift).astype(np.float32)
+
+    angles = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    ring = (
+        pupil_center[np.newaxis]
+        + radius * (np.cos(angles)[:, np.newaxis] * u[np.newaxis]
+                    + np.sin(angles)[:, np.newaxis] * v[np.newaxis])
+    )
+    pupil_vertices = np.vstack([pupil_center[np.newaxis], ring]).astype(np.float32)
+    pupil_faces = np.array(
+        [(0, i + 1, (i + 1) % segments + 1) for i in range(segments)],
+        dtype=np.int32
+    )
+
+    # Wind both fans so their front faces look out of the face.  The contour
+    # loop direction differs between the left and right eye, so this is
+    # decided from the geometry rather than assumed.
+    first = eye_vertices[eye_faces[0]]
+    winding_normal = np.cross(first[1] - first[0], first[2] - first[0])
+    if np.dot(winding_normal, normal) < 0:
+        eye_faces = eye_faces[:, ::-1].copy()
+
+    pupil_first = pupil_vertices[pupil_faces[0]]
+    pupil_winding = np.cross(
+        pupil_first[1] - pupil_first[0], pupil_first[2] - pupil_first[0]
+    )
+    if np.dot(pupil_winding, normal) < 0:
+        pupil_faces = pupil_faces[:, ::-1].copy()
+
+    return EyeGeometry(
+        eye_vertices=eye_vertices,
+        eye_faces=eye_faces,
+        pupil_vertices=pupil_vertices,
+        pupil_faces=pupil_faces,
+        normal=normal,
+        pupil_center=pupil_center,
+        pupil_radius=float(radius),
+        eye_height=eye_height,
+    )
+
+
+def build_eye_geometry(
+    face_landmarks: NDArray[np.float32],
+    pupil_scale: float = DEFAULT_PUPIL_SCALE,
+    segments: int = PUPIL_SEGMENTS,
+) -> List[EyeGeometry]:
+    """
+    Build flat sclera + pupil meshes for both eyes.
+
+    Each eye contour (landmarks 36-41 and 42-47) is filled as a triangle fan
+    lying in the contour's own least-squares plane, and a pupil disc centered
+    on the pupil landmark (68/69) is lifted slightly in front of it.
+
+    Args:
+        face_landmarks: Fitted OpenPose Face 70 landmarks in world
+            coordinates, shape (70, 3)
+        pupil_scale: Pupil diameter as a fraction of the eye height at the
+            pupil.  1.0 gives a disc that touches the upper and lower lid;
+            smaller values shrink it proportionally.  Must be in (0, 1].
+        segments: Number of segments in the pupil disc
+
+    Returns:
+        [right_eye, left_eye] geometry
+
+    Raises:
+        AssertionError: If pupil_scale is outside (0, 1], or the landmark
+            array is the wrong shape.
+    """
+    assert 0.0 < pupil_scale <= 1.0, (
+        f"pupil_scale must be in (0, 1], got {pupil_scale}"
+    )
+    assert face_landmarks.shape == (70, 3), (
+        f"Expected face landmarks shape (70, 3), got {face_landmarks.shape}"
+    )
+    assert segments >= 3, f"Pupil needs at least 3 segments, got {segments}"
+
+    face_normal = compute_face_normal(face_landmarks)
+
+    return [
+        _build_single_eye(
+            face_landmarks[contour_indices],
+            face_landmarks[pupil_index],
+            face_normal,
+            pupil_scale,
+            segments,
+        )
+        for contour_indices, pupil_index in (
+            (RIGHT_EYE_CONTOUR_INDICES, RIGHT_PUPIL_INDEX),
+            (LEFT_EYE_CONTOUR_INDICES, LEFT_PUPIL_INDEX),
+        )
+    ]
+
 
 
 # =============================================================================

@@ -13,6 +13,8 @@ from typing import Optional, Tuple, List, Dict, Any
 from pathlib import Path
 import argparse
 
+from .face import EYE_STYLES
+
 
 @dataclass
 class RenderConfig:
@@ -66,6 +68,51 @@ class PathConfig:
     helical_lead_out_deg: float = 45.0
 
 
+def _validate_eye_style(value: str) -> str:
+    """
+    Validate an eye rendering style.
+
+    Args:
+        value: "shape" (filled eye with a pupil disc) or "dots" (the original
+            OpenPose landmark dots)
+
+    Returns:
+        The validated value
+
+    Raises:
+        ValueError: If the value is not a known style
+    """
+    if value not in EYE_STYLES:
+        raise ValueError(
+            f"eye_style must be one of {EYE_STYLES}, got {value!r}"
+        )
+    return value
+
+
+def _validate_pupil_scale(value: float) -> float:
+    """
+    Validate that a pupil scale is in (0, 1].
+
+    Above 1.0 the pupil would be larger than the eye opening it sits in and
+    would spill past the lids, so it is rejected rather than clamped.
+
+    Args:
+        value: Pupil diameter as a fraction of the eye height
+
+    Returns:
+        The validated value
+
+    Raises:
+        ValueError: If the value is outside (0, 1]
+    """
+    if not 0.0 < value <= 1.0:
+        raise ValueError(
+            f"pupil_scale must be in (0, 1], got {value}. "
+            f"1.0 is a pupil as tall as the eye opening."
+        )
+    return value
+
+
 @dataclass
 class SkeletonConfig:
     """Skeleton rendering configuration."""
@@ -76,6 +123,10 @@ class SkeletonConfig:
     face_mode: str = None  # None, "full", or "points"
     face_landmarks: str = None  # Path to face landmarks JSON file
     face_max_angle: float = 90.0  # Max degrees off face normal to render (90 = full hemisphere)
+    eye_style: str = "shape"  # "shape" (filled eye + pupil) or "dots" (landmark dots)
+    eye_color: Tuple[float, float, float] = (1.0, 1.0, 1.0)   # filled eye shape (sclera)
+    pupil_color: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    pupil_scale: float = 0.75  # Pupil diameter as a fraction of eye height, (0, 1]
 
 
 @dataclass
@@ -243,6 +294,22 @@ class Config:
                 config.skeleton.face_mode = "full"
         if args.face_max_angle is not None:
             config.skeleton.face_max_angle = args.face_max_angle
+        if args.eye_style:
+            config.skeleton.eye_style = _validate_eye_style(args.eye_style)
+        if args.eye_color:
+            try:
+                r, g, b = [float(x) for x in args.eye_color.split(',')]
+                config.skeleton.eye_color = (r, g, b)
+            except ValueError:
+                raise ValueError(f"Invalid eye-color format: {args.eye_color}. Use R,G,B (e.g., 1.0,1.0,1.0)")
+        if args.pupil_color:
+            try:
+                r, g, b = [float(x) for x in args.pupil_color.split(',')]
+                config.skeleton.pupil_color = (r, g, b)
+            except ValueError:
+                raise ValueError(f"Invalid pupil-color format: {args.pupil_color}. Use R,G,B (e.g., 0.0,0.0,0.0)")
+        if args.pupil_scale is not None:
+            config.skeleton.pupil_scale = _validate_pupil_scale(args.pupil_scale)
 
         # Export overrides
         if args.no_colmap:
@@ -333,7 +400,15 @@ class Config:
             bone_radius=skeleton_data.get('bone_radius', 0.008),
             face_mode=skeleton_data.get('face_mode', None),
             face_landmarks=skeleton_data.get('face_landmarks', None),
-            face_max_angle=skeleton_data.get('face_max_angle', 90.0)
+            face_max_angle=skeleton_data.get('face_max_angle', 90.0),
+            eye_style=_validate_eye_style(
+                skeleton_data.get('eye_style', 'shape')
+            ),
+            eye_color=tuple(skeleton_data.get('eye_color', [1.0, 1.0, 1.0])),
+            pupil_color=tuple(skeleton_data.get('pupil_color', [0.0, 0.0, 0.0])),
+            pupil_scale=_validate_pupil_scale(
+                skeleton_data.get('pupil_scale', 0.75)
+            )
         )
 
         # Parse export config
@@ -412,7 +487,11 @@ class Config:
                 'bone_radius': self.skeleton.bone_radius,
                 'face_mode': self.skeleton.face_mode,
                 'face_landmarks': self.skeleton.face_landmarks,
-                'face_max_angle': self.skeleton.face_max_angle
+                'face_max_angle': self.skeleton.face_max_angle,
+                'eye_style': self.skeleton.eye_style,
+                'eye_color': list(self.skeleton.eye_color),
+                'pupil_color': list(self.skeleton.pupil_color),
+                'pupil_scale': self.skeleton.pupil_scale
             },
             'export': {
                 'output_dir': self.export.output_dir,
@@ -566,6 +645,19 @@ skeleton:
   # Maximum angle (degrees) off the face normal at which face landmarks are rendered.
   # 90 = full frontal hemisphere (default), 45 = only +/-45 degrees from straight-on.
   face_max_angle: 90.0
+
+  # How to render the eyes: "shape" (a filled eye with a pupil disc) or
+  # "dots" (the original OpenPose landmark dots and eye outline).
+  eye_style: "shape"
+
+  # Color of the eye shape (sclera) and of the pupil, as RGB floats 0-1.
+  # Both apply to eye_style "shape" only.
+  eye_color: [1.0, 1.0, 1.0]
+  pupil_color: [0.0, 0.0, 0.0]
+
+  # Pupil diameter as a fraction of the eye height, in (0, 1].
+  # 1.0 = a disc touching the upper and lower lid.
+  pupil_scale: 0.75
 
 # Export configuration
 export:
@@ -815,6 +907,33 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Path to face landmarks JSON file (from extract_face_landmarks.py). "
              "When provided, uses subject-specific face geometry instead of "
              "the generic canonical face model. Implies --face-mode full."
+    )
+    skeleton_group.add_argument(
+        "--eye-style",
+        choices=["shape", "dots"],
+        help="How to render the eyes: shape (filled eye with a pupil disc, "
+             "default), dots (the original OpenPose landmark dots and eye "
+             "outline). Colors and pupil size apply to 'shape' only."
+    )
+    skeleton_group.add_argument(
+        "--eye-color",
+        type=str,
+        metavar="R,G,B",
+        help="Color of the filled eye shape (sclera) as RGB floats 0-1 "
+             "(default: 1,1,1)"
+    )
+    skeleton_group.add_argument(
+        "--pupil-color",
+        type=str,
+        metavar="R,G,B",
+        help="Color of the pupil disc as RGB floats 0-1 (default: 0,0,0)"
+    )
+    skeleton_group.add_argument(
+        "--pupil-scale",
+        type=float,
+        metavar="SCALE",
+        help="Pupil diameter as a fraction of the eye height, in (0, 1]. "
+             "1.0 = a disc touching the upper and lower lid (default: 0.75)"
     )
     skeleton_group.add_argument(
         "--face-max-angle",

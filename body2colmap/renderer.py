@@ -17,6 +17,33 @@ from .scene import Scene
 from .camera import Camera
 
 
+def _flat_color_rgba8(color: Tuple[float, float, float]) -> NDArray[np.uint8]:
+    """
+    Convert an RGB float color (0-1) to an opaque uint8 RGBA vertex color.
+
+    The color is gamma pre-compensated so the rendered pixel matches the
+    requested value. pyrender's shader gamma-encodes its output
+    (``pow(color, 1/2.2)``) without ever decoding vertex colors, so an
+    uncompensated mid-tone comes back visibly washed out — e.g. a 0.35
+    channel renders as 0.62.
+
+    This only holds for a pass lit by ambient light alone, where the shader
+    reduces to ``pow(albedo * ambient, 1/2.2)``. It is not valid for passes
+    with directional or point lights.
+
+    Args:
+        color: RGB floats in 0-1
+
+    Returns:
+        Opaque RGBA uint8 array, shape (4,)
+    """
+    encoded = np.clip(np.asarray(color, dtype=np.float64), 0.0, 1.0) ** 2.2
+    return np.array(
+        [int(round(c * 255)) for c in encoded] + [255],
+        dtype=np.uint8
+    )
+
+
 class Renderer:
     """
     Render images from Scene using pyrender.
@@ -437,6 +464,10 @@ class Renderer:
         face_mode: str = None,
         face_landmarks: Optional[NDArray[np.float32]] = None,
         face_max_angle: float = 90.0,
+        eye_style: str = None,
+        eye_color: Tuple[float, float, float] = None,
+        pupil_color: Tuple[float, float, float] = None,
+        pupil_scale: float = None,
         bg_color: Optional[Tuple[float, float, float]] = None,
     ) -> NDArray[np.uint8]:
         """
@@ -460,6 +491,13 @@ class Renderer:
                 canonical face model for Procrustes fitting.
             face_max_angle: Maximum angle (degrees) off the face normal at which
                 face landmarks are rendered. 90 = full frontal hemisphere.
+            eye_style: How to render the eyes:
+                - "shape": filled eye with a pupil disc (default)
+                - "dots": the original OpenPose landmark dots and eye outline
+            eye_color: RGB color (0-1) for the filled eye shape (sclera)
+            pupil_color: RGB color (0-1) for the pupil disc
+            pupil_scale: Pupil diameter as a fraction of the eye height,
+                in (0, 1]. 1.0 = a disc touching the upper and lower lid.
             bg_color: RGB color (0-1 range) for background. If None,
                 background remains transparent (alpha=0).
 
@@ -626,6 +664,10 @@ class Renderer:
                 face_bone_radius=bone_radius * 0.35,
                 face_landmarks=face_landmarks,
                 face_max_angle=face_max_angle,
+                eye_style=eye_style,
+                eye_color=eye_color,
+                pupil_color=pupil_color,
+                pupil_scale=pupil_scale,
             )
             if face_image is not None:
                 skel_color = np.array(skel_color, copy=True)
@@ -662,6 +704,10 @@ class Renderer:
         face_bone_radius: float = 0.003,
         face_landmarks: Optional[NDArray[np.float32]] = None,
         face_max_angle: float = 90.0,
+        eye_style: str = None,
+        eye_color: Tuple[float, float, float] = None,
+        pupil_color: Tuple[float, float, float] = None,
+        pupil_scale: float = None,
     ) -> Optional[NDArray[np.uint8]]:
         """
         Render face landmarks as a separate RGBA image.
@@ -679,6 +725,18 @@ class Renderer:
             face_landmarks: Optional custom face landmarks in OpenPose Face 70
                 format, shape (70, 3). Passed to fit_face_to_skeleton() to use
                 instead of the canonical face model.
+            face_max_angle: Maximum angle (degrees) off the face normal at which
+                face landmarks are rendered. 90 = full frontal hemisphere.
+            eye_style: "shape" for a filled eye with a pupil disc, "dots"
+                for the original landmark dots. Defaults to
+                face.DEFAULT_EYE_STYLE. The eye color and scale options below
+                apply to "shape" only.
+            eye_color: RGB color (0-1) for the filled eye shape (sclera).
+                Defaults to face.DEFAULT_EYE_COLOR.
+            pupil_color: RGB color (0-1) for the pupil disc.
+                Defaults to face.DEFAULT_PUPIL_COLOR.
+            pupil_scale: Pupil diameter as a fraction of the eye height,
+                in (0, 1]. Defaults to face.DEFAULT_PUPIL_SCALE.
 
         Returns:
             RGBA image with face landmarks, or None if face is not visible
@@ -709,11 +767,17 @@ class Renderer:
             ambient_light=[1.0, 1.0, 1.0]
         )
 
-        face_color_uint8 = np.array([255, 255, 255, 255], dtype=np.uint8)
+        face_color_uint8 = _flat_color_rgba8(face_module.FACE_COLOR)
+
+        if eye_style is None:
+            eye_style = face_module.DEFAULT_EYE_STYLE
+        # Under eye_style="shape" the eye landmarks and eye contour bones are
+        # withheld here and drawn as filled eye shapes below instead.
+        point_indices, bones = face_module.get_face_draw_lists(eye_style)
 
         # Add face bones as cylinders (if full mode)
         if face_mode == "full":
-            for start_idx, end_idx in face_module.OPENPOSE_FACE_BONES:
+            for start_idx, end_idx in bones:
                 start_pos = fitted_landmarks[start_idx]
                 end_pos = fitted_landmarks[end_idx]
 
@@ -755,14 +819,54 @@ class Renderer:
                 pr_scene.add(mesh)
 
         # Add face joints as spheres
-        for face_pos in fitted_landmarks:
+        for idx in point_indices:
             sphere = trimesh.creation.icosphere(subdivisions=1, radius=face_joint_radius)
-            sphere.vertices += face_pos
+            sphere.vertices += fitted_landmarks[idx]
             sphere.visual.vertex_colors = face_color_uint8
             mesh = pyrender.Mesh.from_trimesh(sphere, smooth=False)
             pr_scene.add(mesh)
 
-        # Add camera and render
+        # Add the eyes as flat filled shapes with a pupil disc on top
+        if eye_style != "shape":
+            return self._render_face_scene(pr_scene, camera)
+
+        eye_color_uint8 = _flat_color_rgba8(
+            eye_color if eye_color is not None else face_module.DEFAULT_EYE_COLOR
+        )
+        pupil_color_uint8 = _flat_color_rgba8(
+            pupil_color if pupil_color is not None else face_module.DEFAULT_PUPIL_COLOR
+        )
+        if pupil_scale is None:
+            pupil_scale = face_module.DEFAULT_PUPIL_SCALE
+
+        for eye in face_module.build_eye_geometry(
+            fitted_landmarks, pupil_scale=pupil_scale
+        ):
+            for vertices, faces, color in (
+                (eye.eye_vertices, eye.eye_faces, eye_color_uint8),
+                (eye.pupil_vertices, eye.pupil_faces, pupil_color_uint8),
+            ):
+                tri = trimesh.Trimesh(
+                    vertices=vertices, faces=faces, process=False
+                )
+                tri.visual.vertex_colors = color
+                pr_scene.add(pyrender.Mesh.from_trimesh(tri, smooth=False))
+
+        return self._render_face_scene(pr_scene, camera)
+
+    def _render_face_scene(self, pr_scene, camera: Camera) -> NDArray[np.uint8]:
+        """
+        Add a camera to a prepared face scene and render it.
+
+        Args:
+            pr_scene: pyrender Scene holding the face geometry
+            camera: Camera to render from
+
+        Returns:
+            RGBA image, shape (height, width, 4), dtype uint8
+        """
+        import pyrender
+
         pr_camera = pyrender.IntrinsicsCamera(
             fx=camera.fx, fy=camera.fy,
             cx=camera.cx, cy=camera.cy
@@ -835,11 +939,19 @@ class Renderer:
         face_mode = None
         custom_face_landmarks = None
         face_max_angle = 90.0
+        eye_style = None
+        eye_color = None
+        pupil_color = None
+        pupil_scale = None
         if "face" in modes and self.scene.skeleton_joints is not None:
             face_opts = modes["face"] if isinstance(modes["face"], dict) else {}
             face_mode = face_opts.get("face_mode", "full")
             custom_face_landmarks = face_opts.get("face_landmarks")
             face_max_angle = face_opts.get("face_max_angle", 90.0)
+            eye_style = face_opts.get("eye_style")
+            eye_color = face_opts.get("eye_color")
+            pupil_color = face_opts.get("pupil_color")
+            pupil_scale = face_opts.get("pupil_scale")
 
         # If skeleton is present but no mesh/depth base, render skeleton directly
         if base_image is None:
@@ -859,6 +971,10 @@ class Renderer:
                 face_mode=face_mode,
                 face_landmarks=custom_face_landmarks,
                 face_max_angle=face_max_angle,
+                eye_style=eye_style,
+                eye_color=eye_color,
+                pupil_color=pupil_color,
+                pupil_scale=pupil_scale,
                 bg_color=skel_opts.get("bg_color"),
             )
 
@@ -876,6 +992,10 @@ class Renderer:
                 face_mode=face_mode,
                 face_landmarks=custom_face_landmarks,
                 face_max_angle=face_max_angle,
+                eye_style=eye_style,
+                eye_color=eye_color,
+                pupil_color=pupil_color,
+                pupil_scale=pupil_scale,
             )
 
             # Composite skeleton over base using alpha blending

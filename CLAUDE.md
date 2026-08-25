@@ -313,6 +313,46 @@ as a composite base layer and as a 3DGS training mask, and it stops
 `outline+skeleton` in stroke style from writing the skeleton into
 fully-transparent pixels. See `body2colmap/CLAUDE.md` for the full rationale.
 
+## Eye Rendering (2026-08)
+
+### Overview
+Face landmark rendering draws the eyes as **filled two-tone shapes** rather than
+as the MediaPipe/OpenPose dots: each 6-point eye contour is filled flat in
+`eye_color`, with a `pupil_color` disc centered on the pupil landmark (68/69).
+A ring of dots carries almost no gaze information at video-diffusion
+resolutions; a sclera with a dark pupil does, which is the point — these frames
+condition gaze in the video model.
+
+Configurable via `skeleton.eye_color`, `skeleton.pupil_color` and
+`skeleton.pupil_scale`, or the matching `--eye-color` / `--pupil-color` /
+`--pupil-scale` CLI flags. `skeleton.eye_style: dots` / `--eye-style dots`
+restores the original landmark-dot rendering.
+
+### Key Design: `pupil_scale` Is Capped At 1.0
+`pupil_scale` is the pupil diameter as a fraction of the eye height, and the
+eye height is measured **at the pupil** — twice the distance from the pupil
+center to the nearest lid segment. The pupil landmark sits off-center, so
+sizing the disc from the tallest part of the opening would let it poke through
+a lid near the corners. Under this definition 1.0 is exactly a disc touching
+the upper and lower lid, so capping the value there (asserted in
+`build_eye_geometry()`, validated in `config.py`) removes any need to clip the
+pupil against the eye.
+
+### Key Design: The Eye Is Flattened Into Its Own Plane
+The eye contour curves around the eyeball. Left alone, that curvature bulges in
+front of the flat pupil disc and clips it into a bowtie shape. Both shapes are
+meant to read as flat areas, so `_build_single_eye()` projects the contour onto
+its own least-squares plane and lifts the pupil a few percent of the eye height
+along the normal. See `body2colmap/CLAUDE.md` for the full rationale.
+
+### Key Design: Eye Landmarks Are Not Also Drawn As Dots
+`face.get_face_draw_lists(eye_style)` returns the points and bones the renderer
+iterates. Under `"shape"` it withholds the 12 contour points, the 2 pupil points
+and the 12 eye-loop bones: drawing them as well would speckle the sclera and
+redraw an outline the filled shape already provides. Under `"dots"` it returns
+everything, which reproduces the original rendering exactly — that is the whole
+escape hatch, so there is no second code path to keep in sync.
+
 ## Critical Implementation Details
 
 ### Skeleton Rendering

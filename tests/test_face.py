@@ -13,6 +13,17 @@ import pytest
 
 from body2colmap.face import (
     CANONICAL_FACE_LANDMARKS_70,
+    ALL_FACE_POINT_INDICES,
+    EYE_STYLES,
+    EYE_LANDMARK_INDICES,
+    FACE_BONES_EXCLUDING_EYES,
+    FACE_POINT_INDICES_EXCLUDING_EYES,
+    RIGHT_EYE_CONTOUR_INDICES,
+    LEFT_EYE_CONTOUR_INDICES,
+    RIGHT_PUPIL_INDEX,
+    LEFT_PUPIL_INDEX,
+    build_eye_geometry,
+    get_face_draw_lists,
     CANONICAL_ANCHOR_INDICES,
     SKELETON_ANCHOR_JOINT_INDICES,
     OPENPOSE_FACE_BONES,
@@ -129,6 +140,181 @@ class TestFaceBones:
         left_eye_bones = [(42, 43), (43, 44), (44, 45), (45, 46), (46, 47), (47, 42)]
         for bone in left_eye_bones:
             assert bone in OPENPOSE_FACE_BONES
+
+
+class TestEyeExclusions:
+    """The eyes are drawn as filled shapes, so their dots and lines are dropped."""
+
+    def test_eye_indices_cover_both_contours_and_pupils(self):
+        """All 12 contour points plus both pupils are consumed by the eye shapes."""
+        assert EYE_LANDMARK_INDICES == frozenset(list(range(36, 48)) + [68, 69])
+
+    def test_no_eye_bones_remain(self):
+        """No remaining face bone touches an eye landmark."""
+        for start, end in FACE_BONES_EXCLUDING_EYES:
+            assert start not in EYE_LANDMARK_INDICES
+            assert end not in EYE_LANDMARK_INDICES
+
+    def test_only_eye_bones_removed(self):
+        """Exactly the 12 eye loop segments are dropped."""
+        assert len(FACE_BONES_EXCLUDING_EYES) == len(OPENPOSE_FACE_BONES) - 12
+
+    def test_remaining_points_exclude_eyes(self):
+        """The dots that remain are every landmark except the eyes."""
+        assert len(FACE_POINT_INDICES_EXCLUDING_EYES) == 70 - 14
+        assert set(FACE_POINT_INDICES_EXCLUDING_EYES).isdisjoint(EYE_LANDMARK_INDICES)
+
+
+class TestFaceDrawLists:
+    """Test the eye_style escape hatch back to plain landmark dots."""
+
+    def test_shape_style_withholds_the_eyes(self):
+        """Under "shape" the eyes are drawn as filled shapes instead."""
+        points, bones = get_face_draw_lists("shape")
+        assert points == FACE_POINT_INDICES_EXCLUDING_EYES
+        assert bones == FACE_BONES_EXCLUDING_EYES
+
+    def test_dots_style_draws_everything(self):
+        """Under "dots" nothing is withheld - the original rendering."""
+        points, bones = get_face_draw_lists("dots")
+        assert points == ALL_FACE_POINT_INDICES
+        assert bones == OPENPOSE_FACE_BONES
+
+    def test_dots_style_includes_the_pupils(self):
+        """The pupil landmarks come back as dots under "dots"."""
+        points, _ = get_face_draw_lists("dots")
+        assert RIGHT_PUPIL_INDEX in points
+        assert LEFT_PUPIL_INDEX in points
+
+    def test_defaults_to_shape(self):
+        """Filled eyes are the default rendering."""
+        assert get_face_draw_lists() == get_face_draw_lists("shape")
+
+    def test_every_known_style_resolves(self):
+        """Each advertised style returns non-empty draw lists."""
+        for style in EYE_STYLES:
+            points, bones = get_face_draw_lists(style)
+            assert points and bones
+
+    def test_rejects_unknown_style(self):
+        """An unrecognized style is an error, not a silent fallback."""
+        with pytest.raises(ValueError, match="Unknown eye_style"):
+            get_face_draw_lists("blobs")
+
+
+class TestEyeGeometry:
+    """Test the filled eye shape and pupil disc."""
+
+    def test_returns_both_eyes(self):
+        """One geometry per eye, right then left."""
+        eyes = build_eye_geometry(CANONICAL_FACE_LANDMARKS_70)
+        assert len(eyes) == 2
+
+    def test_mesh_shapes_are_consistent(self):
+        """Both fans have one center vertex and one triangle per contour segment."""
+        for eye in build_eye_geometry(CANONICAL_FACE_LANDMARKS_70):
+            assert eye.eye_vertices.shape[1] == 3
+            assert eye.eye_faces.shape == (len(eye.eye_vertices) - 1, 3)
+            assert eye.pupil_faces.shape == (len(eye.pupil_vertices) - 1, 3)
+            assert eye.eye_faces.max() < len(eye.eye_vertices)
+            assert eye.pupil_faces.max() < len(eye.pupil_vertices)
+
+    def test_eye_shape_is_planar(self):
+        """The sclera lies in a single plane so the pupil cannot be clipped by it."""
+        for eye in build_eye_geometry(CANONICAL_FACE_LANDMARKS_70):
+            center = eye.eye_vertices[0]
+            offsets = (eye.eye_vertices - center) @ eye.normal
+            assert np.allclose(offsets, 0.0, atol=1e-6)
+
+    def test_faces_wound_toward_the_face_normal(self):
+        """Front faces point out of the face, so nothing is backface culled."""
+        for eye in build_eye_geometry(CANONICAL_FACE_LANDMARKS_70):
+            for vertices, faces in (
+                (eye.eye_vertices, eye.eye_faces),
+                (eye.pupil_vertices, eye.pupil_faces),
+            ):
+                tris = vertices[faces]
+                normals = np.cross(
+                    tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]
+                )
+                assert np.all(normals @ eye.normal > 0)
+
+    def test_normal_points_out_of_the_face(self):
+        """Eye normals agree with the face normal (canonical face looks toward +Z)."""
+        face_normal = compute_face_normal(CANONICAL_FACE_LANDMARKS_70)
+        for eye in build_eye_geometry(CANONICAL_FACE_LANDMARKS_70):
+            assert np.dot(eye.normal, face_normal) > 0
+
+    def test_pupil_scale_sets_diameter_relative_to_eye_height(self):
+        """Radius tracks pupil_scale exactly; 1.0 spans the full eye height."""
+        for scale in (0.25, 0.5, 1.0):
+            for eye in build_eye_geometry(CANONICAL_FACE_LANDMARKS_70, pupil_scale=scale):
+                assert eye.pupil_radius == pytest.approx(scale * eye.eye_height / 2.0)
+
+    def test_pupil_stays_inside_the_eye_at_full_scale(self):
+        """At pupil_scale = 1.0 the disc touches the lids but does not spill out."""
+        for eye in build_eye_geometry(CANONICAL_FACE_LANDMARKS_70, pupil_scale=1.0):
+            contour = eye.eye_vertices[1:]
+            center = eye.eye_vertices[0]
+            # Distance from the pupil center to each lid segment, in-plane
+            starts = contour
+            ends = np.roll(contour, -1, axis=0)
+            edges = ends - starts
+            t = np.sum((eye.pupil_center - starts) * edges, axis=1) / np.sum(edges ** 2, axis=1)
+            closest = starts + np.clip(t, 0.0, 1.0)[:, np.newaxis] * edges
+            # Compare in-plane only; the disc is lifted off the sclera
+            offsets = eye.pupil_center - closest
+            offsets = offsets - np.outer(offsets @ eye.normal, eye.normal)
+            assert np.min(np.linalg.norm(offsets, axis=1)) >= eye.pupil_radius - 1e-6
+
+    def test_pupil_centered_on_pupil_landmark(self):
+        """The disc sits on landmark 68/69, projected into the eye plane."""
+        eyes = build_eye_geometry(CANONICAL_FACE_LANDMARKS_70)
+        for eye, pupil_index in zip(eyes, (RIGHT_PUPIL_INDEX, LEFT_PUPIL_INDEX)):
+            offset = eye.pupil_center - CANONICAL_FACE_LANDMARKS_70[pupil_index]
+            in_plane = offset - np.dot(offset, eye.normal) * eye.normal
+            assert np.linalg.norm(in_plane) < 1e-5
+
+    def test_pupil_lifted_in_front_of_the_sclera(self):
+        """The disc is offset along the normal so it never z-fights the eye."""
+        for eye in build_eye_geometry(CANONICAL_FACE_LANDMARKS_70):
+            lift = np.dot(eye.pupil_center - eye.eye_vertices[0], eye.normal)
+            assert 0.0 < lift < eye.eye_height
+
+    def test_eyes_are_mirrored(self):
+        """The canonical face is symmetric, so both eyes match in size."""
+        right, left = build_eye_geometry(CANONICAL_FACE_LANDMARKS_70)
+        assert right.eye_height == pytest.approx(left.eye_height, rel=1e-5)
+        assert right.pupil_radius == pytest.approx(left.pupil_radius, rel=1e-5)
+
+    def test_rejects_pupil_scale_above_one(self):
+        """A pupil larger than the eye would spill past the lids."""
+        with pytest.raises(AssertionError):
+            build_eye_geometry(CANONICAL_FACE_LANDMARKS_70, pupil_scale=1.5)
+
+    def test_rejects_non_positive_pupil_scale(self):
+        """A zero or negative pupil is not a shape."""
+        for scale in (0.0, -0.5):
+            with pytest.raises(AssertionError):
+                build_eye_geometry(CANONICAL_FACE_LANDMARKS_70, pupil_scale=scale)
+
+    def test_rejects_wrong_landmark_shape(self):
+        """Eye geometry needs the full OpenPose Face 70 array."""
+        with pytest.raises(AssertionError):
+            build_eye_geometry(CANONICAL_FACE_LANDMARKS_70[:68])
+
+    def test_survives_fitted_landmarks(self):
+        """Works on landmarks that have been Procrustes-fitted to a skeleton."""
+        joints = np.zeros((25, 3), dtype=np.float32)
+        for joint_index, landmark_index in zip(
+            SKELETON_ANCHOR_JOINT_INDICES, CANONICAL_ANCHOR_INDICES
+        ):
+            joints[joint_index] = CANONICAL_FACE_LANDMARKS_70[landmark_index] * 0.01
+
+        fitted, _ = fit_face_to_skeleton(joints)
+        for eye in build_eye_geometry(fitted):
+            assert eye.eye_height > 0
+            assert eye.pupil_radius > 0
 
 
 class TestProcrustesAlign:

@@ -249,6 +249,10 @@ pipeline.export_images("./output", images["mesh"])
 
 Face landmarks render the OpenPose Face 70 keypoint topology (jawline, eyebrows, nose, eyes, lips, pupils) as white points and connecting lines on top of the skeleton.
 
+The eyes are the exception: instead of a ring of dots, each eye is drawn as a filled shape with a pupil disc inside it, which conditions gaze far more strongly in a video diffusion model. Use `--eye-color` and `--pupil-color` to set the two colors, and `--pupil-scale` to set the pupil size as a fraction of the eye height — `1.0` is a pupil that touches the upper and lower lid, and values above that are rejected.
+
+Pass `--eye-style dots` to render the eyes as plain landmark dots and an outline instead, which is what earlier versions did.
+
 Two modes of operation:
 
 1. **Canonical face model** (no external data): Uses a generic face shape derived from MediaPipe's canonical face geometry. Good for testing; not subject-specific.
@@ -374,6 +378,10 @@ The `image_size` field is important: it allows `body2colmap` to denormalize coor
 | `--face-landmarks PATH` | None | Path to face landmarks JSON. Implies `--face-mode full`. |
 | `--face-mode {full,points,none}` | None | `full`: points + lines, `points`: points only, `none`: disabled |
 | `--face-max-angle DEGREES` | 90 | Max degrees off face normal to render. 90 = full hemisphere, 45 = only within 45 degrees of straight-on. |
+| `--eye-style {shape,dots}` | `shape` | `shape`: filled eye with a pupil disc, `dots`: plain landmark dots |
+| `--eye-color R,G,B` | `1,1,1` | Color of the filled eye shape |
+| `--pupil-color R,G,B` | `0,0,0` | Color of the pupil disc |
+| `--pupil-scale SCALE` | `0.75` | Pupil diameter as a fraction of eye height, in (0, 1]. `1.0` touches both lids. |
 | `--skeleton` | off | Enable skeleton rendering (required for face) |
 | `--render-modes MODES` | `mesh` | Comma-separated list, e.g. `skeleton+face,depth+skeleton+face` |
 | `--outline-color R,G,B` | `0,0,0` | Outline foreground color (see [Outline Mode](#outline-mode)) |
@@ -392,6 +400,10 @@ skeleton:
   face_mode: "full"               # "full", "points", or null
   face_landmarks: "face.json"     # path to landmarks JSON
   face_max_angle: 90.0            # degrees off face normal to render
+  eye_style: "shape"              # "shape" (filled eye + pupil) or "dots"
+  eye_color: [1.0, 1.0, 1.0]      # filled eye shape
+  pupil_color: [0.0, 0.0, 0.0]    # pupil disc
+  pupil_scale: 0.75               # pupil diameter as a fraction of eye height, (0, 1]
 ```
 
 ### Writing a Custom Client

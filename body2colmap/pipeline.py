@@ -470,6 +470,10 @@ class OrbitPipeline:
                 - outline_style: "filled" or "stroke"
                 - outline_thickness: stroke width in px (style="stroke" only)
                 - outline_blur: blur radius in px for the outline (0 = off)
+                - eye_style: "shape" (filled eye + pupil disc) or "dots"
+                - eye_color: RGB tuple (0-1) for the filled eye shape
+                - pupil_color: RGB tuple (0-1) for the pupil disc
+                - pupil_scale: pupil diameter as a fraction of eye height, (0, 1]
                 - etc.
 
         Returns:
@@ -537,6 +541,10 @@ class OrbitPipeline:
                         bone_radius=render_kwargs.get('bone_radius', 0.008),
                         face_mode=render_kwargs.get('face_mode'),
                         face_landmarks=render_kwargs.get('face_landmarks'),
+                        eye_style=render_kwargs.get('eye_style'),
+                        eye_color=render_kwargs.get('eye_color'),
+                        pupil_color=render_kwargs.get('pupil_color'),
+                        pupil_scale=render_kwargs.get('pupil_scale'),
                         bg_color=render_kwargs.get('bg_color'),
                     )
                 else:
@@ -708,6 +716,10 @@ class OrbitPipeline:
                         composite_modes["face"] = {
                             "face_mode": render_kwargs.get('face_mode', 'full'),
                             "face_landmarks": render_kwargs.get('face_landmarks'),
+                            "eye_style": render_kwargs.get('eye_style'),
+                            "eye_color": render_kwargs.get('eye_color'),
+                            "pupil_color": render_kwargs.get('pupil_color'),
+                            "pupil_scale": render_kwargs.get('pupil_scale'),
                         }
 
                 image = renderer.render_composite(camera, composite_modes)
@@ -739,6 +751,10 @@ class OrbitPipeline:
                     bone_radius=render_kwargs.get('bone_radius', 0.008),
                     face_mode=render_kwargs.get('face_mode'),
                     face_landmarks=render_kwargs.get('face_landmarks'),
+                    eye_style=render_kwargs.get('eye_style'),
+                    eye_color=render_kwargs.get('eye_color'),
+                    pupil_color=render_kwargs.get('pupil_color'),
+                    pupil_scale=render_kwargs.get('pupil_scale'),
                     bg_color=render_kwargs.get('bg_color'),
                 )
             else:

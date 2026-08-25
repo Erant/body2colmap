@@ -157,6 +157,10 @@ def main(argv: Optional[list] = None) -> int:
                 render_kwargs['face_landmarks'] = fl_70
             if config.skeleton.face_mode:
                 render_kwargs['face_mode'] = config.skeleton.face_mode
+                render_kwargs['eye_style'] = config.skeleton.eye_style
+                render_kwargs['eye_color'] = config.skeleton.eye_color
+                render_kwargs['pupil_color'] = config.skeleton.pupil_color
+                render_kwargs['pupil_scale'] = config.skeleton.pupil_scale
 
             # Render from original viewpoint
             if args.verbose:
@@ -420,6 +424,10 @@ def main(argv: Optional[list] = None) -> int:
                             face_opts = {
                                 "face_mode": config.skeleton.face_mode or "full",
                                 "face_max_angle": config.skeleton.face_max_angle,
+                                "eye_style": config.skeleton.eye_style,
+                                "eye_color": config.skeleton.eye_color,
+                                "pupil_color": config.skeleton.pupil_color,
+                                "pupil_scale": config.skeleton.pupil_scale,
                             }
                             if face_landmarks_70 is not None:
                                 face_opts["face_landmarks"] = face_landmarks_70
@@ -450,6 +458,10 @@ def main(argv: Optional[list] = None) -> int:
                             render_kwargs['face_landmarks'] = face_landmarks_70
                         if config.skeleton.face_mode:
                             render_kwargs['face_mode'] = config.skeleton.face_mode
+                            render_kwargs['eye_style'] = config.skeleton.eye_style
+                            render_kwargs['eye_color'] = config.skeleton.eye_color
+                            render_kwargs['pupil_color'] = config.skeleton.pupil_color
+                            render_kwargs['pupil_scale'] = config.skeleton.pupil_scale
                     mode_rendered = pipeline.render_all(
                         modes=[mode_str],
                         **render_kwargs
