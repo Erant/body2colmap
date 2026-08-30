@@ -22,7 +22,7 @@ from .path import (
     compute_helical_anchor_params,
     compute_original_camera_orbit_params,
 )
-from .renderer import Renderer
+from .renderer import Renderer, parse_composite_modes
 from .exporter import ColmapExporter, ImageExporter
 from .utils import (
     compute_default_focal_length,
@@ -80,6 +80,14 @@ class OrbitPipeline:
 
         # Renderer (lazily created)
         self._renderer: Optional[Renderer] = None
+
+        # Optional Gaussian-splat overlay (see attach_splat_overlay)
+        self._splat_overlay = None
+        self._splat_overlay_renderer = None
+        self.splat_overlay_params: Optional[Dict[str, Any]] = None
+
+        # Set by auto_orient(); the splat overlay is incompatible with it
+        self._auto_oriented = False
 
     @classmethod
     def from_npz_file(
@@ -195,6 +203,159 @@ class OrbitPipeline:
 
         total_rotation = correction_deg + rotation_offset_deg
         self.scene.rotate_around_y(total_rotation)
+        self._auto_oriented = True
+
+    def attach_splat_overlay(
+        self,
+        ply_path: str,
+        meta_path: str,
+        original_focal_length: float,
+        original_image_size: Tuple[int, int],
+        crop_box: Optional[Tuple[int, int, int, int]] = None,
+        scale: Optional[float] = None,
+        reconcile_intrinsics: bool = True,
+        max_angle_deg: float = 45.0,
+        device: str = "cuda",
+    ) -> "OrbitPipeline":
+        """
+        Attach an externally-produced Gaussian splat as a composite overlay.
+
+        The splat is anchored into this scene's world frame by
+        :func:`body2colmap.splat_anchor.anchor_splat_to_world` — see that
+        module for the geometry. Once attached, ``"splat"`` becomes a valid
+        overlay in composite modes such as ``"skeleton+splat"``.
+
+        Args:
+            ply_path: The 3DGS ``.ply``.
+            meta_path: Its ``splat_meta.json``.
+            original_focal_length: SAM-3D-Body's ``focal_length`` from the .npz.
+            original_image_size: ``(width, height)`` of the full original photo
+                SAM-3D-Body was run on.
+            crop_box: ``(x0, y0, x1, y1)`` in full-image pixels, the region the
+                splat's input image was cut from. ``None`` if the splat was
+                built from the whole photo.
+            scale: The depth gauge. ``None`` fits it against the mesh.
+            reconcile_intrinsics: See
+                :func:`~body2colmap.splat_anchor.compute_anchor_transform`.
+            max_angle_deg: Cull the splat on frames viewing it from more than
+                this many degrees off its source view direction. The splat is a
+                2.5-D shell reconstructed from one photo — there is nothing
+                behind the subject — so as the camera turns away, the open rim
+                of the shell swings into view as a flare of grazing-incidence
+                splats.
+
+                The default of 45 was measured, not assumed: on a Face_Neck
+                head splat the face reads cleanly to about 30 degrees, the rim
+                starts flaring by 45, and by 60 the shell is mostly edge. Raise
+                it if you would rather have coverage than a clean silhouette.
+            device: torch device for gsplat rasterization.
+
+        Returns:
+            self (for method chaining)
+
+        Raises:
+            RuntimeError: If the scene is a SplatScene (nothing to composite
+                against), or if it has been auto-oriented — ``auto_orient()``
+                rotates the scene about its bbox centre, which moves it out of
+                the original camera's frame and invalidates the anchoring.
+        """
+        from .splat_anchor import anchor_splat_to_world
+        from .splat_renderer import SplatRenderer
+
+        if self._is_splat_scene():
+            raise RuntimeError(
+                "Cannot attach a splat overlay to a SplatScene. The overlay "
+                "composites against a mesh and skeleton; load the .npz instead."
+            )
+        if self._auto_oriented:
+            raise RuntimeError(
+                "Cannot attach a splat overlay after auto_orient(). The anchor "
+                "places the splat relative to the original camera at the "
+                "origin, and auto_orient() rotates the scene about its bbox "
+                "centre, breaking that relationship. Drop --auto-orient."
+            )
+
+        w, h = original_image_size
+        probe_renderer = Renderer(self.scene, render_size=(int(w), int(h)))
+        try:
+            splat, info = anchor_splat_to_world(
+                ply_path=ply_path,
+                meta_path=meta_path,
+                original_focal_length=original_focal_length,
+                original_image_size=(int(w), int(h)),
+                crop_box=crop_box,
+                scale=scale,
+                reconcile_intrinsics=reconcile_intrinsics,
+                depth_probe=probe_renderer._render_depth_buffer,
+            )
+        finally:
+            # The probe renderer holds its own OpenGL context; it is only
+            # needed for the one depth read used to fit the gauge. Release it
+            # explicitly rather than leaving it to the garbage collector.
+            probe_renderer.delete()
+
+        self._splat_overlay = splat
+        self._splat_overlay_renderer = SplatRenderer(
+            splat, self.render_size, device=device
+        )
+        info["max_angle_deg"] = float(max_angle_deg)
+        self.splat_overlay_params = info
+        return self
+
+    @property
+    def has_splat_overlay(self) -> bool:
+        """Whether a Gaussian-splat overlay has been attached."""
+        return self._splat_overlay is not None
+
+    def splat_view_angle_deg(self, camera: Camera) -> float:
+        """
+        Angle between a camera's view of the splat and the splat's source view.
+
+        Zero at the original photograph's viewpoint, growing as the orbit turns
+        away from it.
+
+        Args:
+            camera: Camera to measure.
+
+        Returns:
+            Angle in degrees, in [0, 180].
+
+        Raises:
+            RuntimeError: If no splat overlay is attached.
+        """
+        if not self.has_splat_overlay:
+            raise RuntimeError("No splat overlay attached.")
+
+        center = self._splat_overlay.get_bbox_center().astype(np.float64)
+        to_splat = center - np.asarray(camera.position, dtype=np.float64)
+        norm = np.linalg.norm(to_splat)
+        if norm < 1e-9:
+            return 0.0
+
+        cos = float(np.dot(to_splat / norm, self.splat_overlay_params["source_view_dir"]))
+        return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+    def render_splat_layer(self, camera: Camera) -> Optional[NDArray[np.uint8]]:
+        """
+        Render the splat overlay for one camera, or None if it is culled.
+
+        The layer comes back with **straight** alpha so it composites correctly
+        over whatever is underneath.
+
+        Args:
+            camera: Camera to render from.
+
+        Returns:
+            RGBA image, or None when no overlay is attached or the camera is
+            beyond ``max_angle_deg`` of the splat's source view.
+        """
+        if not self.has_splat_overlay:
+            return None
+
+        if self.splat_view_angle_deg(camera) > self.splat_overlay_params["max_angle_deg"]:
+            return None
+
+        return self._splat_overlay_renderer.render(camera, bg_color=None)
 
     def set_orbit_params(
         self,
@@ -588,7 +749,10 @@ class OrbitPipeline:
 
         images = []
         for camera in self.cameras:
-            image = renderer.render_composite(camera, composite_modes)
+            image = renderer.render_composite(
+                camera, composite_modes,
+                splat_layer=self.render_splat_layer(camera),
+            )
             images.append(image)
 
         return images
@@ -684,9 +848,7 @@ class OrbitPipeline:
         for mode in modes:
             if '+' in mode:
                 # Composite mode — delegate to render_composite
-                parts = [p.strip() for p in mode.split('+')]
-                base_mode = parts[0]
-                overlays = parts[1:]
+                base_mode, overlays = parse_composite_modes(mode)
 
                 # Build composite config from render_kwargs
                 composite_modes = {}
@@ -722,7 +884,10 @@ class OrbitPipeline:
                             "pupil_scale": render_kwargs.get('pupil_scale'),
                         }
 
-                image = renderer.render_composite(camera, composite_modes)
+                image = renderer.render_composite(
+                    camera, composite_modes,
+                    splat_layer=self.render_splat_layer(camera),
+                )
             elif mode == "mesh":
                 image = renderer.render_mesh(
                     camera,

@@ -16,6 +16,7 @@ This tool takes SAM-3D-Body output (3D mesh reconstruction from a single image) 
 - **All internal computation uses Renderer/OpenGL coordinates** (Y-up, camera looks down -Z)
 - Coordinate conversions happen ONLY at system boundaries:
   - **Input boundary**: SAM-3D-Body → Renderer coords (in `scene.py`)
+  - **Input boundary**: external Gaussian splat → Renderer coords (in `splat_anchor.py`)
   - **Output boundary**: Renderer → COLMAP/OpenCV coords (in `exporter.py`)
 - NO hidden transforms buried in rendering functions
 
@@ -31,6 +32,8 @@ Each module has a single, clear responsibility:
 - `path.py`: Orbit path pattern generation
 - `scene.py`: 3D scene management (mesh, skeleton, lighting)
 - `renderer.py`: Image rendering (mesh, depth, outline, skeleton modes)
+- `splat_scene.py` / `splat_renderer.py`: Gaussian splat storage and gsplat rasterization
+- `splat_anchor.py`: Place an externally-built splat in world coords
 - `exporter.py`: Export to COLMAP and other formats
 - `utils.py`: Auto-framing, homography warp, focal length utilities
 - `pipeline.py`: High-level orchestration
@@ -352,6 +355,106 @@ and the 12 eye-loop bones: drawing them as well would speckle the sclera and
 redraw an outline the filled shape already provides. Under `"dots"` it returns
 everything, which reproduces the original rendering exactly — that is the whole
 escape hatch, so there is no second code path to keep in sync.
+
+
+## Gaussian-Splat Overlay (2026-08)
+
+### Overview
+`skeleton+splat` composites a real Gaussian splat of the subject's face on top
+of the skeleton, in place of the synthetic `skeleton+face` landmarks. The splat
+is built externally by `~/Projects/masktest` (Sapiens2 seg + pointmap + normal →
+normal-integrated depth → one oriented Gaussian per masked pixel) from **the
+same photograph that feeds SAM-3D-Body**. Nothing from that pipeline is
+implemented here; it is fed in as a `.ply` plus its `splat_meta.json`.
+
+The point is conditioning: a ring of landmark dots carries almost no identity,
+and the canonical face model carries none at all. A splat of the actual face
+carries both identity and gaze.
+
+Configurable via the `splat:` config section or the `--splat-*` CLI flags.
+
+### Key Design: Both Frames Already Agree, Up To Three Scalars
+This is why the feature is small. Both worlds are Y-up, +Z toward the viewer,
+and in both the source camera has **identity rotation**:
+
+- masktest defines its world as `F @ p_cam - centroid`, `F = diag(1,-1,-1)`, so
+  its camera sits at `-centroid` with identity OpenGL rotation — by
+  construction, since no pose was ever estimated from one view.
+- `sam3d_to_world()` leaves the SAM-3D-Body camera at the origin with identity
+  rotation.
+
+So `P_world = M @ (p_ply + centroid)`, where `M` is one upper-triangular 3×3
+reconciling the two recovered focal lengths plus a scale gauge. There is no
+rotation to solve for and no registration step.
+
+### Key Design: `M` Is Re-Unprojection, Not A Fudge
+With the gauge `s = 1`, `M` is exactly "unproject the splat's own depth map
+using SAM-3D-Body's focal length instead of the one the pointmap network
+assumed". The network commits to an implicit focal inferred from image content,
+and on a tight face crop that is not the real camera's — measured 1122 px
+against SAM-3D-Body's 1509 px on the same photo, a 26% disagreement.
+
+`M` is therefore anisotropic (depth scales by `s`, lateral extent by
+`s·f_s/f_m`) *because* the focals disagree. That is the correction, not a
+distortion introduced by it. Exact 2-D alignment and a linear depth map cannot
+both hold with a pure similarity unless the focals already match.
+
+`splat.reconcile_intrinsics: false` forces a uniform scale instead: it preserves
+the splat's shape exactly, at the cost of rendering the face 34% off-size
+against the skeleton on this data.
+
+### Key Design: The Scale Gauge Is Fitted Against Depth, Not Size
+Scaling about the camera centre leaves every projection unchanged, so `s` is
+invisible at the anchor frame. What it sets is how far along each ray the splat
+sits — and therefore whether the face and the skeleton stay together as the
+orbit turns away. A wrong `s` shows up as drift growing with view angle, not as
+a misalignment you can see head-on.
+
+`estimate_depth_scale()` takes the **median ratio of the mesh's depth buffer to
+the splat's nearest-surface depth** over the pixels both cover. Median, not
+least squares: the mesh is itself a fit to the photo, so some edge pixels pair
+face against background. Comparing bounding-box centres instead would be biased
+by centimetres — the mesh head's centre is inside the skull, the splat is a
+surface.
+
+Measured on the test pair: 1.3726, putting the splat at 1.61–1.83 m inside the
+mesh head's 1.60–1.90 m.
+
+### Key Design: The Cull Threshold Is Measured
+The splat is a 2.5-D shell — one view, nothing behind the subject — so as the
+camera turns away, the open rim swings into view as a flare of
+grazing-incidence splats. Frames past `splat.max_angle_deg` off the source view
+direction drop the layer entirely.
+
+The default of **45°** comes from a sweep, not a guess: the face reads cleanly
+to ~30°, the rim starts flaring by 45°, and by 60° the shell is mostly edge.
+
+### Key Design: `splat` Names A Base *Or* An Overlay, By Scene Type
+A `.ply` input is a `SplatScene` and `splat` is its **base** layer, rendered
+alone. An `.npz` input with `--splat-overlay` is a mesh `Scene` and `splat` is
+an **overlay** on top of the skeleton. The two cannot co-occur — a `SplatScene`
+has no mesh or skeleton to composite against — and `attach_splat_overlay()`
+raises if you try.
+
+### Validation
+The gate is masktest's own: render the anchored splat from the original camera
+and compare against the photograph. The **best-fit integer shift over a ±4 px
+search must be (0, 0)** — PSNR also falls from ordinary splat blur, but a wrong
+quaternion order, a scale paired with the wrong rotation column or a flipped
+axis all *displace* the render. Measured on the test pair: shift (0, 0),
+30.98 dB over 23412 mask pixels.
+
+### Gotcha: SAM-3D-Body's Focal Is Full-Image, Not Crop
+`cli.py` used to warn that `focal_length` "is from SAM-3D-Body's internal crop".
+It is not, at least with the MoGe FoV estimator wired in: `camera_head.py` sets
+`focal_length = cam_int[0, 0]` straight from the estimator's intrinsics for the
+**whole image**, and `pred_cam_t` places the mesh so that
+`pred_vertices + pred_cam_t` projects with that `K` into full-image pixels
+(verified: reprojected keypoints match `pred_keypoints_2d` to 1e-4 px). MoGe
+returns a centred principal point, so `(cx, cy) = (W/2, H/2)`.
+
+This is what lets a *crop* of the photo be related to SAM-3D-Body's frame
+analytically, via `splat.crop_box`.
 
 ## Critical Implementation Details
 

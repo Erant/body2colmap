@@ -22,8 +22,16 @@ __author__ = "Your Name"
 from .camera import Camera
 from .coordinates import cartesian_to_spherical, spherical_to_cartesian
 from .face import FaceLandmarkIngest
+from .renderer import parse_composite_modes
 from .scene import Scene
 from .pipeline import OrbitPipeline
+from .splat_anchor import (
+    anchor_splat_to_world,
+    compute_anchor_transform,
+    estimate_depth_scale,
+    load_splat_meta,
+    transform_splat_scene,
+)
 from .path import (
     OrbitPath,
     compute_helical_anchor_params,
@@ -43,13 +51,19 @@ __all__ = [
     "OrbitPath",
     "Scene",
     "OrbitPipeline",
+    "anchor_splat_to_world",
     "cartesian_to_spherical",
     "compute_auto_orbit_radius",
     "compute_default_focal_length",
     "compute_helical_anchor_params",
     "compute_original_camera_orbit_params",
     "compute_original_view_framing",
+    "compute_anchor_transform",
     "compute_warp_to_camera",
+    "estimate_depth_scale",
     "helical_elevation_deg",
+    "load_splat_meta",
+    "parse_composite_modes",
     "spherical_to_cartesian",
+    "transform_splat_scene",
 ]

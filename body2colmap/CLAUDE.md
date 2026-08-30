@@ -17,6 +17,10 @@ face.py  (no dependencies - pure math + embedded data)
     ↓
 path.py  (depends on: camera, coordinates)
     ↓
+splat_scene.py  (no dependencies - pure data + PLY I/O)
+    ↓
+splat_anchor.py  (depends on: camera, splat_scene)
+    ↓
 renderer.py  (depends on: scene, camera, face, skeleton)
     ↓
 exporter.py  (depends on: camera, scene)
@@ -37,7 +41,8 @@ cli.py  (depends on: pipeline, config)
 
 **Coordinate conversions happen ONLY in:**
 1. `scene.py::Scene.from_sam3d_output()` - SAM-3D → World
-2. `exporter.py::ColmapExporter.export()` - World → COLMAP/OpenCV
+2. `splat_anchor.py::compute_anchor_transform()` - external splat → World
+3. `exporter.py::ColmapExporter.export()` - World → COLMAP/OpenCV
 
 ### Module Descriptions
 
@@ -108,8 +113,16 @@ cli.py  (depends on: pipeline, config)
   - `render_mask()`: Boolean silhouette coverage from the depth buffer
   - `render_outline()`: Flat two-tone silhouette (`filled` or `stroke`)
   - `render_skeleton()`: Joints and bones
-  - `render_composite()`: Base layer (`mesh`/`depth`/`outline`) + overlays
+  - `render_composite()`: Base layer (`mesh`/`depth`/`outline`) + overlays,
+    plus an optional pre-rendered `splat_layer` composited last
+  - `_render_depth_buffer()`: The raw pyrender depth buffer. Single source of
+    truth for both `render_depth()` and `render_mask()` — and for the splat
+    overlay's depth-gauge fit. Do NOT re-open a pyrender scene to read depth.
   - Alpha channel handling
+- Module-level `parse_composite_modes()`: the ONE place mode strings are split
+  and validated, with `BASE_LAYERS` / `OVERLAY_LAYERS` naming the vocabulary.
+  Used by `cli.py` and `pipeline.render_original_view()`; both used to parse
+  independently, so a new layer had to be added to each by hand.
 
 **Testing priority**: MEDIUM - mainly wraps pyrender
 
@@ -590,6 +603,73 @@ dilation of the mask.
 `--outline-*` CLI flags, `pipeline.render_all()`,
 `pipeline.render_original_view()` and `renderer.render_composite()` (where the
 keys are `fg_color`, `bg_color`, `style`, `thickness`, `blur`).
+
+
+## Gaussian-Splat Overlay (2026-08)
+
+See the parent `CLAUDE.md` for the geometry and the measured constants. Notes
+that matter when touching the code:
+
+### `splat_anchor.py` is a boundary module
+It is the third coordinate conversion point. The whole transform is
+`P_world = M @ (p_ply + centroid)` with `M` upper-triangular — no rotation is
+solved for, because both frames put their source camera at identity rotation by
+construction. Do not add a registration/ICP step: it would break the exact 2-D
+reprojection the anchor rests on, which is verified by the (0,0) best-fit-shift
+gate.
+
+### `transform_splat_scene()` re-decomposes covariances, and must stay exact
+Gaussians carry orientation, so a non-uniform `M` cannot just scale them:
+`Sigma' = M Sigma M^T`, then `eigh` back to a rotation and three axis scales.
+Three details are load-bearing:
+
+1. **Eigenvalues are sorted descending** so the smallest axis stays in column 2.
+   That preserves the upstream "surface normal in the shortest-scale axis"
+   convention, which 3DGS normal-supervision trainers assume.
+2. **`det(R)` is forced to +1.** `eigh` returns an orthonormal basis, not
+   necessarily a right-handed one, and a left-handed one is not a rotation.
+3. **Quaternion conversion is branchless Shepperd.** The naive trace-only
+   formula loses sign and precision as the trace approaches -1, which is common
+   here since many surface normals point almost straight down -Z in world space.
+
+There is a uniform-scale fast path (`M == diag(s,s,s)`): scales shift by
+`log(s)` and quaternions are untouched. It exists because that case is common
+(matching intrinsics, or `reconcile_intrinsics: false`) and re-decomposing
+20k+ rotations for nothing is wasteful.
+
+**SH degree 0 is asserted, not assumed.** A general linear map reorients every
+Gaussian, which would also require rotating the SH bands. The upstream pipeline
+only ever emits degree 0 — one view constrains nothing view-dependent — so this
+raises rather than silently producing wrong view-dependent colour.
+
+### The splat layer is passed in pre-rendered, not named in `modes`
+`Renderer` is pyrender-backed and cannot rasterize Gaussians; `SplatRenderer` is
+gsplat-backed and knows nothing about meshes. Rather than couple them, the
+pipeline renders the splat and hands `render_composite()` the finished RGBA via
+`splat_layer=`. `render_splat_layer()` returns `None` on a culled frame, and
+`_composite_splat()` treats `None` as a no-op, so the cull needs no branch at
+any call site.
+
+### The splat layer must be rendered with straight alpha
+`SplatRenderer.render()` normally composites RGB over `bg_color` and returns
+alpha alongside. Blending *that* over another layer blends toward the background
+twice, which shows as a halo around the silhouette. `bg_color=None` returns
+un-premultiplied colour instead, and the overlay path always uses it.
+
+### The splat contributes to alpha; the skeleton does not
+`_composite_splat()` does `alpha = max(base_alpha, splat_alpha)`, matching how
+the face overlay unions alpha into the skeleton render. The splat is real
+subject coverage, exactly as the mesh silhouette is, so a mask derived from the
+composite has to include it. The skeleton stays out of alpha because it is an
+annotation, not geometry.
+
+### `attach_splat_overlay()` refuses an auto-oriented scene
+`auto_orient()` calls `scene.rotate_around_y()`, which rotates about the bbox
+centre and therefore moves the subject out of the original camera's frame. The
+anchor is defined relative to that camera at the origin, so the two are
+incompatible. `OrbitPipeline._auto_oriented` records that it ran; the check is
+there rather than in a docstring because the failure would otherwise be a
+silently misplaced face.
 
 ## Next Steps
 

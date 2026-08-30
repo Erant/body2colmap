@@ -89,6 +89,34 @@ def _validate_eye_style(value: str) -> str:
     return value
 
 
+def _opt_tuple(value, length: int, cast):
+    """Coerce an optional YAML list to a fixed-length tuple, or None."""
+    if value is None:
+        return None
+    seq = tuple(cast(v) for v in value)
+    if len(seq) != length:
+        raise ValueError(f"Expected {length} values, got {len(seq)}: {value}")
+    return seq
+
+
+def _validate_crop_box(value):
+    """
+    Coerce and check a crop box: (x0, y0, x1, y1) in full-image pixels.
+
+    Raises:
+        ValueError: If it does not have four values or is degenerate.
+    """
+    box = _opt_tuple(value, 4, int)
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(
+            f"crop_box must be (x0, y0, x1, y1) with x1 > x0 and y1 > y0, got {box}"
+        )
+    return box
+
+
 def _validate_pupil_scale(value: float) -> float:
     """
     Validate that a pupil scale is in (0, 1].
@@ -130,6 +158,33 @@ class SkeletonConfig:
 
 
 @dataclass
+class SplatConfig:
+    """
+    Gaussian-splat overlay configuration.
+
+    The splat is produced externally from the same photograph that feeds
+    SAM-3D-Body (see ~/Projects/masktest) and composited on top of the skeleton
+    via the ``splat`` overlay layer, e.g. ``modes: ["skeleton+splat"]``.
+    """
+    overlay_ply: Optional[str] = None   # None disables the overlay entirely
+    meta_json: Optional[str] = None     # default: splat_meta.json beside the PLY
+    original_image_size: Optional[Tuple[int, int]] = None  # default: from the .npz
+    crop_box: Optional[Tuple[int, int, int, int]] = None   # x0,y0,x1,y1 in full-image px
+    scale: Optional[float] = None       # None = fit the depth gauge against the mesh
+    reconcile_intrinsics: bool = True
+    max_angle_deg: float = 45.0         # cull past this far off the source view
+    device: str = "cuda"
+
+    def resolved_meta_json(self) -> Optional[str]:
+        """The metadata path, defaulting to splat_meta.json beside the PLY."""
+        if self.meta_json is not None:
+            return self.meta_json
+        if self.overlay_ply is None:
+            return None
+        return str(Path(self.overlay_ply).parent / "splat_meta.json")
+
+
+@dataclass
 class ExportConfig:
     """Export configuration."""
     output_dir: str = "./output"
@@ -147,6 +202,7 @@ class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     path: PathConfig = field(default_factory=PathConfig)
     skeleton: SkeletonConfig = field(default_factory=SkeletonConfig)
+    splat: SplatConfig = field(default_factory=SplatConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
 
     @classmethod
@@ -311,6 +367,37 @@ class Config:
         if args.pupil_scale is not None:
             config.skeleton.pupil_scale = _validate_pupil_scale(args.pupil_scale)
 
+        # Splat overlay overrides
+        if args.splat_overlay:
+            config.splat.overlay_ply = args.splat_overlay
+        if args.splat_meta:
+            config.splat.meta_json = args.splat_meta
+        if args.splat_crop:
+            try:
+                config.splat.crop_box = _validate_crop_box(
+                    [int(x) for x in args.splat_crop.split(',')]
+                )
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid --splat-crop {args.splat_crop!r}: {e}. "
+                    "Use X0,Y0,X1,Y1 in full-image pixels (e.g. 141,0,594,477)"
+                )
+        if args.splat_image_size:
+            try:
+                w, h = args.splat_image_size.lower().split('x')
+                config.splat.original_image_size = (int(w), int(h))
+            except ValueError:
+                raise ValueError(
+                    f"Invalid --splat-image-size format: {args.splat_image_size}. "
+                    "Use WxH (e.g., 757x1536)"
+                )
+        if args.splat_scale is not None:
+            config.splat.scale = args.splat_scale
+        if args.splat_no_reconcile:
+            config.splat.reconcile_intrinsics = False
+        if args.splat_max_angle is not None:
+            config.splat.max_angle_deg = args.splat_max_angle
+
         # Export overrides
         if args.no_colmap:
             config.export.colmap = False
@@ -411,6 +498,19 @@ class Config:
             )
         )
 
+        # Parse splat overlay config
+        splat_data = data.get('splat', {})
+        splat = SplatConfig(
+            overlay_ply=splat_data.get('overlay_ply'),
+            meta_json=splat_data.get('meta_json'),
+            original_image_size=_opt_tuple(splat_data.get('original_image_size'), 2, int),
+            crop_box=_validate_crop_box(splat_data.get('crop_box')),
+            scale=splat_data.get('scale'),
+            reconcile_intrinsics=splat_data.get('reconcile_intrinsics', True),
+            max_angle_deg=splat_data.get('max_angle_deg', 45.0),
+            device=splat_data.get('device', 'cuda'),
+        )
+
         # Parse export config
         export_data = data.get('export', {})
         export = ExportConfig(
@@ -427,6 +527,7 @@ class Config:
             camera=camera,
             path=path,
             skeleton=skeleton,
+            splat=splat,
             export=export
         )
 
@@ -493,6 +594,19 @@ class Config:
                 'pupil_color': list(self.skeleton.pupil_color),
                 'pupil_scale': self.skeleton.pupil_scale
             },
+            'splat': {
+                'overlay_ply': self.splat.overlay_ply,
+                'meta_json': self.splat.meta_json,
+                'original_image_size': (
+                    list(self.splat.original_image_size)
+                    if self.splat.original_image_size else None
+                ),
+                'crop_box': list(self.splat.crop_box) if self.splat.crop_box else None,
+                'scale': self.splat.scale,
+                'reconcile_intrinsics': self.splat.reconcile_intrinsics,
+                'max_angle_deg': self.splat.max_angle_deg,
+                'device': self.splat.device
+            },
             'export': {
                 'output_dir': self.export.output_dir,
                 'image_format': self.export.image_format,
@@ -537,6 +651,8 @@ render:
 
   # Render modes (for .npz): mesh, depth, outline, skeleton,
   #   depth+skeleton, outline+skeleton, skeleton+face, depth+skeleton+face
+  # With a splat overlay configured below, "splat" is also available as an
+  # overlay layer: skeleton+splat, depth+skeleton+splat, ...
   # For .ply files, "splat" mode is automatically used
   modes: ["mesh"]
 
@@ -659,6 +775,44 @@ skeleton:
   # 1.0 = a disc touching the upper and lower lid.
   pupil_scale: 0.75
 
+# Gaussian-splat overlay configuration
+# Composites a splat built externally from the SAME photo that fed
+# SAM-3D-Body on top of the skeleton, giving a conditioning frame with the
+# real face instead of synthetic landmarks. Use with modes: ["skeleton+splat"].
+splat:
+  # 3DGS .ply. null disables the overlay.
+  overlay_ply: null
+
+  # Its metadata (fitted intrinsics + centroid).
+  # null = splat_meta.json beside the .ply
+  meta_json: null
+
+  # Size [width, height] of the full photo SAM-3D-Body saw.
+  # null = taken from img_shape in the .npz
+  original_image_size: null
+
+  # If the splat was built from a crop of that photo (recommended for a face:
+  # the upstream models run at 1024x768, so cropping to the head spends that
+  # budget on the face), the crop region in full-image pixels [x0, y0, x1, y1].
+  # null = the splat used the whole photo.
+  crop_box: null
+
+  # Depth gauge: how far along the view rays the splat sits. It does not affect
+  # the anchor frame at all — only how well the splat and skeleton stay
+  # together as the orbit turns away. null fits it against the mesh.
+  scale: null
+
+  # Correct for the splat's own fitted focal length disagreeing with
+  # SAM-3D-Body's. Leave true unless you trust the splat's focal more.
+  reconcile_intrinsics: true
+
+  # Drop the splat on frames more than this many degrees off its source view.
+  # It is a 2.5-D shell with nothing behind the subject.
+  max_angle_deg: 45.0
+
+  # torch device for rasterizing the splat
+  device: "cuda"
+
 # Export configuration
 export:
   # Output directory for rendered images and COLMAP files
@@ -743,7 +897,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
         metavar="MODE[,MODE...]",
         help="Comma-separated render modes: mesh, depth, outline, skeleton, "
              "depth+skeleton, outline+skeleton, skeleton+face, "
-             "depth+skeleton+face (for .npz); splat mode auto-selected for .ply"
+             "depth+skeleton+face (for .npz). With --splat-overlay, 'splat' is "
+             "also available as an overlay layer, e.g. skeleton+splat. For a "
+             ".ply input, splat mode is auto-selected"
     )
     render_group.add_argument(
         "--mesh-color",
@@ -945,6 +1101,58 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
 
     # Export options
+    # Gaussian-splat overlay options
+    splat_group = parser.add_argument_group("Splat Overlay Options")
+    splat_group.add_argument(
+        "--splat-overlay",
+        type=str,
+        metavar="PLY",
+        help="3DGS .ply built from the same photo as the .npz, composited on "
+             "top of the skeleton. Enables the 'splat' overlay layer, e.g. "
+             "--render-modes skeleton+splat"
+    )
+    splat_group.add_argument(
+        "--splat-meta",
+        type=str,
+        metavar="JSON",
+        help="Splat metadata (intrinsics, centroid). "
+             "Default: splat_meta.json beside the .ply"
+    )
+    splat_group.add_argument(
+        "--splat-crop",
+        type=str,
+        metavar="X0,Y0,X1,Y1",
+        help="Region of the original photo the splat's input image was cut "
+             "from, in full-image pixels. Omit if the splat used the whole photo"
+    )
+    splat_group.add_argument(
+        "--splat-image-size",
+        type=str,
+        metavar="WxH",
+        help="Size of the full original photo SAM-3D-Body saw. "
+             "Default: img_shape from the .npz"
+    )
+    splat_group.add_argument(
+        "--splat-scale",
+        type=float,
+        metavar="S",
+        help="Depth gauge for the splat. Omit to fit it against the mesh"
+    )
+    splat_group.add_argument(
+        "--splat-no-reconcile",
+        action="store_true",
+        help="Ignore the splat's own fitted intrinsics and place it with a "
+             "uniform scale. Preserves its shape but can mis-size it"
+    )
+    splat_group.add_argument(
+        "--splat-max-angle",
+        type=float,
+        metavar="DEGREES",
+        help="Cull the splat past this many degrees off its source view "
+             "(default 45). It is a 2.5-D shell with nothing behind it, so "
+             "past roughly 45 deg its open edge flares into view"
+    )
+
     export_group = parser.add_argument_group("Export Options")
     export_group.add_argument(
         "--no-colmap",

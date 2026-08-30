@@ -14,6 +14,7 @@ import numpy as np
 from .config import create_argument_parser, Config
 from .face import FaceLandmarkIngest
 from .pipeline import OrbitPipeline
+from .renderer import parse_composite_modes
 from .scene import Scene
 
 
@@ -129,8 +130,9 @@ def main(argv: Optional[list] = None) -> int:
                 print(f"\n  Original focal length: {original_fl:.2f} px")
                 print(f"  Render resolution: {config.render.resolution[0]}x{config.render.resolution[1]}")
                 if not auto_frame:
-                    print(f"  NOTE: focal_length is from SAM-3D-Body's internal crop.")
-                    print(f"  For exact overlay, render resolution must match the crop size.")
+                    print(f"  NOTE: focal_length is in the ORIGINAL image's pixel grid,")
+                    print(f"  with the principal point at its centre. For an exact")
+                    print(f"  overlay, render at the original image's resolution.")
 
             # DO NOT auto-orient — the original view requires the mesh
             # in its post-conversion position (no additional rotations).
@@ -357,6 +359,61 @@ def main(argv: Optional[list] = None) -> int:
         if args.verbose:
             print(f"  Generated {len(pipeline.cameras)} camera positions")
 
+        # Attach the Gaussian-splat overlay, if one was given
+        if config.splat.overlay_ply:
+            if is_splat:
+                raise ValueError(
+                    "--splat-overlay composites a splat on top of a mesh and "
+                    "skeleton, so the input must be a SAM-3D-Body .npz, not a "
+                    ".ply. A .ply input already renders as a splat on its own."
+                )
+
+            metadata = Scene.load_npz_metadata(config.input_file)
+            if 'focal_length' not in metadata:
+                raise ValueError(
+                    "--splat-overlay requires 'focal_length' in the .npz file, "
+                    f"but it only contains: {metadata['_all_keys']}"
+                )
+            splat_fl = float(metadata['focal_length'])
+
+            image_size = config.splat.original_image_size
+            if image_size is None:
+                if 'img_shape' not in metadata:
+                    raise ValueError(
+                        "--splat-overlay needs the size of the photo SAM-3D-Body "
+                        "saw, to place its principal point. The .npz has no "
+                        "'img_shape'; pass --splat-image-size WxH."
+                    )
+                shape = np.asarray(metadata['img_shape']).reshape(-1)
+                image_size = (int(shape[1]), int(shape[0]))  # img_shape is (H, W)
+
+            meta_json = config.splat.resolved_meta_json()
+            if args.verbose:
+                print(f"\n  Splat overlay: {config.splat.overlay_ply}")
+                print(f"    metadata: {meta_json}")
+                print(f"    original photo: {image_size[0]}x{image_size[1]}, "
+                      f"focal_length={splat_fl:.2f} px")
+                if config.splat.crop_box:
+                    print(f"    crop box: {config.splat.crop_box}")
+
+            pipeline.attach_splat_overlay(
+                ply_path=config.splat.overlay_ply,
+                meta_path=meta_json,
+                original_focal_length=splat_fl,
+                original_image_size=image_size,
+                crop_box=config.splat.crop_box,
+                scale=config.splat.scale,
+                reconcile_intrinsics=config.splat.reconcile_intrinsics,
+                max_angle_deg=config.splat.max_angle_deg,
+                device=config.splat.device,
+            )
+
+            if args.verbose:
+                sp = pipeline.splat_overlay_params
+                print(f"    {sp['n_gaussians']} gaussians, depth gauge "
+                      f"{sp['scale']:.4f} ({sp['scale_source']})")
+                print(f"    cull past {sp['max_angle_deg']:.1f}deg off the source view")
+
         # Apply viewport cropping if requested
         if config.path.crop_to_viewport and pipeline.cameras:
             if args.verbose:
@@ -393,13 +450,15 @@ def main(argv: Optional[list] = None) -> int:
             # Parse render modes and handle composites
             for mode_str in config.render.modes:
                 if '+' in mode_str:
-                    # Composite mode (e.g., "mesh+skeleton" or "depth+skeleton")
-                    parts = mode_str.split('+')
-                    base_mode = parts[0].strip()
-                    overlay_modes = [p.strip() for p in parts[1:]]
+                    # Composite mode (e.g., "mesh+skeleton" or "skeleton+splat")
+                    base_mode, overlay_modes = parse_composite_modes(mode_str)
 
-                    # Build composite rendering configuration
+                    # Build composite rendering configuration.
+                    # "skeleton" is looked up in base + overlays together: it can
+                    # be either, and when it is the base (e.g. "skeleton+face")
+                    # it still needs its options filled in.
                     composite_modes = {base_mode: {}}
+                    layers = [base_mode] + overlay_modes
 
                     if base_mode == "mesh":
                         composite_modes[base_mode]["color"] = config.render.mesh_color
@@ -411,27 +470,31 @@ def main(argv: Optional[list] = None) -> int:
                         composite_modes[base_mode]["thickness"] = config.render.outline_thickness
                         composite_modes[base_mode]["blur"] = config.render.outline_blur
 
-                    # Add overlays
-                    for overlay in overlay_modes:
-                        if overlay == "skeleton":
-                            composite_modes["skeleton"] = {
-                                "joint_radius": config.skeleton.joint_radius,
-                                "bone_radius": config.skeleton.bone_radius,
-                                "use_openpose_colors": True,
-                                "target_format": config.skeleton.format
-                            }
-                        if overlay == "face" or (overlay == "skeleton" and config.skeleton.face_mode):
-                            face_opts = {
-                                "face_mode": config.skeleton.face_mode or "full",
-                                "face_max_angle": config.skeleton.face_max_angle,
-                                "eye_style": config.skeleton.eye_style,
-                                "eye_color": config.skeleton.eye_color,
-                                "pupil_color": config.skeleton.pupil_color,
-                                "pupil_scale": config.skeleton.pupil_scale,
-                            }
-                            if face_landmarks_70 is not None:
-                                face_opts["face_landmarks"] = face_landmarks_70
-                            composite_modes["face"] = face_opts
+                    # Fill in layer options
+                    if "skeleton" in layers:
+                        composite_modes["skeleton"] = {
+                            "joint_radius": config.skeleton.joint_radius,
+                            "bone_radius": config.skeleton.bone_radius,
+                            "use_openpose_colors": True,
+                            "target_format": config.skeleton.format
+                        }
+                    if "face" in layers or ("skeleton" in layers and config.skeleton.face_mode):
+                        face_opts = {
+                            "face_mode": config.skeleton.face_mode or "full",
+                            "face_max_angle": config.skeleton.face_max_angle,
+                            "eye_style": config.skeleton.eye_style,
+                            "eye_color": config.skeleton.eye_color,
+                            "pupil_color": config.skeleton.pupil_color,
+                            "pupil_scale": config.skeleton.pupil_scale,
+                        }
+                        if face_landmarks_70 is not None:
+                            face_opts["face_landmarks"] = face_landmarks_70
+                        composite_modes["face"] = face_opts
+                    if "splat" in layers and not pipeline.has_splat_overlay:
+                        raise ValueError(
+                            f"Render mode {mode_str!r} uses the 'splat' overlay "
+                            "but no splat was attached. Pass --splat-overlay PLY."
+                        )
 
                     # Render composite for all frames
                     mode_images = pipeline.render_composite_all(composite_modes)

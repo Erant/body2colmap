@@ -1,0 +1,62 @@
+# Full 360-degree circular orbit with a Gaussian-splat face composited onto
+# the skeleton.
+#
+# The splat is built externally (see ~/Projects/masktest) from the SAME photo
+# that fed SAM-3D-Body, so it anchors to the skeleton analytically -- there is
+# no registration step. Crop that photo to the head before building the splat:
+# the upstream models run at 1024x768, so a crop spends that budget on the face.
+#
+#   body2colmap subject.npz -o ./out --config circular-splat.yaml \
+#       --splat-overlay path/to/splat.ply \
+#       --splat-crop 141,0,594,477
+#
+# --splat-crop is the region of the original photo the splat's input was cut
+# from, in full-image pixels. Omit it if the splat used the whole photo.
+
+render:
+  resolution: [720, 1280]
+  bg_color: [1.0, 1.0, 1.0]
+
+  # "splat" is an overlay layer here, composited on top of the skeleton.
+  # (For a .ply input it would instead be the base layer, rendered alone.)
+  modes: ["skeleton+splat"]
+
+camera:
+  focal_length: null
+  auto_frame: true
+  fill_ratio: 0.8
+
+path:
+  pattern: "circular"
+  n_frames: 72   # 5 degrees per frame
+
+  # Radius and elevation are derived from the mesh's position in
+  # original-camera mode, so leave radius null and do not set elevation_deg.
+  radius: null
+
+  # Required for the splat to be worth anchoring: frame 0 lands exactly on the
+  # original photo's viewpoint, which is the splat's own source view.
+  use_original_camera: true
+
+skeleton:
+  enabled: true
+  format: "openpose_body25_hands"
+  joint_radius: 0.006
+  bone_radius: 0.003
+
+splat:
+  # Drop the splat past this far off its source view. It is a 2.5-D shell with
+  # nothing behind the subject; measured, the face reads cleanly to ~30 deg,
+  # the open rim starts flaring by 45, and by 60 the shell is mostly edge.
+  # At 45 deg a 72-frame circle keeps the face on ~20 frames, centred on frame 0.
+  max_angle_deg: 45.0
+
+  # Depth gauge: null fits it against the mesh's depth buffer. It is invisible
+  # at frame 0 either way -- it only controls whether the face and the skeleton
+  # stay together as the orbit turns away.
+  scale: null
+
+export:
+  image_format: "png"
+  filename_pattern: "image_{:05d}_.png"
+  colmap: false

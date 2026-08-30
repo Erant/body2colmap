@@ -63,6 +63,11 @@ body2colmap --input estimation.npz --output-dir ./output \
 python tools/extract_face_landmarks.py photo.jpg -o face.json
 body2colmap --input estimation.npz --output-dir ./output \
   --face-landmarks face.json --render-modes skeleton+face
+
+# With a real Gaussian-splat face instead of synthetic landmarks
+body2colmap --input estimation.npz --output-dir ./output \
+  --config circular-splat.yaml \
+  --splat-overlay face_splat.ply --splat-crop 141,0,594,477
 ```
 
 ### Python API
@@ -103,6 +108,46 @@ pipeline.export_colmap("./output")
 pipeline.export_images("./output", images["mesh"])
 ```
 
+Attaching a Gaussian-splat face overlay (see
+[Gaussian-Splat Overlay](#gaussian-splat-overlay)). The splat must come from the
+same photo as the `.npz`, and the scene must NOT be auto-oriented:
+
+```python
+from body2colmap import OrbitPipeline, Scene
+
+meta = Scene.load_npz_metadata("estimation.npz")
+focal = float(meta["focal_length"])
+h, w = meta["img_shape"]                     # note: (height, width)
+
+pipeline = OrbitPipeline.from_npz_file(
+    "estimation.npz", render_size=(720, 1280), include_skeleton=True
+)
+# original_focal_length puts one orbit frame on the photo's own viewpoint
+pipeline.set_orbit_params(
+    pattern="circular", n_frames=72, original_focal_length=focal
+)
+pipeline.attach_splat_overlay(
+    ply_path="face_splat.ply",
+    meta_path="splat_meta.json",
+    original_focal_length=focal,
+    original_image_size=(int(w), int(h)),
+    crop_box=(141, 0, 594, 477),   # region of the photo the splat was built from
+    scale=None,                    # None = fit the depth gauge against the mesh
+    max_angle_deg=45.0,
+)
+
+frames = pipeline.render_composite_all({
+    "skeleton": {"joint_radius": 0.006, "bone_radius": 0.003},
+})
+pipeline.export_images("./output", frames)
+
+print(pipeline.splat_overlay_params["scale"])       # the fitted depth gauge
+print(pipeline.splat_view_angle_deg(pipeline.cameras[0]))  # 0.0 at the anchor
+```
+
+`render_composite_all()` and `render_original_view()` pick the splat layer up
+automatically once it is attached; no `"splat"` key is needed in the modes dict.
+
 ## Features
 
 ### Orbit Patterns
@@ -124,6 +169,13 @@ Composite modes (overlays combined via `+`):
 - **outline+skeleton**: Flat silhouette with skeleton overlay
 - **skeleton+face**: Skeleton with face landmark overlay
 - **depth+skeleton+face**: All three combined
+- **skeleton+splat**: Skeleton with a real Gaussian-splat face on top
+  (requires `--splat-overlay`; see [Gaussian-Splat Overlay](#gaussian-splat-overlay))
+
+The first layer is the base and the rest are overlays, drawn in the order
+given. Base layers are `mesh`, `depth`, `outline` and `skeleton`; overlays are
+`skeleton`, `face` and `splat`. Unknown, repeated or misplaced layer names are
+rejected up front rather than failing during rendering.
 
 #### Outline Mode
 
@@ -164,6 +216,136 @@ outline renders can be used as training masks and as composite base layers.
 The blur softens both color and alpha together, and is applied to the outline
 only — in `outline+skeleton` the skeleton is composited on top afterwards and
 stays sharp.
+
+### Gaussian-Splat Overlay
+
+`skeleton+splat` composites a **real Gaussian splat of the subject's face** onto
+the skeleton, in place of the synthetic landmarks of `skeleton+face`. Landmark
+dots carry almost no identity and the canonical face model carries none at all;
+a splat of the actual face carries both identity and gaze, which is the point
+when these frames condition a video model.
+
+The splat is produced **externally** and fed in as a standard 3DGS `.ply` plus
+its `splat_meta.json`. Nothing about building it is implemented here.
+
+#### What you need
+
+| Input | Notes |
+|-------|-------|
+| `splat.ply` | Standard 3DGS binary PLY, **SH degree 0**. Higher orders are rejected. |
+| `splat_meta.json` | Must contain `intrinsics.{f,cx,cy}`, `centroid`, `width`, `height`. |
+| The SAM-3D-Body `.npz` | Must contain `focal_length`, and `img_shape` unless you pass `--splat-image-size`. |
+
+Both artifacts must come from **the same photograph**. The splat's producer must
+define its world as the source camera's frame flipped by `diag(1,-1,-1)` and
+recentred on `centroid`, i.e. the source camera sits at `-centroid` with
+identity OpenGL rotation. That is what `~/Projects/masktest` emits.
+
+Crop the photo to the head before building the splat — the upstream models run
+at a fixed resolution, so cropping spends that budget on the face — then tell
+body2colmap where the crop came from with `--splat-crop x0,y0,x1,y1` in
+full-image pixels. Omit it if the splat used the whole photo.
+
+#### How it anchors
+
+There is no registration step. Both coordinate systems are Y-up with +Z toward
+the viewer, and in both the source camera has identity rotation *by
+construction*, so placing the splat is one linear map:
+
+```
+P_world = M @ (p_ply + centroid)
+```
+
+`M` is upper-triangular and reconciles the two independently recovered focal
+lengths, plus one scale gauge. Consequences worth knowing:
+
+- **2-D alignment at the anchor frame is exact by construction**, not fitted.
+- The two focals usually *disagree* — the splat's is inferred from image content
+  by its own network, and on a tight face crop that is not the real camera's
+  (measured: 1122 px vs SAM-3D-Body's 1509 px, a 26% gap). Reconciling them is
+  therefore load-bearing, not cosmetic. Set `reconcile_intrinsics: false` to
+  place the splat with a uniform scale instead, preserving its shape exactly at
+  the cost of rendering the face off-size.
+- **The scale gauge is invisible at the anchor frame.** Scaling about the camera
+  centre leaves every projection unchanged. What it sets is how far along the
+  view rays the splat sits, and therefore whether the face and the skeleton stay
+  together as the orbit turns away. Leave `scale: null` to fit it against the
+  mesh's depth buffer; a wrong value shows up as drift growing with view angle.
+
+#### The angle cull
+
+The splat is a 2.5-D shell — one view, nothing behind the subject — so as the
+camera turns away the open rim swings into view. Frames more than
+`--splat-max-angle` degrees off the splat's source view drop the layer entirely.
+
+The default of **45°** is measured: the face reads cleanly to about 30°, the rim
+starts flaring by 45°, and by 60° the shell is mostly edge. On a 72-frame full
+circle that keeps the face on roughly 20 frames, centred on the anchor. Raise it
+if you would rather have coverage than a clean silhouette.
+
+#### Constraints
+
+- Use with `--use-original-camera` (or `original_focal_length=` in the Python
+  API). Otherwise no orbit frame sits at the photo's viewpoint and the anchor,
+  though still geometrically correct, buys you nothing.
+- **Incompatible with auto-orient.** `auto_orient()` rotates the scene about its
+  bbox centre, moving the subject out of the original camera's frame that the
+  anchor is defined against. `attach_splat_overlay()` raises rather than
+  silently misplacing the face. `--use-original-camera` already skips
+  auto-orient.
+- The splat contributes to the composite's alpha channel (it is real subject
+  coverage, like the mesh silhouette). The skeleton does not — it is an
+  annotation.
+- A `.ply` **input** is a different feature: there `splat` is the base layer and
+  the whole scene is rendered as a splat. That cannot be combined with an
+  overlay, and body2colmap raises if you try.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--splat-overlay PLY` | None | The 3DGS `.ply`. Enables the `splat` overlay layer. |
+| `--splat-meta JSON` | `splat_meta.json` beside the PLY | Fitted intrinsics and centroid |
+| `--splat-crop X0,Y0,X1,Y1` | None | Region of the photo the splat's input was cut from, in full-image pixels |
+| `--splat-image-size WxH` | from `img_shape` in the `.npz` | Size of the full photo SAM-3D-Body saw |
+| `--splat-scale S` | fitted | Depth gauge; omit to fit it against the mesh |
+| `--splat-max-angle DEGREES` | `45` | Cull past this far off the splat's source view |
+| `--splat-no-reconcile` | off | Place with a uniform scale, ignoring the splat's own focal |
+
+```yaml
+splat:
+  overlay_ply: "face_splat.ply"
+  meta_json: null                 # null = splat_meta.json beside the PLY
+  original_image_size: null       # null = img_shape from the .npz
+  crop_box: [141, 0, 594, 477]    # null if the splat used the whole photo
+  scale: null                     # null = fit against the mesh
+  reconcile_intrinsics: true
+  max_angle_deg: 45.0
+  device: "cuda"
+```
+
+A ready-to-run example is in [`circular-splat.yaml`](circular-splat.yaml):
+
+```bash
+body2colmap estimation.npz -o ./out --config circular-splat.yaml \
+  --splat-overlay face_splat.ply --splat-crop 141,0,594,477
+```
+
+#### Verifying an anchor
+
+The splat, rendered from the original camera, must land on the photograph. The
+test is the **best-fit integer shift**, not PSNR: ordinary splat blur costs
+PSNR, but a wrong quaternion order, a flipped axis or a bad crop box all
+*displace* the render.
+
+```python
+camera = Camera(focal_length=(focal, focal), image_size=(w, h))
+layer = pipeline.render_splat_layer(camera)   # pipeline render_size must be (w, h)
+# compare layer's RGB against the photo inside layer's alpha,
+# searching integer shifts over +/-4 px -- the optimum must be (0, 0)
+```
+
+Requires `pip install body2colmap[splat]` (gsplat, plyfile) and a CUDA device.
 
 ### Auto-Orient
 
@@ -389,6 +571,13 @@ The `image_size` field is important: it allows `body2colmap` to denormalize coor
 | `--outline-style {filled,stroke}` | `filled` | Outline fill style |
 | `--outline-thickness PIXELS` | `3` | Outline stroke width (`stroke` style only) |
 | `--outline-blur PIXELS` | `4` | Outline blur radius; `0` disables. Never blurs the skeleton. |
+| `--splat-overlay PLY` | None | Gaussian-splat face to composite on the skeleton (see [Gaussian-Splat Overlay](#gaussian-splat-overlay)) |
+| `--splat-meta JSON` | beside the PLY | Splat metadata (intrinsics, centroid) |
+| `--splat-crop X0,Y0,X1,Y1` | None | Region of the photo the splat's input was cut from |
+| `--splat-image-size WxH` | from `.npz` | Size of the full photo SAM-3D-Body saw |
+| `--splat-scale S` | fitted | Splat depth gauge; omit to fit against the mesh |
+| `--splat-max-angle DEGREES` | `45` | Cull the splat past this far off its source view |
+| `--splat-no-reconcile` | off | Place the splat with a uniform scale |
 
 ### Config File
 
@@ -404,6 +593,12 @@ skeleton:
   eye_color: [1.0, 1.0, 1.0]      # filled eye shape
   pupil_color: [0.0, 0.0, 0.0]    # pupil disc
   pupil_scale: 0.75               # pupil diameter as a fraction of eye height, (0, 1]
+
+splat:
+  overlay_ply: "face_splat.ply"   # 3DGS .ply; null disables the overlay
+  crop_box: [141, 0, 594, 477]    # region of the photo the splat came from
+  scale: null                     # null = fit the depth gauge against the mesh
+  max_angle_deg: 45.0             # cull past this far off the source view
 ```
 
 ### Writing a Custom Client
@@ -478,6 +673,9 @@ body2colmap/
 ├── skeleton.py      # Skeleton format conversion and rendering data
 ├── face.py          # Face landmarks, Procrustes alignment, visibility
 ├── renderer.py      # Image rendering (mesh, depth, skeleton, face)
+├── splat_scene.py   # Gaussian splat storage and PLY I/O
+├── splat_renderer.py # gsplat rasterization
+├── splat_anchor.py  # Place an external splat in world coords
 ├── exporter.py      # COLMAP export
 ├── utils.py         # Auto-framing, homography warp, focal length utilities
 ├── pipeline.py      # High-level API

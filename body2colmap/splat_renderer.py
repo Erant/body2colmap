@@ -79,14 +79,22 @@ class SplatRenderer:
     def render(
         self,
         camera: Camera,
-        bg_color: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+        bg_color: Optional[Tuple[float, float, float]] = (1.0, 1.0, 1.0)
     ) -> NDArray[np.uint8]:
         """
         Render the splat from given camera viewpoint.
 
         Args:
             camera: Camera object (same interface as mesh Renderer)
-            bg_color: Background RGB color (0-1 range)
+            bg_color: Background RGB color (0-1 range), composited under the
+                splat using its accumulated alpha. Pass ``None`` to get the
+                raw rasterized colour instead, i.e. straight (un-premultiplied)
+                RGB alongside alpha.
+
+                Use ``None`` whenever the result is going to be composited over
+                something else. Blending an already-background-composited image
+                over another layer blends toward that background twice, which
+                shows up as a halo around the silhouette.
 
         Returns:
             RGBA image (height, width, 4), dtype uint8
@@ -166,9 +174,16 @@ class SplatRenderer:
         rgb = render_colors[0].detach().cpu().numpy()  # (H, W, 3)
         alpha = render_alphas[0, ..., 0].detach().cpu().numpy()  # (H, W)
 
-        # Composite with background color using alpha
-        bg = np.array(bg_color, dtype=np.float32)
-        rgb = rgb * alpha[..., np.newaxis] + bg * (1.0 - alpha[..., np.newaxis])
+        if bg_color is not None:
+            # Composite with background color using alpha
+            bg = np.array(bg_color, dtype=np.float32)
+            rgb = rgb * alpha[..., np.newaxis] + bg * (1.0 - alpha[..., np.newaxis])
+        else:
+            # Straight alpha: recover un-premultiplied colour so an `over`
+            # blend onto another layer is correct. gsplat accumulates
+            # sum(w_i * c_i), which is colour premultiplied by alpha.
+            safe = np.maximum(alpha, 1e-6)[..., np.newaxis]
+            rgb = np.where(alpha[..., np.newaxis] > 1e-6, rgb / safe, 0.0)
 
         # Clamp and convert to uint8
         rgb = np.clip(rgb * 255, 0, 255).astype(np.uint8)

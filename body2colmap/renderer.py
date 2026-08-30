@@ -10,7 +10,7 @@ since pyrender uses OpenGL convention matching our world coords).
 """
 
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from numpy.typing import NDArray
 
 from .scene import Scene
@@ -42,6 +42,84 @@ def _flat_color_rgba8(color: Tuple[float, float, float]) -> NDArray[np.uint8]:
         [int(round(c * 255)) for c in encoded] + [255],
         dtype=np.uint8
     )
+
+
+#: Layers that can start a composite mode string (the base, drawn first).
+BASE_LAYERS = ("mesh", "depth", "outline", "skeleton")
+
+#: Layers that can follow a "+" in a composite mode string, in draw order.
+#: "skeleton" appears in both: it is a base on its own ("skeleton+face") and an
+#: overlay on top of geometry ("depth+skeleton").
+OVERLAY_LAYERS = ("skeleton", "face", "splat")
+
+#: Every recognized layer name.
+LAYER_NAMES = tuple(dict.fromkeys(BASE_LAYERS + OVERLAY_LAYERS))
+
+
+def parse_composite_modes(mode_str: str) -> Tuple[str, List[str]]:
+    """
+    Split a render mode string into its base layer and overlays.
+
+    ``"depth+skeleton+face"`` -> ``("depth", ["skeleton", "face"])``.
+    A plain ``"mesh"`` -> ``("mesh", [])``.
+
+    This is the single place mode strings are interpreted. Both the CLI and
+    :meth:`OrbitPipeline.render_original_view` used to split and validate them
+    independently, which meant a new layer had to be added to each by hand.
+
+    Note ``"splat"`` is context-dependent: it names a *base* layer when the
+    input is a ``.ply`` (the whole scene is a splat, rendered by
+    ``SplatRenderer``), and an *overlay* here when the input is an ``.npz``
+    with a splat attached alongside via
+    :meth:`OrbitPipeline.attach_splat_overlay`. The two cannot co-occur — a
+    ``SplatScene`` has no mesh or skeleton to composite against — so the scene
+    type disambiguates. A bare ``"splat"`` never reaches this function as a
+    composite.
+
+    Args:
+        mode_str: A mode string, with or without "+".
+
+    Returns:
+        ``(base, overlays)``.
+
+    Raises:
+        ValueError: On an empty component, an unknown layer name, a base that
+            can only be an overlay, or an overlay that can only be a base.
+    """
+    parts = [p.strip() for p in mode_str.split("+")]
+
+    if any(not p for p in parts):
+        raise ValueError(f"Empty layer in render mode {mode_str!r}")
+
+    unknown = [p for p in parts if p not in LAYER_NAMES]
+    if unknown:
+        raise ValueError(
+            f"Unknown render layer(s) {', '.join(repr(u) for u in unknown)} in "
+            f"{mode_str!r}. Known layers: {', '.join(LAYER_NAMES)}"
+        )
+
+    base, overlays = parts[0], parts[1:]
+
+    if base not in BASE_LAYERS:
+        raise ValueError(
+            f"{base!r} cannot be the base layer of {mode_str!r}; it is an "
+            f"overlay. Base layers: {', '.join(BASE_LAYERS)}"
+        )
+
+    bad = [o for o in overlays if o not in OVERLAY_LAYERS]
+    if bad:
+        raise ValueError(
+            f"{', '.join(repr(b) for b in bad)} cannot be an overlay in "
+            f"{mode_str!r}. Overlays: {', '.join(OVERLAY_LAYERS)}"
+        )
+
+    dupes = [p for p in set(parts) if parts.count(p) > 1]
+    if dupes:
+        raise ValueError(
+            f"Layer(s) {', '.join(repr(d) for d in dupes)} repeated in {mode_str!r}"
+        )
+
+    return base, overlays
 
 
 class Renderer:
@@ -242,6 +320,39 @@ class Renderer:
 
         return color
 
+    def _render_depth_buffer(self, camera: Camera) -> NDArray[np.float32]:
+        """
+        Render the raw pyrender depth buffer for a camera.
+
+        This is the single source of truth for mesh coverage and mesh depth:
+        the depth buffer does not depend on mesh colour, lighting or
+        anti-aliasing, so anything derived from it is exact.
+
+        Args:
+            camera: Camera to render from
+
+        Returns:
+            Float array, shape (height, width). Metric distance along the view
+            axis where the mesh covers the pixel, 0.0 where it does not.
+        """
+        try:
+            import pyrender
+        except ImportError:
+            raise ImportError("pyrender is required")
+
+        pr_scene = self._create_pyrender_scene()
+
+        pr_camera = pyrender.IntrinsicsCamera(
+            fx=camera.fx, fy=camera.fy,
+            cx=camera.cx, cy=camera.cy
+        )
+        pr_scene.add(pr_camera, pose=camera.get_c2w())
+
+        renderer = self._get_pyrender_renderer()
+        _, depth = renderer.render(pr_scene)
+
+        return depth
+
     def render_depth(
         self,
         camera: Camera,
@@ -261,24 +372,7 @@ class Renderer:
             RGBA image, shape (height, width, 4), dtype uint8
             Alpha = 255 where depth exists, 0 where no geometry
         """
-        try:
-            import pyrender
-        except ImportError:
-            raise ImportError("pyrender is required")
-
-        # Create scene
-        pr_scene = self._create_pyrender_scene()
-
-        # Add camera
-        pr_camera = pyrender.IntrinsicsCamera(
-            fx=camera.fx, fy=camera.fy,
-            cx=camera.cx, cy=camera.cy
-        )
-        pr_scene.add(pr_camera, pose=camera.get_c2w())
-
-        # Render
-        renderer = self._get_pyrender_renderer()
-        color, depth = renderer.render(pr_scene)
+        depth = self._render_depth_buffer(camera)
 
         # Create alpha mask (1 where depth exists)
         alpha = (depth > 0).astype(np.uint8) * 255
@@ -335,23 +429,7 @@ class Renderer:
             Boolean array, shape (height, width). True where the mesh covers
             the pixel.
         """
-        try:
-            import pyrender
-        except ImportError:
-            raise ImportError("pyrender is required")
-
-        pr_scene = self._create_pyrender_scene()
-
-        pr_camera = pyrender.IntrinsicsCamera(
-            fx=camera.fx, fy=camera.fy,
-            cx=camera.cx, cy=camera.cy
-        )
-        pr_scene.add(pr_camera, pose=camera.get_c2w())
-
-        renderer = self._get_pyrender_renderer()
-        _, depth = renderer.render(pr_scene)
-
-        return depth > 0
+        return self._render_depth_buffer(camera) > 0
 
     def render_outline(
         self,
@@ -880,7 +958,8 @@ class Renderer:
     def render_composite(
         self,
         camera: Camera,
-        modes: Dict[str, Any]
+        modes: Dict[str, Any],
+        splat_layer: Optional[NDArray[np.uint8]] = None
     ) -> NDArray[np.uint8]:
         """
         Render composite of multiple modes (e.g., mesh + skeleton overlay).
@@ -896,6 +975,14 @@ class Renderer:
                   Recognized base layers: "mesh", "depth", "outline"
                   (checked in that order). Recognized overlays: "skeleton",
                   "face".
+            splat_layer: Optional pre-rendered RGBA Gaussian-splat layer with
+                **straight** alpha, composited last (on top of everything).
+                It is passed in already rendered rather than named in ``modes``
+                because splats are rasterized by gsplat in
+                :class:`~body2colmap.splat_renderer.SplatRenderer`, which this
+                pyrender-backed class knows nothing about. The pipeline owns
+                that renderer and hands the result down.
+                ``None`` for a frame where the splat is culled.
 
         Returns:
             RGBA image with composited modes
@@ -904,8 +991,9 @@ class Renderer:
             Modes are composited in order:
             1. mesh, depth or outline (base layer)
             2. skeleton (overlay)
+            3. splat (overlay)
 
-            Alpha channel comes from base layer only.
+            Alpha is the base layer's, unioned with the splat's where present.
         """
         # Render base layer
         base_image = None
@@ -962,7 +1050,7 @@ class Renderer:
                 )
 
             skel_opts = modes["skeleton"] if isinstance(modes["skeleton"], dict) else {}
-            return self.render_skeleton(
+            base_image = self.render_skeleton(
                 camera,
                 joint_radius=skel_opts.get("joint_radius", 0.015),
                 bone_radius=skel_opts.get("bone_radius", 0.008),
@@ -977,6 +1065,7 @@ class Renderer:
                 pupil_scale=pupil_scale,
                 bg_color=skel_opts.get("bg_color"),
             )
+            return self._composite_splat(base_image, splat_layer)
 
         # Overlay skeleton if requested
         if "skeleton" in modes and self.scene.skeleton_joints is not None:
@@ -1007,6 +1096,48 @@ class Renderer:
             ).astype(np.uint8)
 
             # Keep base layer's alpha (skeleton doesn't affect masking)
+
+        return self._composite_splat(base_image, splat_layer)
+
+    @staticmethod
+    def _composite_splat(
+        base_image: NDArray[np.uint8],
+        splat_layer: Optional[NDArray[np.uint8]]
+    ) -> NDArray[np.uint8]:
+        """
+        Alpha-blend a straight-alpha splat layer on top of a finished composite.
+
+        Unlike the skeleton overlay, the splat *does* contribute to alpha. It is
+        real subject coverage, exactly as the mesh silhouette is, so a mask
+        derived from the result has to include it — the same reason the face
+        overlay unions alpha into the skeleton render. The skeleton stays out of
+        alpha because it is an annotation, not geometry.
+
+        Args:
+            base_image: RGBA composite to draw onto. Modified in place.
+            splat_layer: RGBA with straight alpha, or None to do nothing.
+
+        Returns:
+            ``base_image``.
+
+        Raises:
+            ValueError: If the two layers disagree on size.
+        """
+        if splat_layer is None:
+            return base_image
+
+        if splat_layer.shape[:2] != base_image.shape[:2]:
+            raise ValueError(
+                f"splat_layer is {splat_layer.shape[1]}x{splat_layer.shape[0]} "
+                f"but the composite is {base_image.shape[1]}x{base_image.shape[0]}"
+            )
+
+        alpha = splat_layer[:, :, 3:4].astype(np.float32) / 255.0
+        base_image[:, :, :3] = (
+            splat_layer[:, :, :3] * alpha +
+            base_image[:, :, :3] * (1.0 - alpha)
+        ).astype(np.uint8)
+        base_image[:, :, 3] = np.maximum(base_image[:, :, 3], splat_layer[:, :, 3])
 
         return base_image
 
@@ -1094,7 +1225,30 @@ class Renderer:
 
         return warped
 
-    def __del__(self):
-        """Clean up renderer resources."""
+    def delete(self) -> None:
+        """
+        Release the OpenGL context held by the pyrender renderer.
+
+        Safe to call more than once. Prefer this over waiting for garbage
+        collection whenever a Renderer is short-lived -- notably the throwaway
+        one ``OrbitPipeline.attach_splat_overlay()`` builds at the original
+        photo's resolution to read a single depth buffer.
+        """
         if self._renderer is not None:
             self._renderer.delete()
+            self._renderer = None
+
+    def __del__(self):
+        """
+        Clean up renderer resources.
+
+        Errors are swallowed: a finalizer must not raise, and this one can run
+        during interpreter shutdown, where pyrender's EGL teardown re-imports
+        and fails with "sys.meta_path is None". That ordering is not
+        hypothetical -- importing torch (for splat rendering) is enough to
+        delay this past the import system's teardown.
+        """
+        try:
+            self.delete()
+        except Exception:
+            pass
