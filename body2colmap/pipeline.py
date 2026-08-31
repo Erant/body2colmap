@@ -86,6 +86,11 @@ class OrbitPipeline:
         self._splat_overlay_renderer = None
         self.splat_overlay_params: Optional[Dict[str, Any]] = None
 
+        # Splat backend settings (see configure_splat_renderer)
+        self._splat_binary: Optional[str] = None
+        self._splat_confidence = None
+        self._splat_verbose = False
+
         # Set by auto_orient(); the splat overlay is incompatible with it
         self._auto_oriented = False
 
@@ -148,8 +153,9 @@ class OrbitPipeline:
             OrbitPipeline instance with SplatScene
 
         Note:
-            Requires gsplat dependencies. Install with:
-            pip install body2colmap[splat]
+            Requires ``plyfile`` (``pip install body2colmap[splat]``) to read
+            the ply, and the ``brush-splat-render`` binary to rasterize it --
+            see :func:`~body2colmap.splat_renderer.resolve_binary`.
         """
         from .splat_scene import SplatScene
         scene = SplatScene.from_ply(filepath)
@@ -170,10 +176,60 @@ class OrbitPipeline:
         if self._renderer is None:
             if self._is_splat_scene():
                 from .splat_renderer import SplatRenderer
-                self._renderer = SplatRenderer(self.scene, self.render_size)
+                self._renderer = SplatRenderer(
+                    self.scene,
+                    self.render_size,
+                    binary=self._splat_binary,
+                    confidence=self._splat_confidence,
+                    verbose=self._splat_verbose,
+                )
             else:
                 self._renderer = Renderer(self.scene, self.render_size)
         return self._renderer
+
+    def configure_splat_renderer(
+        self,
+        binary: Optional[str] = None,
+        confidence=None,
+        verbose: bool = False,
+    ) -> "OrbitPipeline":
+        """
+        Set how Gaussian splats are rasterized.
+
+        Applies to both the ``.ply``-input base render and the overlay. Call
+        before the renderer is first used -- it is created lazily on first
+        render and these settings are read then.
+
+        Args:
+            binary: Path to ``brush-splat-render``. None resolves it from
+                ``$BRUSH_SPLAT_RENDER`` then ``PATH``.
+            confidence: Optional
+                :class:`~body2colmap.splat_renderer.ConfidenceOptions`. Valid
+                only for a ``.ply``-input base render -- see
+                :meth:`attach_splat_overlay`, which refuses it.
+            verbose: Let the binary log per-frame progress to stderr.
+
+        Returns:
+            self (for method chaining)
+        """
+        self._splat_binary = binary
+        self._splat_confidence = confidence
+        self._splat_verbose = verbose
+        return self
+
+    @property
+    def splat_confidence_maps(self) -> Optional[List[NDArray[np.uint8]]]:
+        """
+        Raw per-pixel confidence maps from the most recent splat render.
+
+        Populated only when :meth:`configure_splat_renderer` was given
+        ``ConfidenceOptions(sidecar=True)``. One 8-bit greyscale image per
+        frame, before the ``gate_lo``/``gate_hi`` smoothstep that produces the
+        rendered alpha — useful for choosing those thresholds.
+        """
+        if self._renderer is None:
+            return None
+        return getattr(self._renderer, "last_confidence_maps", None)
 
     def auto_orient(self, rotation_offset_deg: float = 0.0) -> None:
         """
@@ -215,7 +271,6 @@ class OrbitPipeline:
         scale: Optional[float] = None,
         reconcile_intrinsics: bool = True,
         max_angle_deg: float = 45.0,
-        device: str = "cuda",
     ) -> "OrbitPipeline":
         """
         Attach an externally-produced Gaussian splat as a composite overlay.
@@ -248,16 +303,17 @@ class OrbitPipeline:
                 head splat the face reads cleanly to about 30 degrees, the rim
                 starts flaring by 45, and by 60 the shell is mostly edge. Raise
                 it if you would rather have coverage than a clean silhouette.
-            device: torch device for gsplat rasterization.
 
         Returns:
             self (for method chaining)
 
         Raises:
             RuntimeError: If the scene is a SplatScene (nothing to composite
-                against), or if it has been auto-oriented — ``auto_orient()``
+                against), if it has been auto-oriented — ``auto_orient()``
                 rotates the scene about its bbox centre, which moves it out of
-                the original camera's frame and invalidates the anchoring.
+                the original camera's frame and invalidates the anchoring —
+                or if confidence gating is configured, which an overlay splat
+                cannot support.
         """
         from .splat_anchor import anchor_splat_to_world
         from .splat_renderer import SplatRenderer
@@ -273,6 +329,17 @@ class OrbitPipeline:
                 "places the splat relative to the original camera at the "
                 "origin, and auto_orient() rotates the scene about its bbox "
                 "centre, breaking that relationship. Drop --auto-orient."
+            )
+        if self._splat_confidence is not None:
+            raise RuntimeError(
+                "Confidence gating is not available for a splat overlay. It "
+                "scores each Gaussian by how well the training views "
+                "constrained it, and an overlay splat is reconstructed from a "
+                "single photograph — there are no training views and no "
+                "evidence block, so the gate would silently degenerate to "
+                "plain alpha. It also composites over cull_color and writes "
+                "the gate as alpha, which the overlay's straight-alpha "
+                "compositing cannot use. Drop --splat-confidence."
             )
 
         w, h = original_image_size
@@ -296,7 +363,10 @@ class OrbitPipeline:
 
         self._splat_overlay = splat
         self._splat_overlay_renderer = SplatRenderer(
-            splat, self.render_size, device=device
+            splat,
+            self.render_size,
+            binary=self._splat_binary,
+            verbose=self._splat_verbose,
         )
         info["max_angle_deg"] = float(max_angle_deg)
         self.splat_overlay_params = info
@@ -335,12 +405,25 @@ class OrbitPipeline:
         cos = float(np.dot(to_splat / norm, self.splat_overlay_params["source_view_dir"]))
         return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
 
+    def _splat_layer_kept(self, camera: Camera) -> bool:
+        """Whether the splat overlay survives the view-angle cull for a camera."""
+        if not self.has_splat_overlay:
+            return False
+        return (
+            self.splat_view_angle_deg(camera)
+            <= self.splat_overlay_params["max_angle_deg"]
+        )
+
     def render_splat_layer(self, camera: Camera) -> Optional[NDArray[np.uint8]]:
         """
         Render the splat overlay for one camera, or None if it is culled.
 
         The layer comes back with **straight** alpha so it composites correctly
         over whatever is underneath.
+
+        This costs a full ``brush-splat-render`` invocation, so use it for
+        one-off frames only. For a sequence, call :meth:`render_splat_layers`,
+        which renders the whole camera list in one invocation.
 
         Args:
             camera: Camera to render from.
@@ -349,13 +432,45 @@ class OrbitPipeline:
             RGBA image, or None when no overlay is attached or the camera is
             beyond ``max_angle_deg`` of the splat's source view.
         """
-        if not self.has_splat_overlay:
-            return None
-
-        if self.splat_view_angle_deg(camera) > self.splat_overlay_params["max_angle_deg"]:
+        if not self._splat_layer_kept(camera):
             return None
 
         return self._splat_overlay_renderer.render(camera, bg_color=None)
+
+    def render_splat_layers(
+        self,
+        cameras: List[Camera]
+    ) -> List[Optional[NDArray[np.uint8]]]:
+        """
+        Render the splat overlay for many cameras in one binary invocation.
+
+        The batched form of :meth:`render_splat_layer`, and the one to use for
+        a sequence: ``brush-splat-render`` initializes wgpu and loads the ply
+        once per invocation, so rendering 81 frames one at a time pays that
+        setup 81 times.
+
+        Culled cameras are not sent to the binary at all; their slots come back
+        as ``None``, so the result lines up index-for-index with ``cameras``
+        and ``render_composite(splat_layer=...)`` needs no special case.
+
+        Args:
+            cameras: Cameras to render from, in order.
+
+        Returns:
+            List of RGBA images with **straight** alpha, ``None`` at every
+            index with no overlay or beyond ``max_angle_deg``.
+        """
+        layers: List[Optional[NDArray[np.uint8]]] = [None] * len(cameras)
+        kept = [i for i, cam in enumerate(cameras) if self._splat_layer_kept(cam)]
+        if not kept:
+            return layers
+
+        rendered = self._splat_overlay_renderer.render_many(
+            [cameras[i] for i in kept], bg_color=None
+        )
+        for i, image in zip(kept, rendered):
+            layers[i] = image
+        return layers
 
     def set_orbit_params(
         self,
@@ -654,19 +769,23 @@ class OrbitPipeline:
         results = {}
 
         for mode in modes:
+            if mode == "splat":
+                # Splat rendering (only valid for SplatScene). Batched: the
+                # brush binary loads the ply and initializes wgpu once per
+                # invocation, so a per-frame loop would pay that n_frames times.
+                if not is_splat:
+                    raise ValueError("'splat' mode only valid for SplatScene")
+                results[mode] = renderer.render_many(
+                    self.cameras,
+                    bg_color=render_kwargs.get('bg_color', (1.0, 1.0, 1.0))
+                )
+                continue
+
             images = []
 
             # Render each frame
             for i, camera in enumerate(self.cameras):
-                if mode == "splat":
-                    # Splat rendering (only valid for SplatScene)
-                    if not is_splat:
-                        raise ValueError("'splat' mode only valid for SplatScene")
-                    image = renderer.render(
-                        camera,
-                        bg_color=render_kwargs.get('bg_color', (1.0, 1.0, 1.0))
-                    )
-                elif mode == "mesh":
+                if mode == "mesh":
                     if is_splat:
                         raise ValueError("'mesh' mode not valid for SplatScene, use 'splat'")
                     image = renderer.render_mesh(
@@ -747,11 +866,14 @@ class OrbitPipeline:
         # Create renderer if needed (mesh renderer for composites)
         renderer = self.renderer
 
+        # Rendered up front, in one binary invocation, rather than per frame.
+        splat_layers = self.render_splat_layers(self.cameras)
+
         images = []
-        for camera in self.cameras:
+        for camera, splat_layer in zip(self.cameras, splat_layers):
             image = renderer.render_composite(
                 camera, composite_modes,
-                splat_layer=self.render_splat_layer(camera),
+                splat_layer=splat_layer,
             )
             images.append(image)
 

@@ -200,6 +200,38 @@ class SplatScene:
 
         return self._bounds
 
+    def get_framing_bounds(
+        self,
+        preset: str = "full"
+    ) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """
+        Get bounding box for a framing preset.
+
+        Duck-types :meth:`body2colmap.scene.Scene.get_framing_bounds` so
+        ``OrbitPipeline.set_orbit_params()`` can frame a splat scene the same
+        way it frames a mesh one.
+
+        Only ``"full"`` is supported: the partial presets pick a Y threshold
+        off skeleton joints, and a splat scene is raw Gaussians with no
+        skeleton to measure against.
+
+        Args:
+            preset: Framing preset name. Must be "full".
+
+        Returns:
+            Tuple of (min_corner, max_corner) arrays, each shape (3,)
+
+        Raises:
+            ValueError: For any preset other than "full".
+        """
+        if preset != "full":
+            raise ValueError(
+                f"Framing preset '{preset}' is not available for a splat "
+                "scene: partial presets derive their height threshold from "
+                "skeleton joints, and a .ply carries none. Use 'full'."
+            )
+        return self.get_bounds()
+
     def get_bbox_center(self) -> NDArray[np.float32]:
         """
         Get center of bounding box.

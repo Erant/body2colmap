@@ -32,7 +32,8 @@ Each module has a single, clear responsibility:
 - `path.py`: Orbit path pattern generation
 - `scene.py`: 3D scene management (mesh, skeleton, lighting)
 - `renderer.py`: Image rendering (mesh, depth, outline, skeleton modes)
-- `splat_scene.py` / `splat_renderer.py`: Gaussian splat storage and gsplat rasterization
+- `splat_scene.py` / `splat_renderer.py`: Gaussian splat storage, and
+  rasterization via the external `brush-splat-render` binary
 - `splat_anchor.py`: Place an externally-built splat in world coords
 - `exporter.py`: Export to COLMAP and other formats
 - `utils.py`: Auto-framing, homography warp, focal length utilities
@@ -455,6 +456,66 @@ returns a centred principal point, so `(cx, cy) = (W/2, H/2)`.
 
 This is what lets a *crop* of the photo be related to SAM-3D-Body's frame
 analytically, via `splat.crop_box`.
+
+## Rasterizing Splats: brush, Not gsplat (2026-08)
+
+### Overview
+Gaussian splats are rasterized by **`brush-splat-render`**, a standalone binary
+in the brush repo (`crates/brush-splat-render`, documented in brush's
+`docs/splat-render.md`). `splat_renderer.py` writes a `.ply` and a
+`cameras.json`, invokes it, and reads RGBA PNGs back.
+
+It replaced a `gsplat.rasterization` call, which was also the only use of torch
+in the package. gsplat publishes no wheel past torch 2.4 / cu124, so on a modern
+stack it JIT-compiles its CUDA kernels on first use and needs `nvcc` at runtime
+-- forcing a CUDA *devel* base image on anything that packages this. brush is
+wgpu/Vulkan and is already present wherever this pipeline runs, so the swap
+drops the CUDA toolchain entirely and leaves one graphics API instead of two.
+
+Find the binary via `--splat-renderer` / `splat.renderer_binary`, then
+`$BRUSH_SPLAT_RENDER`, then `PATH`.
+
+### Key Design: The Camera Convention Is the Binary's Job
+`Camera.rotation` is serialized row-major into `cameras.json` **untouched**. The
+binary's `to_brush_camera()` does the OpenGL -> OpenCV conversion
+(`R_cv = R_gl @ diag(1, -1, -1)`, i.e. negate the Y and Z *columns*). Converting
+on both sides cancels into a vertically mirrored render that looks almost right,
+which is exactly the failure this note exists to prevent.
+
+Note the pre-swap `splat_renderer.py` docstring claimed "no conversion needed"
+directly above the lines that converted. That stale comment was corrected, not
+carried across.
+
+### Key Design: One Invocation Per Sequence
+The binary initializes wgpu and loads the ply once per invocation, then loops
+the camera list. So the batch call is the primary API -- `render_many()`, and
+`pipeline.render_splat_layers(cameras)` for the overlay -- with the singular
+forms reserved for genuine one-off frames. `render_composite_all()` renders
+every splat layer up front rather than inside its frame loop.
+
+### Key Design: Always Render on Black
+The binary always runs with `--background 0,0,0`, whatever `bg_color` says, so
+its RGB comes back premultiplied. Both alpha conventions are then derived in
+Python. See `body2colmap/CLAUDE.md` for the full rationale.
+
+### Confidence Gating
+`--confidence` gates each pixel by per-splat multi-view evidence rather than a
+downstream alpha threshold, exposed as `splat.confidence` and the
+`--splat-confidence*` flags. **It makes the alpha channel the gate, not
+accumulated opacity**, and it works only for a `.ply` base render -- an overlay
+splat is built from a single photograph and has no training views to measure
+against, so `attach_splat_overlay()` refuses it.
+
+### Validation
+The swap was gated against a captured gsplat oracle: the same splats and the
+same cameras, rendered once through gsplat and once through brush, on both
+contracts (straight-alpha overlay at SH degree 0, and composited base render at
+SH degree 3). Measured MAE 0.00013-0.00042 on RGB and 0.00011-0.00020 on alpha,
+against a bar of 1/255 = 0.0039, with best-fit integer shift (0, 0) everywhere
+-- structure matters more than the mean here, since a mirrored or offset render
+is a convention bug however small its MAE. End-to-end, 14 of 16 composited
+`skeleton+splat` frames came out bit-identical and the 2 splat-bearing frames
+differed by MAE 7.3e-5.
 
 ## Critical Implementation Details
 

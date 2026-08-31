@@ -19,6 +19,9 @@ path.py  (depends on: camera, coordinates)
     ↓
 splat_scene.py  (no dependencies - pure data + PLY I/O)
     ↓
+splat_renderer.py  (depends on: camera, splat_scene + the
+                    external brush-splat-render binary)
+    ↓
 splat_anchor.py  (depends on: camera, splat_scene)
     ↓
 renderer.py  (depends on: scene, camera, face, skeleton)
@@ -266,6 +269,14 @@ Each module has isolated tests:
 - `trimesh`: Mesh operations, surface sampling
 - `numpy`: All math operations
 - `opencv-python` (cv2): Image I/O and color conversion
+
+**Gaussian splats** (optional, `pip install body2colmap[splat]`):
+- `plyfile`: Reading and writing 3DGS `.ply` files
+- `brush-splat-render`: **an external binary, not a Python package.** Build it
+  from the brush repo with `cargo build --release -p brush-splat-render`, then
+  point `$BRUSH_SPLAT_RENDER` at it (or pass `--splat-renderer`). It is
+  wgpu/Vulkan, so it needs a GPU but no CUDA toolchain. There is deliberately
+  no Python rasterizer fallback -- see the root `CLAUDE.md`.
 
 **Utilities**:
 - `scipy`: Rotation utilities (quaternion conversions)
@@ -643,18 +654,60 @@ only ever emits degree 0 — one view constrains nothing view-dependent — so t
 raises rather than silently producing wrong view-dependent colour.
 
 ### The splat layer is passed in pre-rendered, not named in `modes`
-`Renderer` is pyrender-backed and cannot rasterize Gaussians; `SplatRenderer` is
-gsplat-backed and knows nothing about meshes. Rather than couple them, the
-pipeline renders the splat and hands `render_composite()` the finished RGBA via
-`splat_layer=`. `render_splat_layer()` returns `None` on a culled frame, and
-`_composite_splat()` treats `None` as a no-op, so the cull needs no branch at
-any call site.
+`Renderer` is pyrender-backed and cannot rasterize Gaussians; `SplatRenderer`
+shells out to `brush-splat-render` and knows nothing about meshes. Rather than
+couple them, the pipeline renders the splat and hands `render_composite()` the
+finished RGBA via `splat_layer=`. `render_splat_layer()` returns `None` on a
+culled frame, and `_composite_splat()` treats `None` as a no-op, so the cull
+needs no branch at any call site.
+
+The second reason is batching, and it is why the *plural*
+`pipeline.render_splat_layers(cameras)` exists: the binary initializes wgpu and
+loads the ply once per invocation, then loops the camera list. Rendering an
+81-frame orbit one frame at a time would pay that setup 81 times, so
+`render_composite_all()` renders every layer up front in a single invocation and
+indexes into the result. Culled cameras are never sent, and their slots come
+back `None`, so the list still lines up index-for-index with `cameras`.
+`render_splat_layer()` (singular) survives for genuine one-off frames —
+`render_original_view()` and the anchor-verification recipe.
 
 ### The splat layer must be rendered with straight alpha
-`SplatRenderer.render()` normally composites RGB over `bg_color` and returns
+`SplatRenderer.render*()` normally composites RGB over `bg_color` and returns
 alpha alongside. Blending *that* over another layer blends toward the background
 twice, which shows as a halo around the silhouette. `bg_color=None` returns
 un-premultiplied colour instead, and the overlay path always uses it.
+
+This is why the binary is always invoked with `--background 0,0,0`, whatever
+`bg_color` says. brush composites as `rgb*alpha + bg*(1-alpha)`, so a black
+background makes its RGB output *premultiplied* — the same intermediate gsplat
+produced, and the one both conventions derive from in Python: `bg_color=None`
+divides by alpha, a real `bg_color` adds `bg*(1-alpha)`. One Rust path, one
+Python path. The 8-bit round trip costs at most 1/255 in the final composite,
+because the quantized quantity *is* the premultiplied contribution.
+
+### Confidence gating is base-render only
+`brush-splat-render --confidence` scores each Gaussian by how well the training
+views constrained it. An overlay splat is masktest's 2.5-D shell reconstructed
+from one photograph: no training views, no `ev_*` block, so the binary would
+warn and silently degenerate the gate to plain alpha. It also composites over
+`cull_color` and writes the gate as alpha, leaving nothing to un-premultiply by.
+`attach_splat_overlay()` therefore raises when confidence is configured, the
+same way it raises after `auto_orient()` — a silent degradation here would look
+exactly like a working feature.
+
+**It changes what alpha means.** Without it, alpha is accumulated opacity. With
+it, alpha is the gate. Anything downstream using that alpha as a 3DGS training
+mask is then masking on evidence rather than coverage, which is the point.
+
+**It also moves compositing into the binary.** The gated path is the one case
+where `--background 0,0,0` does not apply: `--cull-color` is what the binary
+composites over *and* what culled pixels resolve to, so it is the entire
+background of the frame. `ConfidenceOptions.cull_color` therefore defaults to
+`None`, meaning "use the render's `bg_color`" — resolved in `to_args()`, where
+both values are in scope. Without that, `bg_color` would be a silently ignored
+argument whenever gating was on, and `--bg-color` would mean two different
+things depending on a flag elsewhere. Set `cull_color` explicitly only to make
+culled regions visible against the background.
 
 ### The splat contributes to alpha; the skeleton does not
 `_composite_splat()` does `alpha = max(base_alpha, splat_alpha)`, matching how

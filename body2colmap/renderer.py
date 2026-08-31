@@ -978,11 +978,12 @@ class Renderer:
             splat_layer: Optional pre-rendered RGBA Gaussian-splat layer with
                 **straight** alpha, composited last (on top of everything).
                 It is passed in already rendered rather than named in ``modes``
-                because splats are rasterized by gsplat in
-                :class:`~body2colmap.splat_renderer.SplatRenderer`, which this
-                pyrender-backed class knows nothing about. The pipeline owns
-                that renderer and hands the result down.
-                ``None`` for a frame where the splat is culled.
+                for two reasons. Splats are rasterized by an external binary
+                via :class:`~body2colmap.splat_renderer.SplatRenderer`, which
+                this pyrender-backed class knows nothing about; and that binary
+                renders a whole camera list per invocation, so the pipeline
+                batches every frame's layer up front and hands them down one at
+                a time. ``None`` for a frame where the splat is culled.
 
         Returns:
             RGBA image with composited modes
@@ -1245,8 +1246,9 @@ class Renderer:
         Errors are swallowed: a finalizer must not raise, and this one can run
         during interpreter shutdown, where pyrender's EGL teardown re-imports
         and fails with "sys.meta_path is None". That ordering is not
-        hypothetical -- importing torch (for splat rendering) is enough to
-        delay this past the import system's teardown.
+        hypothetical -- importing a large module late (torch, back when splat
+        rendering went through gsplat) is enough to delay this past the import
+        system's teardown.
         """
         try:
             self.delete()

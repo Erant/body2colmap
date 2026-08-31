@@ -5,6 +5,34 @@ All notable changes to body2colmap will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Confidence gating for splat renders** (`--splat-confidence`): gates every pixel by
+  how well the training views actually constrained the Gaussians covering it, instead of
+  leaving the decision to a downstream threshold on rendered alpha. Drops low-confidence
+  fringes at the source.
+  - **Changes what the alpha channel means**: alpha becomes the confidence gate, not
+    accumulated opacity. A mask taken from such a frame masks on evidence, not coverage.
+  - Needs evidence: `ev_*` properties in the `.ply` (from `brush --export-evidence`) or
+    `--splat-confidence-dataset` to measure it at render time
+  - `.ply` input only. An overlay splat is reconstructed from a single photograph, so it
+    has no training views to score against; `--splat-overlay` combined with
+    `--splat-confidence` is rejected rather than silently degraded to plain alpha
+  - `splat.cull_color` defaults to `render.bg_color`: the renderer resolves culled
+    pixels and the background to one colour, so this is the whole background of a
+    gated render. Set it only to make culled regions stand out.
+  - Config: `splat.confidence`, `splat.cull_color`, `splat.gate_lo`, `splat.gate_hi`,
+    `splat.confidence_sidecar`, `splat.confidence_dataset`, `splat.confidence_extra_args`
+  - CLI: `--splat-confidence`, `--splat-cull-color`, `--splat-gate-lo`, `--splat-gate-hi`,
+    `--splat-confidence-sidecar`, `--splat-confidence-dataset`
+- `OrbitPipeline.render_splat_layers(cameras)` and `SplatRenderer.render_many(cameras)`:
+  batched splat rendering. The renderer binary initializes its GPU context and loads the
+  ply once per invocation, so a per-frame loop paid that setup once per frame.
+  `render_composite_all()` and `render_all(modes=["splat"])` now batch internally.
+- `OrbitPipeline.configure_splat_renderer()` to select the renderer binary, confidence
+  options and verbosity for both the base and overlay splat paths
+- `SplatScene.get_framing_bounds()`, so a `.ply` input reaches
+  `set_orbit_params()` at all — it previously raised `AttributeError`. Only the `"full"`
+  preset is supported; the partial presets derive their threshold from skeleton joints,
+  which a `.ply` does not carry.
 - **Eyes rendered as shapes, not dots**: face landmark rendering now draws each eye as
   a filled two-tone shape — a flat sclera with a pupil disc centered on the pupil
   landmark — instead of the 6-point contour dots and their outline. Dots carry almost
@@ -56,6 +84,24 @@ All notable changes to body2colmap will be documented in this file.
   offset uniformity, anchor round-trips, smoothness, and all error paths
 
 ### Changed
+- **Breaking**: Gaussian splats are rasterized by the external `brush-splat-render`
+  binary instead of `gsplat`. gsplat publishes no wheel past torch 2.4 / cu124, so on a
+  modern stack it JIT-compiles CUDA kernels on first use and needs `nvcc` at runtime,
+  forcing a CUDA *devel* base image downstream. The replacement is wgpu/Vulkan.
+  - `gsplat` is dropped from the `splat` extra (`plyfile` stays), and `torch` — which
+    only ever existed to feed gsplat — is no longer imported anywhere in the package
+  - Build the binary with `cargo build --release -p brush-splat-render` in a brush
+    checkout. body2colmap finds it via `--splat-renderer` / `splat.renderer_binary`,
+    then `$BRUSH_SPLAT_RENDER`, then `PATH`
+  - Rendering is unchanged: measured against a captured gsplat oracle across both
+    contracts (straight-alpha overlay at SH degree 0, composited base at SH degree 3),
+    MAE 0.00013-0.00042 on RGB and 0.00011-0.00020 on alpha against a 1/255 = 0.0039
+    bar, with best-fit integer shift (0, 0) on every frame
+- **Breaking**: `splat.device` is removed, and a config still carrying it now raises
+  rather than silently ignoring it. The binary picks its own wgpu adapter. Use
+  `splat.renderer_binary` to point at a specific build.
+- **Breaking**: `OrbitPipeline.attach_splat_overlay()` lost its `device` parameter; call
+  `configure_splat_renderer()` instead.
 - **Breaking**: `orbit_params['frame0_camera']` renamed to `orbit_params['anchor_camera']`.
   Read `orbit_params['anchor_frame_index']` for the conditioning frame rather than assuming 0
   — it is 0 for circular but solved for on helical.

@@ -42,30 +42,37 @@ pip install -e .
 For face landmark extraction (optional):
 - mediapipe (`pip install mediapipe`)
 
+For Gaussian splats — a `.ply` input, or `--splat-overlay` (optional):
+- plyfile (`pip install body2colmap[splat]`)
+- the `brush-splat-render` binary, built from the
+  [brush](https://github.com/ArthurBrussee/brush) repo. It is wgpu/Vulkan, so
+  it needs a GPU but no CUDA toolchain. See
+  [Rendering splats](#rendering-splats).
+
 ## Quick Start
 
 ### Command Line
 
 ```bash
 # Basic usage — mesh rendering with COLMAP export
-body2colmap --input estimation.npz --output-dir ./output
+body2colmap estimation.npz --output-dir ./output
 
 # With skeleton overlay
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --skeleton --render-modes depth+skeleton
 
 # Flat outline of the mesh with a skeleton overlay
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --skeleton --render-modes outline+skeleton \
   --outline-color 1,1,1 --outline-bg-color 0,0,0
 
 # With face landmarks from a photo of the subject
 python tools/extract_face_landmarks.py photo.jpg -o face.json
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --face-landmarks face.json --render-modes skeleton+face
 
 # With a real Gaussian-splat face instead of synthetic landmarks
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --config circular-splat.yaml \
   --splat-overlay face_splat.ply --splat-crop 141,0,594,477
 ```
@@ -163,6 +170,9 @@ Single modes:
 - **depth**: Depth maps (with optional colormaps)
 - **outline**: Flat two-tone silhouette of the mesh (no shading)
 - **skeleton**: Skeleton joints and bones
+- **splat**: The Gaussian splat itself. Only for a `.ply` input, where it is
+  the whole scene and the only valid mode; see
+  [Rendering splats](#rendering-splats).
 
 Composite modes (overlays combined via `+`):
 - **depth+skeleton**: Depth map with skeleton overlay
@@ -186,19 +196,19 @@ boundary stroke:
 
 ```bash
 # Solid black figure on white (default)
-body2colmap --input estimation.npz --output-dir ./out --render-modes outline
+body2colmap estimation.npz --output-dir ./out --render-modes outline
 
 # White figure on dark blue, with a skeleton overlay
-body2colmap --input estimation.npz --output-dir ./out \
+body2colmap estimation.npz --output-dir ./out \
   --skeleton --render-modes outline+skeleton \
   --outline-color 1,1,1 --outline-bg-color 0.08,0.08,0.16
 
 # Hard-edged silhouette (blur off)
-body2colmap --input estimation.npz --output-dir ./out \
+body2colmap estimation.npz --output-dir ./out \
   --render-modes outline --outline-blur 0
 
 # Line-art contour instead of a solid fill
-body2colmap --input estimation.npz --output-dir ./out \
+body2colmap estimation.npz --output-dir ./out \
   --render-modes outline --outline-style stroke --outline-thickness 4
 ```
 
@@ -311,6 +321,7 @@ if you would rather have coverage than a clean silhouette.
 | `--splat-scale S` | fitted | Depth gauge; omit to fit it against the mesh |
 | `--splat-max-angle DEGREES` | `45` | Cull past this far off the splat's source view |
 | `--splat-no-reconcile` | off | Place with a uniform scale, ignoring the splat's own focal |
+| `--splat-renderer PATH` | `$BRUSH_SPLAT_RENDER`, then `PATH` | The `brush-splat-render` binary |
 
 ```yaml
 splat:
@@ -321,7 +332,7 @@ splat:
   scale: null                     # null = fit against the mesh
   reconcile_intrinsics: true
   max_angle_deg: 45.0
-  device: "cuda"
+  renderer_binary: null           # null = $BRUSH_SPLAT_RENDER, then PATH
 ```
 
 A ready-to-run example is in [`circular-splat.yaml`](circular-splat.yaml):
@@ -345,7 +356,67 @@ layer = pipeline.render_splat_layer(camera)   # pipeline render_size must be (w,
 # searching integer shifts over +/-4 px -- the optimum must be (0, 0)
 ```
 
-Requires `pip install body2colmap[splat]` (gsplat, plyfile) and a CUDA device.
+Requires `pip install body2colmap[splat]` (plyfile) and the
+`brush-splat-render` binary — see [Rendering splats](#rendering-splats).
+
+### Rendering splats
+
+Both splat paths — a `.ply` input rendered as the base layer, and the
+`--splat-overlay` face composite — rasterize through **`brush-splat-render`**,
+a standalone binary from the [brush](https://github.com/ArthurBrussee/brush)
+repo. It is wgpu/Vulkan, so it needs a GPU but no CUDA toolchain, and there is
+deliberately no Python fallback.
+
+```bash
+# in your brush checkout
+cargo build --release -p brush-splat-render
+export BRUSH_SPLAT_RENDER=$PWD/target/release/brush-splat-render
+```
+
+body2colmap looks for it in `--splat-renderer` / `splat.renderer_binary`, then
+`$BRUSH_SPLAT_RENDER`, then `PATH`.
+
+The binary renders a whole camera list per invocation, so a sequence is
+rendered in one call — `render_all(modes=["splat"])` and
+`render_composite_all()` both batch internally. Use
+`pipeline.render_splat_layers(cameras)` rather than a loop over
+`render_splat_layer()` if you drive the API yourself.
+
+#### Confidence gating
+
+`--splat-confidence` gates each pixel by how well the training views actually
+constrained the Gaussians covering it, instead of leaving the decision to a
+threshold on rendered alpha. It drops low-confidence fringes at the source.
+
+**It changes what the alpha channel means:** alpha becomes the confidence gate,
+not accumulated opacity. A mask taken from such a frame masks on evidence
+rather than coverage.
+
+The background also comes from the renderer rather than being composited
+afterwards, because culled pixels and the background resolve to the same
+colour. `--bg-color` still sets it; pass `--splat-cull-color` only when you
+want culled regions to stand out against the background for inspection.
+
+It needs evidence — either `ev_*` properties baked into the `.ply` by
+`brush ... --export-evidence`, or `--splat-confidence-dataset` pointing at the
+training set so it can be measured at render time. It is available only for a
+`.ply` input: an overlay splat is reconstructed from a single photograph, so
+there are no training views to score against, and `--splat-overlay` combined
+with `--splat-confidence` is rejected rather than silently degraded.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--splat-confidence` | off | Enable confidence gating |
+| `--splat-confidence-dataset DIR` | None | Measure evidence here if the `.ply` carries none |
+| `--splat-gate-lo C` | `0.45` | At or below this confidence, a pixel is fully culled |
+| `--splat-gate-hi C` | `0.65` | At or above this, fully kept (equal to `--splat-gate-lo` = hard cut) |
+| `--splat-cull-color R,G,B` | follows `--bg-color` | What culled pixels resolve to — and, since the renderer uses one colour for both, the whole background of a gated render |
+| `--splat-confidence-sidecar` | off | Also write `<frame>.conf.png`, the raw confidence before gating |
+
+```bash
+body2colmap scene.ply -o ./out --render-modes splat \
+  --splat-confidence --splat-confidence-dataset ./colmap_dataset
+```
 
 ### Auto-Orient
 
@@ -355,13 +426,13 @@ Use `--initial-rotation` to add an offset from the auto-facing position:
 
 ```bash
 # Default: body faces camera
-body2colmap --input estimation.npz --output-dir ./output
+body2colmap estimation.npz --output-dir ./output
 
 # Body's right side toward camera
-body2colmap --input estimation.npz --output-dir ./output --initial-rotation 90
+body2colmap estimation.npz --output-dir ./output --initial-rotation 90
 
 # Back toward camera
-body2colmap --input estimation.npz --output-dir ./output --initial-rotation 180
+body2colmap estimation.npz --output-dir ./output --initial-rotation 180
 ```
 
 This ensures consistent starting orientation regardless of how the subject was posed in the source image, giving predictable control over when features appear and disappear during the orbit.
@@ -374,12 +445,12 @@ For circular orbits that frame is frame 0. For **helical** orbits the elevation 
 
 ```bash
 # Original-camera orbit with the source image composited at frame 0
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --use-original-camera --original-image photo.jpg \
   --render-modes skeleton
 
 # Adjust how much of the frame the subject fills (default: 0.8)
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --use-original-camera --original-image photo.jpg \
   --fill-ratio 0.6 --render-modes mesh
 ```
@@ -498,17 +569,17 @@ The tool uses a two-stage detection pipeline:
 
 ```bash
 # Skeleton + face overlay
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --face-landmarks face_landmarks.json \
   --render-modes skeleton+face
 
 # Depth + skeleton + face
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --face-landmarks face_landmarks.json \
   --render-modes depth+skeleton+face
 
 # Face points only (no connecting lines)
-body2colmap --input estimation.npz --output-dir ./output \
+body2colmap estimation.npz --output-dir ./output \
   --face-landmarks face_landmarks.json \
   --face-mode points \
   --render-modes skeleton+face
@@ -644,7 +715,7 @@ body2colmap --save-config config.yaml
 Use it:
 
 ```bash
-body2colmap --config config.yaml --input estimation.npz
+body2colmap estimation.npz --config config.yaml
 ```
 
 CLI arguments override config file values.
@@ -655,7 +726,7 @@ Body2COLMAP output is compatible with standard 3DGS training pipelines:
 
 ```bash
 # Generate training data
-body2colmap --input person.npz --output-dir ./data/person
+body2colmap person.npz --output-dir ./data/person
 
 # Train with gaussian-splatting
 cd gaussian-splatting
@@ -674,7 +745,7 @@ body2colmap/
 ├── face.py          # Face landmarks, Procrustes alignment, visibility
 ├── renderer.py      # Image rendering (mesh, depth, skeleton, face)
 ├── splat_scene.py   # Gaussian splat storage and PLY I/O
-├── splat_renderer.py # gsplat rasterization
+├── splat_renderer.py # rasterization via brush-splat-render
 ├── splat_anchor.py  # Place an external splat in world coords
 ├── exporter.py      # COLMAP export
 ├── utils.py         # Auto-framing, homography warp, focal length utilities

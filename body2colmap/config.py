@@ -160,11 +160,20 @@ class SkeletonConfig:
 @dataclass
 class SplatConfig:
     """
-    Gaussian-splat overlay configuration.
+    Gaussian-splat configuration.
 
-    The splat is produced externally from the same photograph that feeds
-    SAM-3D-Body (see ~/Projects/masktest) and composited on top of the skeleton
+    Two unrelated things live here, because both concern splats:
+
+    **The overlay** (``overlay_ply`` and everything up to ``max_angle_deg``).
+    A splat produced externally from the same photograph that feeds
+    SAM-3D-Body (see ~/Projects/masktest), composited on top of the skeleton
     via the ``splat`` overlay layer, e.g. ``modes: ["skeleton+splat"]``.
+
+    **The rasterizer** (``renderer_binary`` and the confidence fields).
+    Applies to any splat rendering, including a ``.ply`` input rendered as the
+    base layer. Confidence gating is valid only for that base case — an
+    overlay splat has no training views to measure evidence against, and
+    :meth:`~body2colmap.pipeline.OrbitPipeline.attach_splat_overlay` refuses it.
     """
     overlay_ply: Optional[str] = None   # None disables the overlay entirely
     meta_json: Optional[str] = None     # default: splat_meta.json beside the PLY
@@ -173,7 +182,39 @@ class SplatConfig:
     scale: Optional[float] = None       # None = fit the depth gauge against the mesh
     reconcile_intrinsics: bool = True
     max_angle_deg: float = 45.0         # cull past this far off the source view
-    device: str = "cuda"
+
+    # Rasterizer: brush-splat-render. None resolves $BRUSH_SPLAT_RENDER, then PATH.
+    renderer_binary: Optional[str] = None
+
+    # Confidence gating. NOTE: this changes what the alpha channel means —
+    # with it, alpha is the confidence gate, not accumulated opacity.
+    confidence: bool = False
+    cull_color: Optional[Tuple[float, float, float]] = None  # None = render.bg_color
+    gate_lo: float = 0.45
+    gate_hi: float = 0.65
+    confidence_sidecar: bool = False
+    confidence_dataset: Optional[str] = None   # measure evidence here if the ply has none
+    confidence_extra_args: List[str] = field(default_factory=list)
+
+    def confidence_options(self):
+        """
+        Build :class:`~body2colmap.splat_renderer.ConfidenceOptions`, or None.
+
+        Returns None when confidence gating is off, which is exactly what
+        :meth:`~body2colmap.pipeline.OrbitPipeline.configure_splat_renderer`
+        wants for the ungated case.
+        """
+        if not self.confidence:
+            return None
+        from .splat_renderer import ConfidenceOptions
+        return ConfidenceOptions(
+            cull_color=self.cull_color,   # None = follow the render's bg_color
+            gate_lo=self.gate_lo,
+            gate_hi=self.gate_hi,
+            sidecar=self.confidence_sidecar,
+            dataset=self.confidence_dataset,
+            extra_args=tuple(self.confidence_extra_args),
+        )
 
     def resolved_meta_json(self) -> Optional[str]:
         """The metadata path, defaulting to splat_meta.json beside the PLY."""
@@ -397,6 +438,28 @@ class Config:
             config.splat.reconcile_intrinsics = False
         if args.splat_max_angle is not None:
             config.splat.max_angle_deg = args.splat_max_angle
+        if args.splat_renderer is not None:
+            config.splat.renderer_binary = args.splat_renderer
+        if args.splat_confidence:
+            config.splat.confidence = True
+        if args.splat_cull_color is not None:
+            try:
+                config.splat.cull_color = _opt_tuple(
+                    args.splat_cull_color.split(','), 3, float
+                )
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"Invalid --splat-cull-color {args.splat_cull_color!r}: {e}. "
+                    "Expected R,G,B in 0-1, e.g. 0.5,0.5,0.5"
+                )
+        if args.splat_gate_lo is not None:
+            config.splat.gate_lo = args.splat_gate_lo
+        if args.splat_gate_hi is not None:
+            config.splat.gate_hi = args.splat_gate_hi
+        if args.splat_confidence_sidecar:
+            config.splat.confidence_sidecar = True
+        if args.splat_confidence_dataset is not None:
+            config.splat.confidence_dataset = args.splat_confidence_dataset
 
         # Export overrides
         if args.no_colmap:
@@ -498,8 +561,20 @@ class Config:
             )
         )
 
-        # Parse splat overlay config
+        # Parse splat config
         splat_data = data.get('splat', {})
+        if 'device' in splat_data:
+            # Splats are rasterized by brush (wgpu/Vulkan), not gsplat on a
+            # torch device, so this key no longer selects anything. Raise
+            # rather than ignore it: a stale config would otherwise quietly
+            # mean something other than what it says.
+            raise ValueError(
+                "splat.device is no longer supported. Gaussian splats are "
+                "rasterized by the brush-splat-render binary, which picks its "
+                "own wgpu adapter. Remove the key, and use "
+                "splat.renderer_binary (or $BRUSH_SPLAT_RENDER) if you need to "
+                "point at a specific build."
+            )
         splat = SplatConfig(
             overlay_ply=splat_data.get('overlay_ply'),
             meta_json=splat_data.get('meta_json'),
@@ -508,7 +583,14 @@ class Config:
             scale=splat_data.get('scale'),
             reconcile_intrinsics=splat_data.get('reconcile_intrinsics', True),
             max_angle_deg=splat_data.get('max_angle_deg', 45.0),
-            device=splat_data.get('device', 'cuda'),
+            renderer_binary=splat_data.get('renderer_binary'),
+            confidence=splat_data.get('confidence', False),
+            cull_color=_opt_tuple(splat_data.get('cull_color'), 3, float),
+            gate_lo=splat_data.get('gate_lo', 0.45),
+            gate_hi=splat_data.get('gate_hi', 0.65),
+            confidence_sidecar=splat_data.get('confidence_sidecar', False),
+            confidence_dataset=splat_data.get('confidence_dataset'),
+            confidence_extra_args=list(splat_data.get('confidence_extra_args') or []),
         )
 
         # Parse export config
@@ -605,7 +687,16 @@ class Config:
                 'scale': self.splat.scale,
                 'reconcile_intrinsics': self.splat.reconcile_intrinsics,
                 'max_angle_deg': self.splat.max_angle_deg,
-                'device': self.splat.device
+                'renderer_binary': self.splat.renderer_binary,
+                'confidence': self.splat.confidence,
+                'cull_color': (
+                    list(self.splat.cull_color) if self.splat.cull_color else None
+                ),
+                'gate_lo': self.splat.gate_lo,
+                'gate_hi': self.splat.gate_hi,
+                'confidence_sidecar': self.splat.confidence_sidecar,
+                'confidence_dataset': self.splat.confidence_dataset,
+                'confidence_extra_args': list(self.splat.confidence_extra_args),
             },
             'export': {
                 'output_dir': self.export.output_dir,
@@ -810,8 +901,37 @@ splat:
   # It is a 2.5-D shell with nothing behind the subject.
   max_angle_deg: 45.0
 
-  # torch device for rasterizing the splat
-  device: "cuda"
+  # Path to the brush-splat-render binary that rasterizes splats.
+  # null = $BRUSH_SPLAT_RENDER, then PATH.
+  renderer_binary: null
+
+  # Gate each pixel by per-splat multi-view confidence instead of leaving it to
+  # a downstream alpha threshold. NOTE: this makes the alpha channel the gate,
+  # not accumulated opacity. Only for a .ply input -- an overlay splat is built
+  # from one photo and has no training views to score against.
+  confidence: false
+
+  # What culled pixels resolve to when confidence is on. The renderer uses one
+  # colour for both this and the background composited under the splat, so it
+  # is the whole background of a gated render. null = follow render.bg_color;
+  # set it only to make culled regions stand out for inspection.
+  cull_color: null
+
+  # Confidence at or below which a pixel is fully culled / at or above which it
+  # is fully kept. Equal values give a hard cut.
+  gate_lo: 0.45
+  gate_hi: 0.65
+
+  # Also write <frame>.conf.png: the raw confidence, before the gate.
+  confidence_sidecar: false
+
+  # Training dataset to measure evidence against when the .ply carries no ev_*
+  # block (i.e. was not trained with brush --export-evidence).
+  confidence_dataset: null
+
+  # Verbatim passthrough for brush-splat-render's tuning flags
+  # (--conf-tau, --conf-min-views, --conf-facing, ...).
+  confidence_extra_args: []
 
 # Export configuration
 export:
@@ -1151,6 +1271,56 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Cull the splat past this many degrees off its source view "
              "(default 45). It is a 2.5-D shell with nothing behind it, so "
              "past roughly 45 deg its open edge flares into view"
+    )
+    splat_group.add_argument(
+        "--splat-renderer",
+        type=str,
+        metavar="PATH",
+        help="Path to the brush-splat-render binary that rasterizes splats. "
+             "Default: $BRUSH_SPLAT_RENDER, then PATH"
+    )
+    splat_group.add_argument(
+        "--splat-confidence",
+        action="store_true",
+        help="Gate each pixel by per-splat multi-view confidence instead of "
+             "leaving it to a downstream alpha threshold. NOTE: makes the "
+             "alpha channel the gate, not accumulated opacity. Needs a .ply "
+             "input carrying ev_* properties (brush --export-evidence) or "
+             "--splat-confidence-dataset; not available for --splat-overlay"
+    )
+    splat_group.add_argument(
+        "--splat-cull-color",
+        type=str,
+        metavar="R,G,B",
+        help="Colour culled pixels resolve to, 0-1. This is also the whole "
+             "background of a confidence render, so it defaults to --bg-color; "
+             "set it only to make culled regions stand out"
+    )
+    splat_group.add_argument(
+        "--splat-gate-lo",
+        type=float,
+        metavar="C",
+        help="Confidence at or below which a pixel is fully culled (default "
+             "0.45). Set equal to --splat-gate-hi for a hard cut"
+    )
+    splat_group.add_argument(
+        "--splat-gate-hi",
+        type=float,
+        metavar="C",
+        help="Confidence at or above which a pixel is fully kept (default 0.65)"
+    )
+    splat_group.add_argument(
+        "--splat-confidence-sidecar",
+        action="store_true",
+        help="Also write the raw per-pixel confidence beside each frame as "
+             "<frame>.conf.png, before the gate thresholds are applied"
+    )
+    splat_group.add_argument(
+        "--splat-confidence-dataset",
+        type=str,
+        metavar="DIR",
+        help="Training dataset (COLMAP / nerfstudio) to measure evidence "
+             "against when the .ply carries no ev_* block"
     )
 
     export_group = parser.add_argument_group("Export Options")

@@ -97,6 +97,20 @@ def main(argv: Optional[list] = None) -> int:
         if args.verbose:
             print(f"  Loaded: {pipeline.scene}")
 
+        # How splats get rasterized. Must happen before any render and before
+        # attach_splat_overlay(), which reads these settings.
+        pipeline.configure_splat_renderer(
+            binary=config.splat.renderer_binary,
+            confidence=config.splat.confidence_options(),
+            verbose=args.verbose,
+        )
+        if config.splat.confidence and not is_splat:
+            raise ValueError(
+                "--splat-confidence needs a .ply input. It scores each Gaussian "
+                "by how well the training views constrained it, which only "
+                "exists for a splat trained on a dataset."
+            )
+
         # --- Debug: render from original SAM-3D-Body viewpoint ---
         # When --use-original-camera is also active, skip the standalone debug
         # path; the compositing will happen on orbit frame 0 instead.
@@ -405,7 +419,6 @@ def main(argv: Optional[list] = None) -> int:
                 scale=config.splat.scale,
                 reconcile_intrinsics=config.splat.reconcile_intrinsics,
                 max_angle_deg=config.splat.max_angle_deg,
-                device=config.splat.device,
             )
 
             if args.verbose:
@@ -433,6 +446,12 @@ def main(argv: Optional[list] = None) -> int:
             # Splat rendering - only "splat" mode supported
             if args.verbose:
                 print("  Mode: splat")
+
+            if args.verbose and config.splat.confidence:
+                print(f"  Confidence gating: {config.splat.gate_lo}-"
+                      f"{config.splat.gate_hi}, cull colour "
+                      f"{config.splat.cull_color} (alpha is the gate, "
+                      "not opacity)")
 
             mode_rendered = pipeline.render_all(
                 modes=["splat"],
@@ -558,6 +577,17 @@ def main(argv: Optional[list] = None) -> int:
             )
             if args.verbose:
                 print(f"  {mode} images ({len(saved_paths)}) → {config.export.output_dir}")
+
+        # Confidence sidecars, named after the frame they belong to so they
+        # pair up by inspection: frame_0007.png -> frame_0007.conf.png.
+        if config.splat.confidence_sidecar and pipeline.splat_confidence_maps:
+            import cv2
+            for path, conf in zip(saved_paths, pipeline.splat_confidence_maps):
+                cv2.imwrite(str(path.with_suffix('')) + ".conf.png", conf)
+            if args.verbose:
+                print(f"  confidence sidecars "
+                      f"({len(pipeline.splat_confidence_maps)}) → "
+                      f"{config.export.output_dir}")
 
         # --- Debug: composite frame 0 with warped original image ---
         if (args.debug_original_view

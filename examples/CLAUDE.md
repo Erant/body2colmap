@@ -8,23 +8,21 @@ This directory contains example usage of body2colmap.
 
 ```bash
 # Basic usage with default settings
-body2colmap --input estimation.npz --output-dir ./output
+body2colmap estimation.npz --output-dir ./output
 
 # Custom orbit pattern
-body2colmap \
-  --input estimation.npz \
+body2colmap estimation.npz \
   --output-dir ./output \
-  --orbit-mode helical \
+  --orbit-pattern helical \
   --n-frames 120 \
   --helical-loops 3
 
 # Adjust rendering
-body2colmap \
-  --input estimation.npz \
+body2colmap estimation.npz \
   --output-dir ./output \
   --width 1024 \
   --height 1024 \
-  --mode mesh
+  --render-modes mesh
 ```
 
 ### Python API
@@ -114,7 +112,7 @@ After running body2colmap, the output can be used with 3D Gaussian Splatting:
 
 ```bash
 # Run body2colmap
-body2colmap --input estimation.npz --output-dir ./data/person
+body2colmap estimation.npz --output-dir ./data/person
 
 # Train 3DGS (example with gaussian-splatting)
 python train.py -s ./data/person
