@@ -704,6 +704,55 @@ this back to `check=True` or `returncode != 0` -- and do not weaken the
 per-file check to a directory-not-empty test, because the failure being guarded
 against is a *partial* sequence.
 
+### A crashed render is deliverable exactly once, through `on_fault`
+Everything an invocation touches lives in a temp directory `render_many()`
+deletes in a `finally` -- success, exception, either way. So by the time the
+caller catches the exception the `cameras.json` naming the views, and the frames
+that did land, are already gone. That is not hypothetical: a real
+`brush-splat-render` crash on a rented GPU pod left nothing but an exit code,
+and the pod did not outlive the investigation.
+
+`on_fault` is called while the directory is still there, with a `RenderFault`
+carrying the live paths (`run_dir`, `cameras_path`, `frames_dir`, `expected`,
+`missing`, `written`) plus the argv, the decoded exit status and whatever output
+was captured. A caller that wants any of it must copy it out **inside the hook,
+synchronously** -- the class docstring says so, and the b2crunner crashlog is
+the consumer this was built for.
+
+Three properties the implementation has to keep:
+
+- **It fires for a tolerated crash too.** A run that wrote everything and then
+  died is still worth recording; `RenderFault.complete` is what tells the two
+  apart. Do not move the call inside the `if missing:` branch.
+- **It fires at most once**, which is why the tolerated case calls it
+  explicitly and every raising path goes through the `except`. The lost-file
+  branch does *not* call it directly -- its `raise` carries it there.
+- **A hook that throws is logged and swallowed.** A broken crash reporter
+  replacing the render's own error is the worst possible outcome: the operator
+  then spends the afternoon on the reporter.
+
+`tests/test_splat_renderer.py` drives all of this against a stub binary, since
+the cases worth testing are crashes and the real binary crashes when it feels
+like it.
+
+### Two smaller seams, for the same reason
+Both exist so a downstream caller does not have to reimplement the whole
+invocation to get one behaviour -- which is exactly what b2crunner had done,
+carrying a parallel copy of this method for the crash report alone.
+
+`on_output` is handed each line as it arrives. `render_many()` therefore drives
+the binary with `Popen` and a line loop instead of `subprocess.run`: on an
+81-frame render, output that only arrives at the end is a blank log for the
+duration. Both streams are merged, since their interleaving is what makes a
+crash readable, and the output is captured in every case -- `verbose` and
+`on_output` decide who sees it live, not whether it is kept.
+
+`ply_path` renders a file the caller already has rather than serializing
+`scene` into the temp directory. A trained splat is hundreds of megabytes and
+the caller usually loaded the scene *from* that file. It is deliberately not
+validated against `scene`: checking would mean reading the file back, which is
+the cost being avoided. `close()` does not delete a file it was handed.
+
 ### Confidence gating is base-render only
 `brush-splat-render --confidence` scores each Gaussian by how well the training
 views constrained it. An overlay splat is masktest's 2.5-D shell reconstructed

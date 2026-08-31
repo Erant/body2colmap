@@ -15,7 +15,7 @@ render:
   bg_color: [1.0, 1.0, 1.0]
 
   # Render modes: mesh, depth, skeleton, or combinations (mesh+skeleton, depth+skeleton)
-  modes: ["depth+skeleton"]
+  modes: ["skeleton+face"]
 
 # Camera configuration
 camera:

@@ -90,6 +90,7 @@ class OrbitPipeline:
         self._splat_binary: Optional[str] = None
         self._splat_confidence = None
         self._splat_verbose = False
+        self._splat_on_fault = None
 
         # Set by auto_orient(); the splat overlay is incompatible with it
         self._auto_oriented = False
@@ -182,6 +183,7 @@ class OrbitPipeline:
                     binary=self._splat_binary,
                     confidence=self._splat_confidence,
                     verbose=self._splat_verbose,
+                    on_fault=self._splat_on_fault,
                 )
             else:
                 self._renderer = Renderer(self.scene, self.render_size)
@@ -192,6 +194,7 @@ class OrbitPipeline:
         binary: Optional[str] = None,
         confidence=None,
         verbose: bool = False,
+        on_fault=None,
     ) -> "OrbitPipeline":
         """
         Set how Gaussian splats are rasterized.
@@ -208,6 +211,10 @@ class OrbitPipeline:
                 only for a ``.ply``-input base render -- see
                 :meth:`attach_splat_overlay`, which refuses it.
             verbose: Let the binary log per-frame progress to stderr.
+            on_fault: Called with a
+                :class:`~body2colmap.splat_renderer.RenderFault` when a render
+                goes wrong, while its temp directory is still on disk. The
+                seam for saving a crash report -- see that class.
 
         Returns:
             self (for method chaining)
@@ -215,6 +222,7 @@ class OrbitPipeline:
         self._splat_binary = binary
         self._splat_confidence = confidence
         self._splat_verbose = verbose
+        self._splat_on_fault = on_fault
         return self
 
     @property
@@ -367,6 +375,7 @@ class OrbitPipeline:
             self.render_size,
             binary=self._splat_binary,
             verbose=self._splat_verbose,
+            on_fault=self._splat_on_fault,
         )
         info["max_angle_deg"] = float(max_angle_deg)
         self.splat_overlay_params = info

@@ -29,6 +29,24 @@ All notable changes to body2colmap will be documented in this file.
   `render_composite_all()` and `render_all(modes=["splat"])` now batch internally.
 - `OrbitPipeline.configure_splat_renderer()` to select the renderer binary, confidence
   options and verbosity for both the base and overlay splat paths
+- `SplatRenderer(on_fault=...)` / `OrbitPipeline.configure_splat_renderer(on_fault=...)`:
+  a hook called with a `RenderFault` when a splat render goes wrong, **while that
+  invocation's temp directory still exists**. `render_many()` deletes it on the way out
+  whatever happens, so this is the only chance to save the `cameras.json`, the frames
+  that did land, or anything else from a crash — without it a failure on a machine that
+  does not outlive the investigation leaves nothing but an exit code. Fires for a run
+  that lost files and for one that wrote everything and died anyway (`RenderFault.complete`
+  separates them), at most once per invocation; an exception out of the hook is logged
+  and swallowed so a broken reporter cannot replace the render's own error.
+- `SplatRenderer(on_output=...)`: a callback given each line the binary writes as it
+  arrives, so a caller can relay progress into its own log. `render_many()` drives the
+  binary through `Popen` and a line loop rather than `subprocess.run` to make this
+  possible; output is now captured in every case, including under `verbose`, so a
+  `RenderFault` always carries it.
+- `SplatRenderer(ply_path=...)`: render an existing `.ply` instead of serializing
+  `scene` to a temp file. For a caller that loaded the scene from a file and did not
+  modify it, writing a hundreds-of-megabytes splat back out to render it is pure cost.
+  `close()` leaves a caller-supplied file alone.
 - Splat renders are judged by the files the renderer produced, not by its exit status.
   `brush-splat-render` intermittently dies from a signal after writing every frame it
   was asked for; such a run now succeeds with a logged warning, while one that actually

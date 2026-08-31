@@ -504,6 +504,13 @@ therefore verifies the expected files exist and are non-empty, and reads the
 exit status only to explain a shortfall: a crash that produced everything warns
 and proceeds, a crash that lost frames raises. See `body2colmap/CLAUDE.md`.
 
+### Key Design: A Crashed Render Gets One Chance To Be Kept
+`render_many()` works in a temp directory it deletes on the way out, success or
+failure -- so by the time a caller sees the exception, the `cameras.json` and
+the frames that did land are gone. `on_fault` is called *before* that, with a
+`RenderFault` holding the live paths, for a caller that wants to save a crash
+report. Downstream (b2crunner) does exactly this. See `body2colmap/CLAUDE.md`.
+
 ### Confidence Gating
 `--confidence` gates each pixel by per-splat multi-view evidence rather than a
 downstream alpha threshold, exposed as `splat.confidence` and the

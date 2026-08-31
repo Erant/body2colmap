@@ -39,10 +39,11 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -56,7 +57,11 @@ logger = logging.getLogger(__name__)
 BINARY_NAME = "brush-splat-render"
 BINARY_ENV_VAR = "BRUSH_SPLAT_RENDER"
 
-__all__ = ["ConfidenceOptions", "SplatRenderer", "resolve_binary"]
+#: How much of a failed render's output goes into the exception. The whole
+#: of it is still on the RenderFault, for a caller that wants to keep it.
+_ERROR_TAIL_LINES = 60
+
+__all__ = ["ConfidenceOptions", "RenderFault", "SplatRenderer", "resolve_binary"]
 
 
 def resolve_binary(explicit: Optional[str] = None) -> str:
@@ -131,6 +136,64 @@ def _describe_exit(returncode: int) -> str:
             name = "unknown signal"
         return f"was killed by signal {-returncode} ({name})"
     return f"exited with status {returncode}"
+
+
+@dataclass
+class RenderFault:
+    """One troubled ``brush-splat-render`` invocation, handed to ``on_fault``.
+
+    **The run directory still exists when this is delivered, and will not
+    afterwards.** :meth:`SplatRenderer.render_many` deletes it on the way
+    out, success or failure, so a caller that wants any of it — the
+    ``cameras.json`` naming the views, the frames that did land — has to
+    copy it out inside the hook, synchronously. That is the whole reason
+    this exists: without it a crash on a machine that does not outlive the
+    investigation leaves nothing but an exit code, which is exactly how one
+    such crash went undiagnosed.
+
+    Delivered for a render that lost files *and* for one that produced
+    everything and then died anyway — the second is tolerated (see
+    :meth:`render_many`), but it is still a fault worth recording, and
+    :attr:`complete` is what separates the two.
+
+    Attributes:
+        cmd: The argv, exactly as invoked.
+        returncode: The process exit status. Negative means death by signal.
+        status: :func:`_describe_exit`'s phrasing of it, e.g. ``"was killed
+            by signal 11 (SIGSEGV)"``.
+        output: Whatever was captured of the binary's stdout and stderr.
+            Empty under ``verbose``, where stderr was left inherited so it
+            could stream.
+        failure: One line saying what went wrong, suitable as a heading.
+        run_dir: The invocation's temp directory. **Deleted after the hook
+            returns.**
+        cameras_path: The ``cameras.json`` it was given.
+        frames_dir: Where it was told to write.
+        expected: Every output file that should exist, in render order.
+        missing: The subset that is absent or zero-length.
+    """
+
+    cmd: List[str]
+    returncode: int
+    status: str
+    output: str
+    failure: str
+    run_dir: Path
+    cameras_path: Path
+    frames_dir: Path
+    expected: List[Path]
+    missing: List[Path]
+
+    @property
+    def complete(self) -> bool:
+        """Whether every expected file was produced despite the fault."""
+        return not self.missing
+
+    @property
+    def written(self) -> List[Path]:
+        """The expected files that do exist, in render order."""
+        absent = set(self.missing)
+        return [path for path in self.expected if path not in absent]
 
 
 @dataclass
@@ -226,6 +289,9 @@ class SplatRenderer:
         binary: Optional[str] = None,
         confidence: Optional[ConfidenceOptions] = None,
         verbose: bool = False,
+        ply_path: Optional[str] = None,
+        on_output: Optional[Callable[[str], None]] = None,
+        on_fault: Optional[Callable[["RenderFault"], None]] = None,
     ):
         """
         Initialize renderer.
@@ -240,13 +306,37 @@ class SplatRenderer:
                 :class:`ConfidenceOptions` -- note that it changes the meaning
                 of the alpha channel.
             verbose: Pass ``RUST_LOG=info`` so the binary reports per-frame
-                progress on stderr.
+                progress, and echo its output to this process's stderr as it
+                arrives. Ignored for the echo if ``on_output`` is given,
+                which is a better place to put it.
+            ply_path: An existing ``.ply`` on disk holding exactly ``scene``,
+                rendered as-is instead of serializing ``scene`` to a temp
+                file. The common case for a caller that loaded the scene
+                *from* a file and did not modify it -- a large splat is
+                hundreds of megabytes, and writing it back out to render it
+                is pure cost. Not validated against ``scene``: passing a
+                path that holds something else renders something else.
+            on_output: Called with each line the binary writes (stdout and
+                stderr interleaved, newline stripped) as it arrives. The
+                seam for relaying progress into a caller's own log; without
+                it the output is still captured, just not delivered until
+                the call is over.
+            on_fault: Called with a :class:`RenderFault` when an invocation
+                goes wrong, **while its temp directory still exists** — which
+                it will not once the hook returns. This is the seam for
+                saving a crash report; see :class:`RenderFault`. It fires for
+                a run that lost files and for one that wrote everything and
+                died anyway, at most once per invocation. An exception out of
+                it is logged and swallowed, so a broken hook cannot replace
+                the render's own error with its own.
         """
         self.scene = scene
         self.width, self.height = render_size
         self.binary = resolve_binary(binary)
         self.confidence = confidence
         self.verbose = verbose
+        self.on_output = on_output
+        self.on_fault = on_fault
 
         #: Raw per-pixel confidence maps (uint8, HxW) from the most recent
         #: :meth:`render_many`, or None. Only populated with
@@ -254,7 +344,8 @@ class SplatRenderer:
         self.last_confidence_maps: Optional[List[NDArray[np.uint8]]] = None
 
         self._workdir: Optional[tempfile.TemporaryDirectory] = None
-        self._ply_path: Optional[Path] = None
+        self._ply_path: Optional[Path] = Path(ply_path) if ply_path else None
+        self._staged_ply = False
 
     # -- ply staging ------------------------------------------------------
 
@@ -265,16 +356,24 @@ class SplatRenderer:
         The scene is often not a file on disk -- the overlay is built in
         memory by :func:`~body2colmap.splat_anchor.anchor_splat_to_world` --
         so it has to be written out. Done lazily and cached, so an 81-frame
-        orbit writes it once rather than per invocation.
+        orbit writes it once rather than per invocation. A caller that
+        already has the file passes ``ply_path`` and skips the write
+        entirely.
         """
         if self._ply_path is not None:
             return self._ply_path
 
-        self._workdir = tempfile.TemporaryDirectory(prefix="body2colmap-splat-")
+        self._ensure_workdir()
         path = Path(self._workdir.name) / "scene.ply"
         self.scene.to_ply(str(path))
         self._ply_path = path
+        self._staged_ply = True
         return path
+
+    def _ensure_workdir(self) -> None:
+        """The temp directory runs and any staged ply live in."""
+        if self._workdir is None:
+            self._workdir = tempfile.TemporaryDirectory(prefix="body2colmap-splat-")
 
     # -- camera serialization ---------------------------------------------
 
@@ -362,6 +461,12 @@ class SplatRenderer:
             camera. Alpha comes from accumulated opacity during rasterization
             -- or, with confidence gating, from the confidence gate.
 
+        Raises:
+            RuntimeError: If the binary did not produce every expected output
+                file, or produced one that cannot be decoded (a partial
+                write). A non-zero exit alone is *not* a failure -- see the
+                second note below.
+
         Note:
             The binary always runs with ``--background 0,0,0``, which makes its
             RGB output premultiplied by alpha -- the same intermediate gsplat
@@ -369,6 +474,15 @@ class SplatRenderer:
             there is one Rust path and one Python path. The 8-bit round trip
             costs at most 1/255 in the final composite, because the quantized
             quantity *is* the premultiplied contribution.
+
+        Note:
+            Success is decided by the output files, not the exit status:
+            ``brush-splat-render`` intermittently dies from a signal after
+            writing everything it was asked for, and throwing away a
+            complete render over that would be wrong. Either kind of trouble
+            reaches ``on_fault`` (see :meth:`__init__`) with the run's temp
+            directory intact, which is the only chance to save anything from
+            it -- the directory is deleted on the way out regardless.
         """
         if not cameras:
             return []
@@ -382,11 +496,56 @@ class SplatRenderer:
             )
 
         ply = self._ensure_ply()
+        self._ensure_workdir()
         run_dir = Path(tempfile.mkdtemp(dir=self._workdir.name, prefix="run-"))
+        cameras_path = run_dir / "cameras.json"
+        frames_dir = run_dir / "frames"
+
+        # Filled in as the invocation proceeds, so the fault hook below can
+        # describe however far it got -- including "not far enough to have an
+        # argv yet".
+        cmd: List[str] = []
+        returncode: Optional[int] = None
+        output: List[str] = []
+        expected: List[Path] = []
+        missing: List[Path] = []
+        reported = False
+
+        def fault(failure: str) -> None:
+            """Hand the caller this run before the ``finally`` deletes it.
+
+            At most once per invocation: a lost-file run raises, and the
+            raise is what carries it here, so an explicit call for the
+            tolerated case must not be repeated by the handler.
+            """
+            nonlocal reported
+            if reported or self.on_fault is None:
+                return
+            reported = True
+            captured = "".join(output)
+            try:
+                self.on_fault(RenderFault(
+                    cmd=list(cmd),
+                    returncode=0 if returncode is None else returncode,
+                    status=("never ran" if returncode is None
+                            else _describe_exit(returncode)),
+                    output=captured,
+                    failure=failure,
+                    run_dir=run_dir,
+                    cameras_path=cameras_path,
+                    frames_dir=frames_dir,
+                    expected=list(expected),
+                    missing=list(missing),
+                ))
+            except Exception:
+                # A hook that throws must not become the error the caller
+                # sees instead of the render's own.
+                logger.exception(
+                    "%s: the on_fault hook raised and was ignored", BINARY_NAME
+                )
+
         try:
-            cameras_path = run_dir / "cameras.json"
             cameras_path.write_text(json.dumps(self._cameras_json(cameras)))
-            frames_dir = run_dir / "frames"
 
             cmd = [
                 self.binary,
@@ -402,17 +561,38 @@ class SplatRenderer:
             if self.verbose:
                 env.setdefault("RUST_LOG", "info")
 
-            # Under `verbose` the binary's stderr is left inherited so its
-            # progress log streams live; capturing it would mean the caller
-            # sees nothing until the whole sequence is done, which defeats the
-            # point on an 81-frame render.
-            result = subprocess.run(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=None if self.verbose else subprocess.PIPE,
-                text=True,
-            )
+            # Popen and a line loop rather than subprocess.run, so the output
+            # can be delivered *as it arrives*: on an 81-frame render a caller
+            # that only hears at the end has watched a blank log for the whole
+            # thing. The two streams are merged, because their interleaving is
+            # what makes a crash log readable. Output is captured either way,
+            # so a RenderFault always carries it -- `verbose` and `on_output`
+            # decide who else sees it live, not whether it is kept.
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            except FileNotFoundError:
+                raise RuntimeError(
+                    f"{BINARY_NAME} not found at {self.binary!r}."
+                ) from None
+
+            # `with process` closes stdout on the way out; without it every
+            # invocation leaks a pipe.
+            assert process.stdout is not None
+            with process:
+                for raw in process.stdout:
+                    output.append(raw)
+                    if self.on_output is not None:
+                        self.on_output(raw.rstrip("\n"))
+                    elif self.verbose:
+                        sys.stderr.write(raw)
+            returncode = process.returncode
 
             # Success is decided by the artifacts, not the exit status.
             # brush-splat-render intermittently dies from a signal (SIGSEGV)
@@ -428,31 +608,32 @@ class SplatRenderer:
                     frames_dir / f"f{i:05d}.conf.png" for i in range(len(cameras))
                 ]
             missing = [
-                path.name for path in expected
+                path for path in expected
                 if not (path.is_file() and path.stat().st_size > 0)
             ]
 
             if missing:
-                shown = ", ".join(missing[:5])
-                if len(missing) > 5:
-                    shown += f", ... ({len(missing)} total)"
-                detail = (
-                    "see its output above"
-                    if result.stderr is None
-                    else result.stderr.strip()
-                )
+                names = [path.name for path in missing]
+                shown = ", ".join(names[:5])
+                if len(names) > 5:
+                    shown += f", ... ({len(names)} total)"
                 raise RuntimeError(
                     f"{BINARY_NAME} did not produce "
                     f"{len(missing)} of {len(expected)} expected output files "
-                    f"({shown}). It {_describe_exit(result.returncode)}.\n{detail}"
+                    f"({shown}). It {_describe_exit(returncode)}.\n"
+                    + "".join(output[-_ERROR_TAIL_LINES:]).strip()
                 )
 
-            if result.returncode != 0:
+            if returncode != 0:
+                fault(
+                    f"{BINARY_NAME} {_describe_exit(returncode)} after writing "
+                    f"every expected output file."
+                )
                 logger.warning(
                     "%s %s, but wrote all %d expected output files; using them. "
                     "This is a known intermittent fault in the renderer, not a "
                     "bad render.",
-                    BINARY_NAME, _describe_exit(result.returncode), len(expected),
+                    BINARY_NAME, _describe_exit(returncode), len(expected),
                 )
 
             images = [
@@ -466,6 +647,12 @@ class SplatRenderer:
                 else None
             )
             return images
+        except Exception as exc:
+            # Covers the lost-file raise above and the partial-write raise
+            # out of _read_frame(), which the file check cannot see: a
+            # truncated png is still non-empty.
+            fault(str(exc))
+            raise
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -527,11 +714,16 @@ class SplatRenderer:
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
-        """Drop the staged ply and its temp directory."""
+        """Drop the staged ply and its temp directory.
+
+        A ``ply_path`` handed in by the caller is theirs and is left alone.
+        """
         if self._workdir is not None:
             self._workdir.cleanup()
             self._workdir = None
-        self._ply_path = None
+        if self._staged_ply:
+            self._ply_path = None
+            self._staged_ply = False
 
     def __del__(self):
         try:
