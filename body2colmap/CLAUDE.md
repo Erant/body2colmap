@@ -685,6 +685,25 @@ divides by alpha, a real `bg_color` adds `bg*(1-alpha)`. One Rust path, one
 Python path. The 8-bit round trip costs at most 1/255 in the final composite,
 because the quantized quantity *is* the premultiplied contribution.
 
+### Success is decided by the output files, not the exit code
+`brush-splat-render` intermittently dies from a signal (SIGSEGV) *after* having
+written every frame it was asked for. The cause is not yet tracked down, and
+treating a non-zero exit as failure would throw away complete, correct renders
+whenever it fires.
+
+So `render_many()` checks that every expected file exists and is non-empty, and
+consults the exit status only to *explain* a shortfall. A crash that produced
+everything is logged as a warning and the frames are used; a crash that lost
+frames raises, naming what is missing and decoding the signal number (an
+operator seeing "exit -11" should not have to look up SIGSEGV).
+
+Truncation is covered by the read path rather than the file check: a partial
+write is non-empty, so `_read_frame()` treats an image OpenCV cannot decode, or
+whose dimensions are wrong, as a partial write and raises. Do not "simplify"
+this back to `check=True` or `returncode != 0` -- and do not weaken the
+per-file check to a directory-not-empty test, because the failure being guarded
+against is a *partial* sequence.
+
 ### Confidence gating is base-render only
 `brush-splat-render --confidence` scores each Gaussian by how well the training
 views constrained it. An overlay splat is masktest's 2.5-D shell reconstructed

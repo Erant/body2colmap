@@ -376,6 +376,11 @@ export BRUSH_SPLAT_RENDER=$PWD/target/release/brush-splat-render
 body2colmap looks for it in `--splat-renderer` / `splat.renderer_binary`, then
 `$BRUSH_SPLAT_RENDER`, then `PATH`.
 
+The renderer currently has an intermittent crash that can kill it *after* it has
+written every frame. body2colmap judges a run by the files it produced rather
+than by its exit status, so such a run succeeds and logs a warning; a run that
+actually lost frames fails, naming the missing ones.
+
 The binary renders a whole camera list per invocation, so a sequence is
 rendered in one call — `render_all(modes=["splat"])` and
 `render_composite_all()` both batch internally. Use

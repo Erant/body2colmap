@@ -498,6 +498,12 @@ The binary always runs with `--background 0,0,0`, whatever `bg_color` says, so
 its RGB comes back premultiplied. Both alpha conventions are then derived in
 Python. See `body2colmap/CLAUDE.md` for the full rationale.
 
+### Key Design: Artifacts Decide Success, Not the Exit Code
+The binary can be killed by SIGSEGV *after* writing every frame. `render_many()`
+therefore verifies the expected files exist and are non-empty, and reads the
+exit status only to explain a shortfall: a crash that produced everything warns
+and proceeds, a crash that lost frames raises. See `body2colmap/CLAUDE.md`.
+
 ### Confidence Gating
 `--confidence` gates each pixel by per-splat multi-view evidence rather than a
 downstream alpha threshold, exposed as `splat.confidence` and the

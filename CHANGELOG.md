@@ -29,6 +29,11 @@ All notable changes to body2colmap will be documented in this file.
   `render_composite_all()` and `render_all(modes=["splat"])` now batch internally.
 - `OrbitPipeline.configure_splat_renderer()` to select the renderer binary, confidence
   options and verbosity for both the base and overlay splat paths
+- Splat renders are judged by the files the renderer produced, not by its exit status.
+  `brush-splat-render` intermittently dies from a signal after writing every frame it
+  was asked for; such a run now succeeds with a logged warning, while one that actually
+  lost frames raises, naming the missing files and decoding the signal. Partial writes
+  are caught on read, since a truncated file is still non-empty.
 - `SplatScene.get_framing_bounds()`, so a `.ply` input reaches
   `set_orbit_params()` at all — it previously raised `AttributeError`. Only the `"full"`
   preset is supported; the partial presets derive their threshold from skeleton joints,

@@ -34,8 +34,10 @@ Batching:
 """
 
 import json
+import logging
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -48,6 +50,8 @@ from numpy.typing import NDArray
 
 from .camera import Camera
 from .splat_scene import SplatScene
+
+logger = logging.getLogger(__name__)
 
 BINARY_NAME = "brush-splat-render"
 BINARY_ENV_VAR = "BRUSH_SPLAT_RENDER"
@@ -107,6 +111,26 @@ def resolve_binary(explicit: Optional[str] = None) -> str:
         f"in your brush checkout, then set ${BINARY_ENV_VAR} to the built\n"
         f"binary (target/release/{BINARY_NAME}) or pass --splat-renderer."
     )
+
+
+def _describe_exit(returncode: int) -> str:
+    """
+    Describe a subprocess exit status in a sentence fragment.
+
+    POSIX reports death-by-signal as a negative return code, which is worth
+    naming: an operator seeing "exit -11" has to look it up, and the fact that
+    it was SIGSEGV rather than a non-zero exit is the whole difference between
+    a crash and a rejected input.
+    """
+    if returncode == 0:
+        return "exited cleanly"
+    if returncode < 0:
+        try:
+            name = signal.Signals(-returncode).name
+        except ValueError:
+            name = "unknown signal"
+        return f"was killed by signal {-returncode} ({name})"
+    return f"exited with status {returncode}"
 
 
 @dataclass
@@ -389,14 +413,46 @@ class SplatRenderer:
                 stderr=None if self.verbose else subprocess.PIPE,
                 text=True,
             )
-            if result.returncode != 0:
+
+            # Success is decided by the artifacts, not the exit status.
+            # brush-splat-render intermittently dies from a signal (SIGSEGV)
+            # *after* writing every frame it was asked for; treating that as a
+            # failure would throw away a complete, correct render. So check
+            # what it produced, and fall back to the exit status only to
+            # explain a genuine shortfall. Truncation is caught downstream:
+            # _read_frame() rejects a file OpenCV cannot decode or whose
+            # dimensions are wrong.
+            expected = [frames_dir / f"f{i:05d}.png" for i in range(len(cameras))]
+            if self.confidence is not None and self.confidence.sidecar:
+                expected += [
+                    frames_dir / f"f{i:05d}.conf.png" for i in range(len(cameras))
+                ]
+            missing = [
+                path.name for path in expected
+                if not (path.is_file() and path.stat().st_size > 0)
+            ]
+
+            if missing:
+                shown = ", ".join(missing[:5])
+                if len(missing) > 5:
+                    shown += f", ... ({len(missing)} total)"
                 detail = (
                     "see its output above"
                     if result.stderr is None
                     else result.stderr.strip()
                 )
                 raise RuntimeError(
-                    f"{BINARY_NAME} failed (exit {result.returncode}):\n{detail}"
+                    f"{BINARY_NAME} did not produce "
+                    f"{len(missing)} of {len(expected)} expected output files "
+                    f"({shown}). It {_describe_exit(result.returncode)}.\n{detail}"
+                )
+
+            if result.returncode != 0:
+                logger.warning(
+                    "%s %s, but wrote all %d expected output files; using them. "
+                    "This is a known intermittent fault in the renderer, not a "
+                    "bad render.",
+                    BINARY_NAME, _describe_exit(result.returncode), len(expected),
                 )
 
             images = [
@@ -421,7 +477,12 @@ class SplatRenderer:
         """Read one rendered frame and apply the requested alpha convention."""
         image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if image is None:
-            raise RuntimeError(f"{BINARY_NAME} did not write {path.name}")
+            # The file passed the exists-and-non-empty check, so this is a
+            # partial write -- the renderer was killed part-way through it.
+            raise RuntimeError(
+                f"{path.name} could not be decoded. {BINARY_NAME} wrote it "
+                "only partially, most likely by dying mid-write."
+            )
         if image.shape[:2] != (self.height, self.width):
             raise RuntimeError(
                 f"{path.name} is {image.shape[1]}x{image.shape[0]}, expected "
@@ -457,7 +518,10 @@ class SplatRenderer:
         """Read one confidence sidecar."""
         image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if image is None:
-            raise RuntimeError(f"{BINARY_NAME} did not write {path.name}")
+            raise RuntimeError(
+                f"{path.name} could not be decoded. {BINARY_NAME} wrote it "
+                "only partially, most likely by dying mid-write."
+            )
         return image
 
     # -- lifecycle ---------------------------------------------------------
