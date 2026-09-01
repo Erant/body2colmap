@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 import numpy as np
 from numpy.typing import NDArray
 
+from .background import DEFAULT_RADIUS_SCALE
 from .scene import Scene
 from .camera import Camera
 from .path import (
@@ -30,6 +31,14 @@ from .utils import (
     compute_original_view_framing as _compute_original_view_framing,
     compute_warp_to_camera,
 )
+
+
+#: Marks "the caller said nothing about a radius", which is distinct from an
+#: explicit None -- that asks for a backdrop at infinity. Needed because
+#: configure_background() defaults radius_scale to a real value, and an
+#: explicit radius has to be able to supersede it without tripping the
+#: mutual-exclusion check.
+_UNSET = object()
 
 
 class OrbitPipeline:
@@ -91,6 +100,12 @@ class OrbitPipeline:
         self._splat_confidence = None
         self._splat_verbose = False
         self._splat_on_fault = None
+
+        # Environment backdrop (see configure_background). The spec is stored
+        # rather than the object because a finite backdrop is sized and centred
+        # from the orbit, which set_orbit_params() has not run yet.
+        self._background_spec: Optional[Dict[str, Any]] = None
+        self._background = None
 
         # Set by auto_orient(); the splat overlay is incompatible with it
         self._auto_oriented = False
@@ -187,7 +202,167 @@ class OrbitPipeline:
                 )
             else:
                 self._renderer = Renderer(self.scene, self.render_size)
+
+        if not self._is_splat_scene():
+            # Re-assigned on every access rather than at construction: the
+            # renderer is created lazily and the backdrop may be configured
+            # (or its orbit-derived radius resolved) after that point.
+            self._renderer.background = self._resolve_background()
+
         return self._renderer
+
+    def configure_background(
+        self,
+        texture: str = "grid",
+        geometry: str = "cube",
+        resolution: int = 1024,
+        radius: Optional[float] = None,
+        radius_scale: Optional[float] = _UNSET,  # type: ignore[assignment]
+        rotation_deg: float = 0.0,
+        opaque: bool = True,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> "OrbitPipeline":
+        """
+        Draw a world-fixed environment behind every render.
+
+        Exists to stop a video diffusion model reading an orbit as the subject
+        rotating: a backdrop that sweeps past as the camera moves is the cue
+        that it is the camera going around. Which texture you pick matters —
+        a Nishita-style sky is azimuthally symmetric apart from its sun and so
+        supplies almost none of that cue, whereas ``"grid"`` and ``"checker"``
+        supply a great deal. See :mod:`body2colmap.background`.
+
+        The defaults are a ``"grid"`` cube at
+        :data:`~body2colmap.background.DEFAULT_RADIUS_SCALE` times the orbit
+        radius, which is the arrangement that carries the cue most strongly.
+        They are a set: a cube is only a room at a finite radius, and at
+        infinity it flattens to a plain ruled field.
+
+        The backdrop is for conditioning frames only. It is not exported to
+        COLMAP, adds no points to the point cloud, and never reaches the depth
+        buffer or the silhouette mask.
+
+        Settings are stored and the Background built on first render, because a
+        finite backdrop is centred on the orbit target and may be sized
+        relative to the orbit radius — neither of which exists until
+        :meth:`set_orbit_params` has run.
+
+        Args:
+            texture: A built-in generator name
+                (:data:`~body2colmap.background.TEXTURE_GENERATORS`) or a path
+                to an image, or — for a cube — a directory of six face images.
+            geometry: "sphere" or "cube". At an infinite radius the two differ
+                only in how the texture is parameterized.
+            resolution: Equirect height / cube face size, generated textures
+                only.
+            radius: Surface radius in world units. Passing it supersedes the
+                defaulted ``radius_scale``.
+            radius_scale: Radius as a multiple of the orbit radius, which keeps
+                the backdrop sized correctly against an auto-framed orbit.
+                Mutually exclusive with ``radius``, and must exceed 1.0 so the
+                camera stays inside. Left unmentioned it defaults to
+                :data:`~body2colmap.background.DEFAULT_RADIUS_SCALE`; pass
+                ``None`` explicitly, with no ``radius``, for a backdrop at
+                infinity, which tracks camera rotation but not translation.
+            rotation_deg: Rotate the environment about +Y.
+            opaque: Force alpha to 255. False keeps the silhouette alpha
+                intact and fills only RGB behind it.
+            params: Extra keyword arguments for a generator.
+
+        Returns:
+            self (for method chaining)
+
+        Raises:
+            ValueError: If both radius forms are given, or ``radius_scale`` is
+                not greater than 1.0.
+        """
+        if radius_scale is _UNSET:
+            # Only the default is superseded by an explicit radius. A caller
+            # who names radius_scale=None alongside a radius still gets the
+            # mutual-exclusion error, because they said two things.
+            radius_scale = None if radius is not None else DEFAULT_RADIUS_SCALE
+
+        if radius is not None and radius_scale is not None:
+            raise ValueError(
+                "radius and radius_scale are mutually exclusive; pass one, or "
+                "radius_scale=None alone for an infinite backdrop"
+            )
+        if radius_scale is not None and radius_scale <= 1.0:
+            raise ValueError(
+                f"radius_scale must be > 1.0 so the camera stays inside the "
+                f"backdrop, got {radius_scale}"
+            )
+
+        self._background_spec = {
+            "texture": texture,
+            "geometry": geometry,
+            "resolution": resolution,
+            "radius": radius,
+            "radius_scale": radius_scale,
+            "rotation_deg": rotation_deg,
+            "opaque": opaque,
+            "params": dict(params or {}),
+        }
+        self._background = None
+        return self
+
+    def clear_background(self) -> "OrbitPipeline":
+        """
+        Remove the environment backdrop.
+
+        Returns:
+            self (for method chaining)
+        """
+        self._background_spec = None
+        self._background = None
+        return self
+
+    def _resolve_background(self):
+        """
+        Build the Background from the stored spec, once.
+
+        Returns:
+            A :class:`~body2colmap.background.Background`, or None if no
+            backdrop is configured.
+
+        Raises:
+            RuntimeError: If a finite backdrop is requested before
+                :meth:`set_orbit_params` has established the orbit it is sized
+                and centred against.
+        """
+        if self._background_spec is None:
+            return None
+        if self._background is not None:
+            return self._background
+
+        from .background import Background
+
+        spec = dict(self._background_spec)
+        radius = spec.pop("radius")
+        radius_scale = spec.pop("radius_scale")
+
+        finite = radius is not None or radius_scale is not None
+        if finite and self.orbit_params is None:
+            raise RuntimeError(
+                "A finite background radius is measured against the orbit. "
+                "Call set_orbit_params() before rendering, or leave both "
+                "radius and radius_scale unset for an infinite backdrop."
+            )
+
+        # Centre on the orbit target so the surface surrounds the subject
+        # rather than the world origin, which for SAM-3D-Body output is the
+        # original camera and can be metres away.
+        center = None
+        if self.orbit_params is not None:
+            center = self.orbit_params.get("target")
+
+        if radius_scale is not None:
+            radius = float(radius_scale) * float(self.orbit_params["radius"])
+
+        self._background = Background.create(
+            center=center, radius=radius, **spec
+        )
+        return self._background
 
     def configure_splat_renderer(
         self,
@@ -641,6 +816,7 @@ class OrbitPipeline:
                 'pattern': pattern,
                 'n_frames': n_frames,
                 'radius': radius,
+                'target': target,
                 'original_focal_length': original_focal_length,
                 'framed_focal_length': framed_fl,
                 # start_azimuth_deg arrives via **kwargs below, so it always
@@ -729,6 +905,7 @@ class OrbitPipeline:
             'pattern': pattern,
             'n_frames': n_frames,
             'radius': radius,
+            'target': target,
             **kwargs
         }
 
@@ -764,6 +941,11 @@ class OrbitPipeline:
         Returns:
             Dictionary mapping mode name to list of rendered images
             Example: {"mesh": [img1, img2, ...], "depth": [img1, img2, ...]}
+
+        Note:
+            An environment backdrop set by :meth:`configure_background` is
+            drawn behind every mesh-scene mode. Splat scenes are rendered by
+            the external brush binary and ignore it.
 
         Raises:
             RuntimeError: If cameras haven't been set (call set_orbit_params first)
@@ -838,6 +1020,10 @@ class OrbitPipeline:
                     )
                 else:
                     raise ValueError(f"Unknown render mode: {mode}")
+
+                # No-op unless configure_background() was called. Safe here
+                # because a single mode has no overlay to draw over it.
+                image = renderer.composite_over_background(image, camera)
 
                 images.append(image)
 
@@ -1055,6 +1241,11 @@ class OrbitPipeline:
                 )
             else:
                 raise ValueError(f"Unknown render mode: {mode}")
+
+            if '+' not in mode:
+                # render_composite() already drew the backdrop under its base
+                # layer, which is the only correct place for it.
+                image = renderer.composite_over_background(image, camera)
 
             results[mode] = image
 

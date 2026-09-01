@@ -24,7 +24,9 @@ splat_renderer.py  (depends on: camera, splat_scene + the
     ↓
 splat_anchor.py  (depends on: camera, splat_scene)
     ↓
-renderer.py  (depends on: scene, camera, face, skeleton)
+background.py  (depends on: camera, coordinates)
+    ↓
+renderer.py  (depends on: scene, camera, face, skeleton, background)
     ↓
 exporter.py  (depends on: camera, scene)
     ↓
@@ -118,6 +120,9 @@ cli.py  (depends on: pipeline, config)
   - `render_skeleton()`: Joints and bones
   - `render_composite()`: Base layer (`mesh`/`depth`/`outline`) + overlays,
     plus an optional pre-rendered `splat_layer` composited last
+  - `composite_over_background()`: draws the optional `background` behind a
+    base layer. A no-op when none is set, so callers need no branch. Applied
+    to the BASE only, before overlays — see below.
   - `_render_depth_buffer()`: The raw pyrender depth buffer. Single source of
     truth for both `render_depth()` and `render_mask()` — and for the splat
     overlay's depth-gauge fit. Do NOT re-open a pyrender scene to read depth.
@@ -128,6 +133,30 @@ cli.py  (depends on: pipeline, config)
   independently, so a new layer had to be added to each by hand.
 
 **Testing priority**: MEDIUM - mainly wraps pyrender
+
+#### background.py
+**Purpose**: Draw a world-fixed environment behind the base layer, so an orbit
+reads as the camera moving rather than the subject spinning
+
+**Key components**:
+- `Background` class:
+  - `Background.create()`: the single entry point, dispatching one `texture`
+    field between a built-in generator and a path
+  - `render(camera)`: the environment as RGB, by per-pixel direction lookup
+  - `composite(image, camera)`: alpha-blend an RGBA base layer over it
+  - `_surface_vectors()`: ray → lookup vector. The whole infinite/finite
+    distinction lives here and nowhere else
+- Parameterizations: `equirect_uv()` / `equirect_directions()` and
+  `cube_face_uv()` / `cube_face_directions()`, each pair mutual inverses
+- Generators in `TEXTURE_GENERATORS`: `grid`, `checker`, `gradient`,
+  `blender_sky`
+- `DEFAULT_RADIUS_SCALE`: the default backdrop radius, as a multiple of the
+  orbit radius. Lives here rather than in `config.py` because `config.py` and
+  `pipeline.py` both default to it and must not drift
+- Loaders: `load_texture()` and `equirect_to_cube()`
+
+**Testing priority**: HIGH - every convention here is silently plausible when
+wrong (see the marker test)
 
 #### exporter.py
 **Purpose**: Export to COLMAP and other formats
@@ -160,6 +189,10 @@ original-camera keys only appear when `original_focal_length` is set):
   anchor exact. 0.0 for non-helical patterns.
 - `warp_homography`: 3x3 matrix aligning the original image with the anchor
   frame's view, for `cv2.warpPerspective()`.
+- `target`: The orbit's look-at point, in world coords. Used by
+  `configure_background()` to centre a finite backdrop on the subject rather
+  than on the world origin — which for SAM-3D-Body output is the original
+  camera, and can be metres away.
 - Also: `pattern`, `n_frames`, `radius`, `original_focal_length`,
   `framed_focal_length`, `start_azimuth_deg`, `derived_elevation_deg`,
   `framing_info`.
@@ -791,6 +824,127 @@ anchor is defined relative to that camera at the origin, so the two are
 incompatible. `OrbitPipeline._auto_oriented` records that it ran; the check is
 there rather than in a docstring because the failure would otherwise be a
 silently misplaced face.
+
+## Environment Backdrop (2026-08)
+
+`background.py` plus a hook in `render_composite()`. Draws the inside of a
+sphere or an axis-aligned cube behind the base layer so an orbit reads as the
+camera moving, not the subject spinning. See the parent CLAUDE.md for the
+overview; what follows is the detail that is easy to get wrong.
+
+### Why it is not scene geometry
+A surrounding sphere added to the pyrender scene would put geometry behind
+every pixel. `render_mask()` derives mesh coverage from `depth > 0` — that is
+its whole reason for existing, in preference to the colour buffer's alpha — so
+the silhouette would become the full frame, and `outline` mode along with the
+alpha channel would collapse.
+
+Even setting that aside, geometry costs more than it buys here: pyrender's
+`IntrinsicsCamera` defaults to `zfar=100` and would clip a large sphere, an
+unlit textured material has to fight the shader gamma documented at
+`_flat_color_rgba8()`, and a tessellated sphere pinches at the poles. The
+remap has none of those problems and is about forty lines.
+
+### The three lookup conventions, and how they are pinned
+Three separate conventions have to agree, and all three are silently plausible
+when wrong — a mirrored sky still looks like a sky:
+
+1. **Ray generation** inverts `Camera.project()`, which converts OpenGL camera
+   space to OpenCV by `* [1, -1, -1]` before applying `K`. So a pixel's OpenCV
+   ray maps back by negating Y and Z. Get this wrong and the render is
+   vertically mirrored.
+2. **Equirect** uses the project's spherical convention (azimuth from +Z toward
+   +X), with `v` running zenith to nadir. Get this wrong and the sky is upside
+   down or a quarter-turn off.
+3. **Cubemap** follows the OpenGL face/UV table, so standard assets load
+   without surprises.
+
+`TestMarkerLandsWhereProjectionSaysItShould` is what actually holds them: a
+texture with one bright texel, rendered from an off-axis camera, with the
+resulting centroid compared against `camera.project(position + direction)`.
+That reference comes from `Camera` itself, so it is independent of everything
+inside `background.py`. Round-trip tests alone would not catch a convention
+that is self-consistently wrong.
+
+### `_ray_grid_cam` caches camera space, not world space
+Every camera on an orbit shares one set of intrinsics (the project assumes
+this throughout), so the camera-space ray grid is built once and `_world_rays()`
+applies only the per-frame rotation. Caching *world* directions instead would
+be a per-frame bug that looks like a frozen backdrop — which is exactly what a
+missing rotation looks like, and how it was caught during development.
+
+### Rotation is applied to the ray, not to the lookup
+`rotation_deg` rotates both the ray direction and the camera's offset from
+centre, before intersection. Rotating the texture coordinate after intersection
+would be cheaper and wrong for a cube: the texture would slide across walls
+that stayed put. `test_a_cube_rotates_with_its_texture` pins it by exploiting a
+quarter turn being a symmetry of the cube itself.
+
+### Padding, because `borderMode` cannot express what is needed
+An equirect wraps horizontally but not vertically: at the seam the correct
+neighbour is the opposite column, at the poles it is the same row. `cv2.remap`
+applies one `borderMode` to both axes, so `_pad_equirect()` builds the two
+borders by hand and the sample coordinates are offset by one (`u * W + 0.5`,
+not `- 0.5`). Cube faces get plain edge replication — true cubemap edge
+filtering would pull the neighbouring face's border row, which is off by at
+most half a texel and needs an adjacency table nothing else would use.
+
+### The defaulted radius needs one rule, in three places
+The defaults are a `grid` cube at `DEFAULT_RADIUS_SCALE` times the orbit
+radius, and they are a set: a cube at infinity has no corners and no parallax,
+so defaulting the texture and geometry without the radius would ship the weak
+version of the feature. See the parent CLAUDE.md for the comparison that
+settled it.
+
+That makes `radius_scale` a defaulted half of a mutually exclusive pair, so
+every entry point has to answer "the caller set only `radius`" the same way —
+**the explicit radius supersedes the default**, and naming both is still an
+error:
+
+- `Config.from_yaml()` keys off *presence* in the mapping, not the value, so a
+  file writing `radius_scale: null` still gets infinity.
+- `Config.apply_cli_overrides()` already worked this way for a config-file
+  scale; `--background-infinite` is the CLI's way to say null.
+- `configure_background()` needs the `_UNSET` sentinel for it, because an
+  explicit `radius_scale=None` (asking for infinity) and an unmentioned
+  argument are different requests and `None` cannot express both.
+
+`BackgroundConfig.validate()` checks each radius value before checking the two
+against each other, so `BackgroundConfig(radius=0.0)` complains about the zero
+rather than about a conflict with a default the caller never set.
+
+### `opaque` is a real choice, not a cosmetic one
+With `opaque=True` (the default) alpha becomes 255 everywhere and the frame is
+a flat conditioning image. That destroys the silhouette mask — deliberately,
+because these frames feed a video model that flattens alpha anyway. Anything
+that needs the mask sets `opaque=False`, which fills only RGB behind the
+subject and leaves alpha exactly as the base layer produced it.
+
+### Composite order: under the base, before the overlays
+`render_composite()` applies the backdrop the moment the base layer exists, in
+both branches (the `mesh`/`depth`/`outline` chain and the skeleton-as-base
+early return). It cannot go later: the skeleton overlay blends into RGB
+*without* touching alpha, so a backdrop composited afterwards would use the
+mesh silhouette's alpha and blend the skeleton away everywhere outside it.
+
+For single-mode renders there is no overlay to order against, so
+`pipeline.render_all()` calls `composite_over_background()` itself.
+`render_original_view()` does the same, but only for non-composite modes —
+`render_composite()` has already handled the rest.
+
+### Resolution fitting exists to stop temporal flicker
+Not for speed. A 4K panorama minified into a small frame point-samples
+differently every frame, and the shimmer reads as motion to a video model. One
+`INTER_AREA` resize down to roughly twice the render's angular resolution
+removes it. It runs once, lazily, on the first render — which is why
+`_padded` is invalidated there and `_fitted` guards the second call.
+
+### Splat scenes are excluded at the CLI, not silently
+A `.ply` input is rendered by `brush-splat-render`, which composites against a
+flat colour of its own; there is no pyrender base layer to draw behind.
+`cli.py` raises rather than ignoring `--background`, and `pipeline.renderer`
+only assigns the backdrop for a mesh scene.
+
 
 ## Next Steps
 

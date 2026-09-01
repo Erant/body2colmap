@@ -13,6 +13,7 @@ from typing import Optional, Tuple, List, Dict, Any
 from pathlib import Path
 import argparse
 
+from .background import DEFAULT_RADIUS_SCALE
 from .face import EYE_STYLES
 
 
@@ -30,6 +31,126 @@ class RenderConfig:
     outline_style: str = "filled"  # "filled" or "stroke"
     outline_thickness: int = 3     # stroke width in px (style="stroke" only)
     outline_blur: int = 4          # blur radius in px (0 = hard edges)
+
+
+def _validate_background_geometry(value: str) -> str:
+    """
+    Validate a background surface type.
+
+    Args:
+        value: "sphere" or "cube"
+
+    Returns:
+        The validated value
+
+    Raises:
+        ValueError: If the value is not a known geometry
+    """
+    if value not in ("sphere", "cube"):
+        raise ValueError(
+            f"Invalid background geometry {value!r}. Use 'sphere' or 'cube'."
+        )
+    return value
+
+
+@dataclass
+class BackgroundConfig:
+    """
+    Environment backdrop drawn behind the render.
+
+    Exists to break a specific failure mode: with a blank background a video
+    diffusion model reads an orbit as the *subject* rotating, and prompt
+    conditioning is not strong enough to correct it. A world-fixed backdrop
+    that sweeps past as the camera moves supplies the missing cue.
+
+    Note that not every texture supplies it equally. A Nishita-style sky is
+    azimuthally symmetric apart from the sun, so it barely changes as the
+    camera orbits; ``checker`` and ``grid`` carry far more structure and are
+    the honest test of whether the cue lands. See
+    :mod:`body2colmap.background`.
+
+    The defaults below are a ``grid`` cube at
+    :data:`~body2colmap.background.DEFAULT_RADIUS_SCALE` times the orbit
+    radius -- walls meeting at corners, over a floor and ceiling that read
+    apart -- because that is the arrangement that carries the cue most
+    strongly. The three settings are a set: a cube is only a room at a finite
+    radius, and at infinity it flattens to a plain ruled field.
+
+    The backdrop is for conditioning frames only: it is not exported to
+    COLMAP, adds no points to the point cloud, and never enters the depth
+    buffer or the silhouette mask.
+    """
+    enabled: bool = False
+
+    #: "sphere" or "cube". At an infinite radius the two differ only in how
+    #: the texture is parameterized; the geometric difference needs a radius.
+    geometry: str = "cube"
+
+    #: A built-in generator name (blender_sky, gradient, checker, grid) or a
+    #: path to an image -- or, for a cube, a directory of six face images.
+    texture: str = "grid"
+
+    #: Equirect height / cube face size, for generated textures only.
+    resolution: int = 1024
+
+    #: Surface radius in world units. null leaves the surface at infinity, so
+    #: it responds to camera rotation but not to translation.
+    radius: Optional[float] = None
+
+    #: Radius as a multiple of the orbit radius, for when the orbit is
+    #: auto-framed and its scale is not known up front. Mutually exclusive
+    #: with `radius`, and must exceed 1.0 so the camera stays inside.
+    #: Defaulted rather than left at infinity because the default cube needs a
+    #: finite radius to be a room at all. Set `radius` for world units, or
+    #: both forms to None for an infinite backdrop.
+    radius_scale: Optional[float] = DEFAULT_RADIUS_SCALE
+
+    #: Rotate the environment about +Y, in degrees.
+    rotation_deg: float = 0.0
+
+    #: Force alpha to 255. True suits conditioning frames; False keeps the
+    #: silhouette alpha intact and fills only RGB.
+    opaque: bool = True
+
+    #: Extra keyword arguments for a generator, e.g. {sun_azimuth_deg: 40}.
+    #: Rejected when `texture` names a file.
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        """
+        Check the settings hang together.
+
+        Raises:
+            ValueError: On an unknown geometry, both radius forms at once, a
+                non-positive radius, a radius_scale that would put the camera
+                outside the surface, or a bad resolution.
+        """
+        _validate_background_geometry(self.geometry)
+
+        # Each value is checked before they are checked against each other:
+        # radius_scale carries a default, so a caller who set only a bad radius
+        # would otherwise be told about a conflict rather than about the value
+        # they actually got wrong.
+        if self.radius is not None and self.radius <= 0.0:
+            raise ValueError(
+                f"background.radius must be > 0, got {self.radius}"
+            )
+        if self.radius_scale is not None and self.radius_scale <= 1.0:
+            raise ValueError(
+                f"background.radius_scale must be > 1.0 so the camera stays "
+                f"inside the backdrop, got {self.radius_scale}"
+            )
+        if self.radius is not None and self.radius_scale is not None:
+            raise ValueError(
+                "background.radius and background.radius_scale are mutually "
+                "exclusive; set one or neither (neither = infinite backdrop). "
+                f"Note that radius_scale defaults to {DEFAULT_RADIUS_SCALE}, "
+                "so pass radius_scale=None alongside an explicit radius"
+            )
+        if self.resolution < 8:
+            raise ValueError(
+                f"background.resolution must be >= 8, got {self.resolution}"
+            )
 
 
 @dataclass
@@ -240,6 +361,7 @@ class Config:
     """Complete configuration."""
     input_file: str
     render: RenderConfig = field(default_factory=RenderConfig)
+    background: BackgroundConfig = field(default_factory=BackgroundConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     path: PathConfig = field(default_factory=PathConfig)
     skeleton: SkeletonConfig = field(default_factory=SkeletonConfig)
@@ -275,6 +397,7 @@ class Config:
             config = cls(
                 input_file=args.input,
                 render=RenderConfig(),
+                background=BackgroundConfig(),
                 camera=CameraConfig(),
                 path=PathConfig(),
                 skeleton=SkeletonConfig(),
@@ -461,6 +584,35 @@ class Config:
         if args.splat_confidence_dataset is not None:
             config.splat.confidence_dataset = args.splat_confidence_dataset
 
+        # Background overrides
+        if args.background is not None:
+            config.background.enabled = True
+            config.background.texture = args.background
+        if args.no_background:
+            config.background.enabled = False
+        if args.background_geometry is not None:
+            config.background.geometry = _validate_background_geometry(
+                args.background_geometry
+            )
+        if args.background_resolution is not None:
+            config.background.resolution = args.background_resolution
+        if args.background_radius is not None:
+            config.background.radius = args.background_radius
+            # An explicit radius supersedes a scale from the config file, which
+            # would otherwise trip the mutual-exclusion check below.
+            config.background.radius_scale = None
+        if args.background_radius_scale is not None:
+            config.background.radius_scale = args.background_radius_scale
+            config.background.radius = None
+        if args.background_infinite:
+            config.background.radius = None
+            config.background.radius_scale = None
+        if args.background_rotation is not None:
+            config.background.rotation_deg = args.background_rotation
+        if args.background_keep_alpha:
+            config.background.opaque = False
+        config.background.validate()
+
         # Export overrides
         if args.no_colmap:
             config.export.colmap = False
@@ -512,6 +664,35 @@ class Config:
             outline_thickness=render_data.get('outline_thickness', 3),
             outline_blur=render_data.get('outline_blur', 4)
         )
+
+        # Parse background config
+        background_data = data.get('background', {})
+
+        # A radius written in the file supersedes the default radius_scale,
+        # which the two being mutually exclusive would otherwise turn into an
+        # error for a perfectly reasonable file. Writing either key as null is
+        # how a file asks for an infinite backdrop.
+        if 'radius' in background_data and 'radius_scale' not in background_data:
+            background_radius_scale = None
+        else:
+            background_radius_scale = background_data.get(
+                'radius_scale', DEFAULT_RADIUS_SCALE
+            )
+
+        background = BackgroundConfig(
+            enabled=background_data.get('enabled', False),
+            geometry=_validate_background_geometry(
+                background_data.get('geometry', 'cube')
+            ),
+            texture=background_data.get('texture', 'grid'),
+            resolution=background_data.get('resolution', 1024),
+            radius=background_data.get('radius'),
+            radius_scale=background_radius_scale,
+            rotation_deg=background_data.get('rotation_deg', 0.0),
+            opaque=background_data.get('opaque', True),
+            params=dict(background_data.get('params') or {}),
+        )
+        background.validate()
 
         # Parse camera config
         camera_data = data.get('camera', {})
@@ -606,6 +787,7 @@ class Config:
         return cls(
             input_file=input_file,
             render=render,
+            background=background,
             camera=camera,
             path=path,
             skeleton=skeleton,
@@ -640,6 +822,17 @@ class Config:
                 'outline_style': self.render.outline_style,
                 'outline_thickness': self.render.outline_thickness,
                 'outline_blur': self.render.outline_blur
+            },
+            'background': {
+                'enabled': self.background.enabled,
+                'geometry': self.background.geometry,
+                'texture': self.background.texture,
+                'resolution': self.background.resolution,
+                'radius': self.background.radius,
+                'radius_scale': self.background.radius_scale,
+                'rotation_deg': self.background.rotation_deg,
+                'opaque': self.background.opaque,
+                'params': dict(self.background.params),
             },
             'camera': {
                 'focal_length': self.camera.focal_length,
@@ -763,6 +956,75 @@ render:
   # Blur radius in pixels applied to the outline (0 = hard two-tone edges).
   # Does not affect a skeleton overlay in "outline+skeleton" mode.
   outline_blur: 4
+
+# Environment backdrop drawn behind the render.
+#
+# Purpose: a blank background lets a video diffusion model read an orbit as the
+# subject spinning on a turntable. A world-fixed backdrop that sweeps past as
+# the camera moves is the cue that says otherwise.
+#
+# The defaults are a "grid" cube at 3x the orbit radius: walls meeting at
+# corners over a floor and ceiling that read apart. That is the arrangement
+# that carries the cue most strongly, and the three settings are a set -- a
+# cube is only a room at a finite radius.
+#
+# Caveat worth knowing before picking another texture: a Nishita-style sky is
+# azimuthally symmetric apart from its sun, so it barely changes as the camera
+# orbits and supplies almost none of the cue you are after. "checker" and
+# "grid" carry real azimuthal structure and are the honest test.
+#
+# The backdrop is for conditioning frames only -- it is never exported to
+# COLMAP, adds no points to the point cloud, and does not touch the depth
+# buffer or the silhouette mask.
+background:
+  # Draw a backdrop at all
+  enabled: false
+
+  # Surface the texture is mapped onto: "sphere" or "cube".
+  # At an infinite radius (see below) these differ only in how the texture is
+  # parameterized -- the geometric difference needs a finite radius.
+  geometry: "cube"
+
+  # Either a built-in generator:
+  #   blender_sky - approximation of Blender's default Sky Texture (Nishita)
+  #   grid        - ruled walls with a darker floor and lighter ceiling
+  #   checker     - two-tone checker; maximum azimuthal signal, for validation
+  #   gradient    - plain vertical gradient; a control with no rotation cue
+  # or a path to an image:
+  #   sphere - a 2:1 equirectangular image
+  #   cube   - a directory of six faces (px/nx/py/ny/pz/nz, or posx/... , or
+  #            right/left/top/bottom/front/back), a 4:3 horizontal cross, a
+  #            6:1 strip, a 1:6 column, or a 2:1 equirect resampled onto it
+  texture: "grid"
+
+  # Generated-texture resolution: equirect height, or cube face size.
+  # Ignored for a loaded texture, which keeps its own.
+  resolution: 1024
+
+  # Surface radius in world units. Setting it here supersedes the
+  # `radius_scale` default below. null on both puts the surface at infinity,
+  # where it responds to camera rotation but not to camera translation --
+  # correct for a distant sky, but it yields no parallax between subject and
+  # backdrop, and a cube at infinity has no corners.
+  radius: null
+
+  # Radius as a multiple of the orbit radius, which is what keeps the backdrop
+  # sized correctly when the orbit is auto-framed. Mutually exclusive with
+  # `radius`; must be > 1.0 so the camera stays inside.
+  radius_scale: 3.0
+
+  # Rotate the environment about +Y, in degrees. Aims the sun, or turns a
+  # cube's walls relative to the subject.
+  rotation_deg: 0.0
+
+  # Force alpha to 255, giving a flat conditioning frame. Set false to keep
+  # the silhouette alpha usable as a mask, filling only RGB behind it.
+  opaque: true
+
+  # Extra arguments for a generator, e.g. {sun_azimuth_deg: 40, sun_size_deg: 6}
+  # for blender_sky, or {n_per_face: 8} for a cube checker. Rejected when
+  # `texture` names a file.
+  params: {}
 
 # Camera configuration
 camera:
@@ -1063,6 +1325,82 @@ def create_argument_parser() -> argparse.ArgumentParser:
         metavar="PIXELS",
         help="Blur radius in pixels for the outline, 0 to disable (default: 4). "
              "Does not blur a skeleton overlay."
+    )
+
+    # Background options
+    bg_group = parser.add_argument_group(
+        "Background Options",
+        "A world-fixed backdrop, so an orbit reads as the camera moving rather "
+        "than the subject spinning. The defaults -- a grid cube at 3x the "
+        "orbit radius -- are the arrangement that carries that cue most "
+        "strongly: walls meeting at corners over a floor and ceiling that read "
+        "apart. Note that a Nishita-style sky is azimuthally symmetric apart "
+        "from its sun and so carries almost none of it."
+    )
+    bg_group.add_argument(
+        "--background",
+        type=str,
+        metavar="TEXTURE",
+        help="Enable a backdrop with this texture: a built-in generator "
+             "(grid, checker, blender_sky, gradient) or a path to an "
+             "equirectangular image, packed cubemap, or directory of six "
+             "cube faces. Pass 'grid' for the default backdrop"
+    )
+    bg_group.add_argument(
+        "--no-background",
+        action="store_true",
+        help="Disable the backdrop, overriding a config file that enables it"
+    )
+    bg_group.add_argument(
+        "--background-geometry",
+        type=str,
+        choices=["sphere", "cube"],
+        help="Surface the texture is mapped onto (default: cube). Only "
+             "differs geometrically with a finite radius, which is on by "
+             "default -- see --background-radius-scale"
+    )
+    bg_group.add_argument(
+        "--background-resolution",
+        type=int,
+        metavar="PIXELS",
+        help="Generated texture resolution: equirect height or cube face size "
+             "(default: 1024). Ignored for a loaded texture"
+    )
+    bg_radius = bg_group.add_mutually_exclusive_group()
+    bg_radius.add_argument(
+        "--background-radius",
+        type=float,
+        metavar="UNITS",
+        help="Backdrop radius in world units, replacing the default "
+             "--background-radius-scale"
+    )
+    bg_radius.add_argument(
+        "--background-radius-scale",
+        type=float,
+        metavar="FACTOR",
+        help="Backdrop radius as a multiple of the orbit radius (must be > 1, "
+             "default: 3.0). Sized against the orbit, so it holds up when the "
+             "orbit is auto-framed"
+    )
+    bg_radius.add_argument(
+        "--background-infinite",
+        action="store_true",
+        help="Put the backdrop at infinity instead of the default finite "
+             "radius. It then tracks camera rotation but not translation, so "
+             "there is no parallax and a cube loses its corners -- right for a "
+             "distant sky"
+    )
+    bg_group.add_argument(
+        "--background-rotation",
+        type=float,
+        metavar="DEGREES",
+        help="Rotate the environment about +Y, e.g. to aim the sun"
+    )
+    bg_group.add_argument(
+        "--background-keep-alpha",
+        action="store_true",
+        help="Fill only RGB behind the subject, leaving the silhouette alpha "
+             "intact as a mask. Default is to force alpha opaque"
     )
 
     # Camera options

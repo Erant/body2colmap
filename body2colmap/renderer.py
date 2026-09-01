@@ -139,7 +139,8 @@ class Renderer:
     def __init__(
         self,
         scene: Scene,
-        render_size: Tuple[int, int] = (512, 512)
+        render_size: Tuple[int, int] = (512, 512),
+        background=None,
     ):
         """
         Initialize Renderer.
@@ -147,9 +148,17 @@ class Renderer:
         Args:
             scene: Scene to render
             render_size: (width, height) in pixels
+            background: Optional
+                :class:`~body2colmap.background.Background` drawn behind the
+                base layer. Deliberately not part of the pyrender scene: a
+                surrounding sphere would cover every pixel of the depth buffer,
+                and :meth:`render_mask` — and through it ``outline`` mode and
+                the alpha channel — reads mesh coverage from exactly that.
+                May be reassigned between renders.
         """
         self.scene = scene
         self.width, self.height = render_size
+        self.background = background
 
         # Will be lazily initialized
         self._pyrender_scene = None
@@ -955,6 +964,32 @@ class Renderer:
         color, _ = renderer.render(pr_scene, flags=pyrender.RenderFlags.RGBA)
         return color
 
+    def composite_over_background(
+        self,
+        image: NDArray[np.uint8],
+        camera: Camera,
+    ) -> NDArray[np.uint8]:
+        """
+        Draw the environment backdrop behind a rendered base layer.
+
+        A no-op when no background is configured, so callers need no branch.
+
+        Apply this to the *base* layer only, before any overlay. The skeleton
+        overlay writes RGB without touching alpha, so compositing the backdrop
+        after it would blend the skeleton away everywhere outside the mesh
+        silhouette.
+
+        Args:
+            image: RGBA base layer. Modified in place when a background is set.
+            camera: Camera the layer was rendered from.
+
+        Returns:
+            ``image``.
+        """
+        if self.background is None:
+            return image
+        return self.background.composite(image, camera)
+
     def render_composite(
         self,
         camera: Camera,
@@ -990,11 +1025,13 @@ class Renderer:
 
         Note:
             Modes are composited in order:
+            0. background, if the Renderer has one (behind everything)
             1. mesh, depth or outline (base layer)
             2. skeleton (overlay)
             3. splat (overlay)
 
-            Alpha is the base layer's, unioned with the splat's where present.
+            Alpha is the base layer's, unioned with the splat's where present —
+            unless an opaque background has already forced it to 255.
         """
         # Render base layer
         base_image = None
@@ -1023,6 +1060,9 @@ class Renderer:
                 thickness=outline_opts.get("thickness", 3),
                 blur=outline_opts.get("blur", 4),
             )
+
+        if base_image is not None:
+            base_image = self.composite_over_background(base_image, camera)
 
         # Determine face mode and custom landmarks from composite modes
         face_mode = None
@@ -1066,6 +1106,7 @@ class Renderer:
                 pupil_scale=pupil_scale,
                 bg_color=skel_opts.get("bg_color"),
             )
+            base_image = self.composite_over_background(base_image, camera)
             return self._composite_splat(base_image, splat_layer)
 
         # Overlay skeleton if requested

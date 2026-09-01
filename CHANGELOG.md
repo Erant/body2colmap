@@ -5,6 +5,45 @@ All notable changes to body2colmap will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Environment backdrop** (`--background`): draws a world-fixed sphere or cube behind
+  the render, so an orbit reads as the camera moving rather than the subject spinning on
+  a turntable. Off by default.
+  - Textures are generated or loaded: `grid`, `checker`, `gradient`, `blender_sky` (an
+    approximation of Blender's default Sky Texture), or a path to an equirectangular
+    image, a packed cubemap (4:3 cross, 6:1 strip, 1:6 column) or a directory of six
+    face images
+  - **Defaults to a `grid` cube at 3x the orbit radius** — walls meeting at corners over
+    a floor and ceiling that read apart. Compared side by side against a checker sphere,
+    a grid sphere and a checker cube on the same orbit, this is the arrangement that
+    makes the rotation legible; the other three either repeat (checker) or give the
+    camera nothing to pass (a sphere has no corners). The three settings are a set: a
+    cube is only a room at a finite radius
+  - `--background-geometry sphere|cube`. At an infinite radius the two differ only in
+    how the texture is parameterized; the geometric difference needs a finite radius
+  - `--background-radius` / `--background-radius-scale`: a finite surface gives real
+    parallax between subject and backdrop, which is what makes a cube read as a room.
+    A radius supersedes the defaulted scale; `--background-infinite` puts the surface at
+    infinity instead, where it tracks camera rotation but not translation
+  - **Caveat worth knowing before picking a texture**: a Nishita-style sky is
+    azimuthally symmetric apart from its sun, so it barely changes as the camera orbits
+    and supplies almost none of the cue this feature exists for. `grid` and `checker`
+    carry roughly 40x and 120x more azimuthal signal respectively (measured as
+    per-latitude standard deviation, pinned in `tests/test_background.py`)
+  - Alpha is forced opaque by default, suiting conditioning frames.
+    `--background-keep-alpha` fills only RGB and leaves the silhouette alpha usable as
+    a training mask
+  - Conditioning frames only: the backdrop is not exported to COLMAP, adds no points to
+    the point cloud, and never enters the depth buffer or the silhouette mask.
+    `.npz` input only — a `.ply` is rasterized by brush against a flat colour of its
+    own, and the combination is rejected rather than ignored
+  - Config: the `background:` section. CLI: `--background`, `--no-background`,
+    `--background-geometry`, `--background-resolution`, `--background-radius`,
+    `--background-radius-scale`, `--background-infinite`, `--background-rotation`,
+    `--background-keep-alpha`
+  - API: `OrbitPipeline.configure_background()`, `clear_background()`, and the
+    `body2colmap.background` module
+- `orbit_params['target']`: the orbit's look-at point, so a finite backdrop can be
+  centred on the subject rather than on the world origin
 - **Confidence gating for splat renders** (`--splat-confidence`): gates every pixel by
   how well the training views actually constrained the Gaussians covering it, instead of
   leaving the decision to a downstream threshold on rendered alpha. Drops low-confidence

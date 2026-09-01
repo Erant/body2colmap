@@ -227,6 +227,153 @@ The blur softens both color and alpha together, and is applied to the outline
 only — in `outline+skeleton` the skeleton is composited on top afterwards and
 stays sharp.
 
+### Environment Backdrop
+
+`--background` draws a **world-fixed environment** — the inside of a sphere or
+a cube — behind the render. It exists to break a specific failure: with a blank
+background, a video diffusion model tends to read an orbit as *the subject
+rotating* rather than the camera moving around it, and prompt conditioning is
+not strong enough to correct it. A backdrop that sweeps past as the camera
+moves supplies the missing cue.
+
+```bash
+# The default: a room, with ruled walls on a cube three times the orbit radius
+body2colmap estimation.npz --output-dir ./out \
+  --skeleton --render-modes outline+skeleton --background grid
+
+# Blender's default sky, on a sphere at infinity
+body2colmap estimation.npz --output-dir ./out \
+  --skeleton --render-modes outline+skeleton \
+  --background blender_sky --background-geometry sphere --background-infinite
+
+# Your own panorama
+body2colmap estimation.npz --output-dir ./out \
+  --render-modes outline --background ~/hdri/studio_4k.jpg \
+  --background-geometry sphere
+
+# A directory of six cube faces (px/nx/py/ny/pz/nz)
+body2colmap estimation.npz --output-dir ./out \
+  --render-modes outline --background ./skybox
+```
+
+#### Picking a texture
+
+**A Nishita-style sky is azimuthally symmetric apart from its sun.** Rotating
+the camera about the vertical axis changes nothing else in frame — which is
+exactly the motion the backdrop is meant to make legible. The sun is doing all
+of the work there, and a smooth gradient does none at all. `grid` is the
+default for the opposite reason: ruled walls, corners and a floor and ceiling
+that read apart give the camera something to pass at every azimuth.
+
+Measured as per-latitude standard deviation in 8-bit levels (pinned in
+`tests/test_background.py`):
+
+| Texture | Azimuthal signal | Notes |
+|---------|-----------------|-------|
+| `checker` | 82 | Ugly on purpose. If an orbit does not read as an orbit over a checker, the problem is the camera path, not the backdrop |
+| `grid` | 27 | Ruled walls, darker floor, lighter ceiling. The strongest realistic cue, especially on a cube |
+| `blender_sky` | 0.7 avg (11 at the sun) | Approximation of Blender's default Sky Texture |
+| `gradient` | 0 | A control with no rotation cue whatsoever |
+
+Loaded textures are whatever you give them; a panorama with landmarks around
+the horizon behaves like `grid`, a clear sky behaves like `blender_sky`.
+
+#### Sphere or cube, and how far away
+
+The default surface is a **cube at 3x the orbit radius**. A finite radius means
+the ray is intersected properly, which yields real parallax between the subject
+and the backdrop — and that is what makes a cube read as an actual room, with
+corners and wall perspective that move correctly.
+`--background-radius-scale` sizes it as a multiple of the orbit radius, so it
+still fits when the orbit is auto-framed; the camera must end up inside, so it
+has to exceed 1.0. `--background-radius` gives it in world units instead, and
+supersedes the scale.
+
+`--background-infinite` puts the surface at **infinity**: the lookup then
+depends only on ray direction, so the backdrop tracks camera rotation but not
+camera translation. That is correct for a distant sky, and it is also the case
+where `sphere` and `cube` differ only in how the texture is laid out — not in
+what gets rendered. A cube at infinity has no corners, so pair it with
+`--background-geometry sphere` and a sky.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--background TEXTURE` | off | Generator name (`grid`, `checker`, `blender_sky`, `gradient`) or a path |
+| `--background-geometry {sphere,cube}` | `cube` | Surface the texture is mapped onto |
+| `--background-radius UNITS` | — | Surface radius in world units; supersedes the scale below |
+| `--background-radius-scale FACTOR` | `3.0` | Radius as a multiple of the orbit radius; must be > 1 |
+| `--background-infinite` | off | Put the surface at infinity: rotation but no parallax, and no corners on a cube |
+| `--background-rotation DEGREES` | `0` | Turn the environment about the vertical axis, e.g. to aim the sun |
+| `--background-resolution PIXELS` | `1024` | Generated texture size; ignored for a loaded one |
+| `--background-keep-alpha` | off | Fill only RGB, leaving the silhouette alpha as a mask |
+| `--no-background` | — | Disable a backdrop enabled by a config file |
+
+Accepted texture files: for a sphere, a 2:1 equirectangular image. For a cube,
+a directory of six faces (`px`/`nx`/`py`/`ny`/`pz`/`nz`, `posx`/`negx`/..., or
+`right`/`left`/`top`/`bottom`/`front`/`back`), a 4:3 horizontal cross, a 6:1
+strip, a 1:6 column, or a 2:1 equirectangular image resampled onto the cube.
+
+Generator parameters go in the config file, since they vary per texture:
+
+```yaml
+background:
+  enabled: true
+  texture: "blender_sky"
+  geometry: "sphere"
+  radius_scale: null            # a sky belongs at infinity
+  params: {sun_azimuth_deg: 40, sun_elevation_deg: 25, sun_size_deg: 6}
+```
+
+Writing `radius` on its own is enough to override the defaulted `radius_scale`;
+setting both is an error. Writing either as `null` asks for a backdrop at
+infinity.
+
+#### Python API
+
+`configure_background()` carries the same defaults, and stores the settings
+rather than building the backdrop immediately — a finite radius is measured
+against the orbit, which `set_orbit_params()` has not established yet. Call
+either one first.
+
+```python
+pipeline = OrbitPipeline.from_npz_file("estimation.npz", include_skeleton=True)
+pipeline.set_orbit_params(pattern="circular", n_frames=72)
+
+# The default: a grid cube at 3x the orbit radius
+pipeline.configure_background()
+
+# A sky at infinity instead. radius_scale=None is the explicit opt-out; leaving
+# it unmentioned would apply the default finite radius.
+pipeline.configure_background(
+    texture="blender_sky",
+    geometry="sphere",
+    radius_scale=None,
+    params={"sun_azimuth_deg": 40, "sun_elevation_deg": 25},
+)
+
+# A radius in world units. Passing it supersedes the defaulted scale; passing
+# both raises.
+pipeline.configure_background(texture="grid", radius=8.5)
+
+pipeline.clear_background()   # back to no backdrop at all
+```
+
+Every render path picks the backdrop up on its own — `render_all()`,
+`render_composite_all()` and `render_original_view()` — so nothing else in the
+call sequence changes.
+
+#### Scope
+
+These are **conditioning frames**. The backdrop is not exported to COLMAP, adds
+no points to the point cloud, and never enters the depth buffer or the
+silhouette mask — so an `outline` render still measures the mesh, not the sky.
+By default alpha is forced opaque; `--background-keep-alpha` keeps the
+silhouette usable as a training mask instead.
+
+`.npz` input only. A `.ply` is rasterized by `brush-splat-render`, which
+composites against a flat colour of its own, so there is no base layer to draw
+behind; the combination is rejected rather than silently ignored.
+
 ### Gaussian-Splat Overlay
 
 `skeleton+splat` composites a **real Gaussian splat of the subject's face** onto
@@ -654,6 +801,14 @@ The `image_size` field is important: it allows `body2colmap` to denormalize coor
 | `--splat-scale S` | fitted | Splat depth gauge; omit to fit against the mesh |
 | `--splat-max-angle DEGREES` | `45` | Cull the splat past this far off its source view |
 | `--splat-no-reconcile` | off | Place the splat with a uniform scale |
+| `--background TEXTURE` | off | Environment backdrop: generator name or path (see [Environment Backdrop](#environment-backdrop)) |
+| `--background-geometry {sphere,cube}` | `cube` | Surface the backdrop texture is mapped onto |
+| `--background-radius UNITS` | — | Backdrop radius in world units; supersedes the scale below |
+| `--background-radius-scale FACTOR` | `3.0` | Backdrop radius as a multiple of the orbit radius; must be > 1 |
+| `--background-infinite` | off | Put the backdrop at infinity instead of the default finite radius |
+| `--background-rotation DEGREES` | `0` | Turn the environment about the vertical axis |
+| `--background-resolution PIXELS` | `1024` | Generated backdrop texture size |
+| `--background-keep-alpha` | off | Backdrop fills RGB only, leaving the silhouette alpha as a mask |
 
 ### Config File
 
@@ -669,6 +824,15 @@ skeleton:
   eye_color: [1.0, 1.0, 1.0]      # filled eye shape
   pupil_color: [0.0, 0.0, 0.0]    # pupil disc
   pupil_scale: 0.75               # pupil diameter as a fraction of eye height, (0, 1]
+
+background:
+  enabled: true
+  geometry: "cube"                # "sphere" or "cube"
+  texture: "grid"                 # generator name, or a path to an image/dir
+  radius_scale: 3.0               # multiple of the orbit radius; null = infinite
+  rotation_deg: 0.0               # turn the environment about the vertical axis
+  opaque: true                    # false keeps the silhouette alpha as a mask
+  params: {}                      # generator arguments, e.g. {n_per_face: 8}
 
 splat:
   overlay_ply: "face_splat.ply"   # 3DGS .ply; null disables the overlay

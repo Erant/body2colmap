@@ -111,6 +111,27 @@ def main(argv: Optional[list] = None) -> int:
                 "exists for a splat trained on a dataset."
             )
 
+        # Environment backdrop. Stored now, built at first render -- a finite
+        # radius is measured against the orbit, which is not set up yet.
+        if config.background.enabled:
+            if is_splat:
+                raise ValueError(
+                    "--background needs a .npz input. Splat scenes are "
+                    "rasterized by brush-splat-render, which composites "
+                    "against a flat colour of its own; there is no pyrender "
+                    "base layer to draw a backdrop behind."
+                )
+            pipeline.configure_background(
+                texture=config.background.texture,
+                geometry=config.background.geometry,
+                resolution=config.background.resolution,
+                radius=config.background.radius,
+                radius_scale=config.background.radius_scale,
+                rotation_deg=config.background.rotation_deg,
+                opaque=config.background.opaque,
+                params=config.background.params,
+            )
+
         # --- Debug: render from original SAM-3D-Body viewpoint ---
         # When --use-original-camera is also active, skip the standalone debug
         # path; the compositing will happen on orbit frame 0 instead.
@@ -439,6 +460,11 @@ def main(argv: Optional[list] = None) -> int:
         # Render
         if args.verbose:
             print("\n[3/4] Rendering frames...")
+            if config.background.enabled:
+                # Resolving it here surfaces a bad texture path or a backdrop
+                # too small to contain the orbit before any frame is rendered.
+                print(f"  Background: {config.background.texture} -> "
+                      f"{pipeline.renderer.background.describe()}")
 
         rendered = {}
 

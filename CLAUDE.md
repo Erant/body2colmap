@@ -32,6 +32,7 @@ Each module has a single, clear responsibility:
 - `path.py`: Orbit path pattern generation
 - `scene.py`: 3D scene management (mesh, skeleton, lighting)
 - `renderer.py`: Image rendering (mesh, depth, outline, skeleton modes)
+- `background.py`: Environment backdrop (sphere/cube) drawn behind the base layer
 - `splat_scene.py` / `splat_renderer.py`: Gaussian splat storage, and
   rasterization via the external `brush-splat-render` binary
 - `splat_anchor.py`: Place an externally-built splat in world coords
@@ -78,6 +79,7 @@ body2colmap/
 │   ├── path.py                  # Orbit path generators
 │   ├── scene.py                 # Scene management
 │   ├── renderer.py              # Rendering engine
+│   ├── background.py            # Environment backdrop (sphere/cube)
 │   ├── exporter.py              # Export to COLMAP/other formats
 │   ├── utils.py                 # Auto-framing, homography warp, focal length
 │   ├── pipeline.py              # High-level API
@@ -90,6 +92,7 @@ body2colmap/
 │   ├── test_path.py
 │   ├── test_scene.py
 │   ├── test_renderer.py
+│   ├── test_background.py
 │   └── test_exporter.py
 └── examples/                    # Example usage
     └── CLAUDE.md                # Example documentation
@@ -529,6 +532,115 @@ against a bar of 1/255 = 0.0039, with best-fit integer shift (0, 0) everywhere
 is a convention bug however small its MAE. End-to-end, 14 of 16 composited
 `skeleton+splat` frames came out bit-identical and the 2 splat-bearing frames
 differed by MAE 7.3e-5.
+
+## Environment Backdrop (2026-08)
+
+### Overview
+`background.py` draws a static environment — the inside of a sphere or an
+axis-aligned cube — behind the base render, so an orbiting camera sees the
+world sweep past. It exists to break one specific failure: with a blank
+background a video diffusion model reads an orbit as **the subject rotating**,
+and prompt conditioning is not strong enough to correct it. A world-fixed
+backdrop is the cue that says otherwise.
+
+Configurable via the `background:` config section or the `--background-*` CLI
+flags. Off by default; when on, it defaults to a **`grid` cube at 3x the orbit
+radius** (`DEFAULT_RADIUS_SCALE`). Textures are either generated (`grid`,
+`checker`, `gradient`, `blender_sky`) or loaded from disk (equirect image,
+packed cubemap, or a directory of six faces).
+
+### Key Design: A Remap, Not Scene Geometry
+The obvious implementation — a giant inverted sphere added to the pyrender
+scene — breaks `outline` mode. `Renderer.render_mask()` derives mesh coverage
+from `depth > 0`, and a surrounding sphere puts geometry behind **every**
+pixel, so the silhouette becomes the whole frame and the alpha channel with it.
+
+Instead each pixel's ray is intersected with the surface analytically and the
+hit point looked up in the texture, as one `cv2.remap`. That also sidesteps
+pyrender's `zfar`, an unlit-textured-material setup, and pole pinching on a
+tessellated sphere. Intrinsics are fixed across an orbit, so the camera-space
+ray grid is computed once and only rotated per frame.
+
+### Key Design: The Cue Is Azimuthal Structure, Which the Blender Sky Lacks
+A Nishita sky is **azimuthally symmetric apart from its sun**. Rotating the
+camera about Y changes nothing else in frame — which is precisely the motion
+the backdrop is supposed to make legible. As a rotation cue the sun is doing
+all of the work.
+
+This is measured, not asserted: `tests/test_background.py` pins the per-latitude
+standard deviation of each generated texture. With the sun suppressed the sky
+scores 0.00 8-bit levels; `checker` scores 82 and `grid` 27. `blender_sky` is
+shipped, but `grid` and `checker` are what actually carry the signal.
+
+### Key Design: The Default Is a Grid Cube, and the Three Settings Are a Set
+`grid` + `cube` + `radius_scale: 3.0` is the default because it is the
+arrangement that carries the cue most strongly. Compared side by side on one
+orbit against a checker sphere, a grid sphere and a checker cube: `checker`
+scores higher on raw azimuthal variance but its cells are self-similar, so it
+says the view turned without saying how far; a sphere has no corners to pass at
+all. The cube's wall seams and its floor/ceiling split are the landmarks that
+make the rotation legible.
+
+The three settings stand or fall together. `radius_scale` is defaulted rather
+than left at infinity **because a cube at infinity is not a room** — the ray
+intersection drops out, the corners with it, and the render is a plain ruled
+field with no parallax, which is the weak version of the feature. Defaulting
+the texture and the geometry while leaving the radius alone would have shipped
+exactly that.
+
+The cost is that `radius` and `radius_scale`, being mutually exclusive, now
+need a rule for "the caller set only the other one". There is one rule, applied
+at all three entry points: **an explicitly set `radius` supersedes the
+defaulted `radius_scale`**; naming both is still an error. Infinity stays
+reachable — `--background-infinite`, `radius_scale: null` in YAML, or
+`radius_scale=None` in `configure_background()`, which distinguishes an
+explicit `None` from an unmentioned argument via a `_UNSET` sentinel.
+
+### Key Design: Radius Decides Whether Sphere vs Cube Means Anything
+With both radius forms null the surface is at infinity and the lookup depends
+only on ray *direction*. The backdrop then tracks camera rotation but not translation —
+correct for a distant sky, and the point at which sphere and cube differ only
+in how the texture is parameterized, not in what is rendered.
+
+A finite radius intersects the ray properly (forward root of the sphere; the
+nearest slab exit for the box) and gives real parallax between subject and
+backdrop. That is what makes a cube read as a room. `radius_scale` sizes it as
+a multiple of the orbit radius, for auto-framed orbits whose scale is not known
+up front; it must exceed 1.0, and a camera that ends up outside the surface is
+an error rather than a garbage render.
+
+### Key Design: The Backdrop Goes Under the *Base* Layer
+`render_composite()` draws it immediately after the base and before any
+overlay. The skeleton overlay writes RGB without touching alpha, so
+compositing the backdrop after it would blend the skeleton away everywhere
+outside the mesh silhouette.
+
+`opaque` (default true) then forces alpha to 255, which is right for
+conditioning frames. `--background-keep-alpha` fills only RGB and leaves the
+silhouette alpha intact as a training mask.
+
+### Key Design: Oversized Textures Are Area-Averaged Down
+A 4K panorama point-sampled into a 720p frame resamples differently every
+frame, and the shimmer reads as motion to a video model — the exact opposite of
+what a *static* backdrop is for. `_fit_resolution()` downsamples once, to about
+twice the render's own angular resolution (`2·pi·fx` texels around a sphere,
+`(pi/2)·fx` across a cube face).
+
+### Scope
+Conditioning frames only. The backdrop is not exported to COLMAP, adds no
+points to the point cloud, and never enters the depth buffer or the silhouette
+mask. It is also mesh-scene only: a `.ply` input is rasterized by
+`brush-splat-render`, which composites against a flat colour of its own, so
+there is no pyrender base layer to draw behind and the CLI rejects the
+combination.
+
+### Validation
+The load-bearing test renders a texture holding one bright texel and checks
+where it lands. A mirrored, transposed or half-turned lookup all still produce
+a plausible-looking sky; only comparing against `Camera.project()` catches
+them. Measured: sub-pixel agreement (0.75 px tolerance) across four marker
+directions, on both sphere and cube.
+
 
 ## Critical Implementation Details
 
