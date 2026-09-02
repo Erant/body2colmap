@@ -122,6 +122,38 @@ def parse_composite_modes(mode_str: str) -> Tuple[str, List[str]]:
     return base, overlays
 
 
+# pyrender's fragment shader ends on ``pow(color.xyz, vec3(1.0/2.2))``
+# (shaders/mesh.frag), so a vertex colour handed to it comes back lifted: ask
+# for 0.6 and the render is 0.79. Raising the request by the same exponent
+# first cancels it, which is what a style that has to reproduce another
+# renderer's exact bytes needs. The older skeleton style deliberately does NOT
+# do this — its renders have always carried the lift, and a colour-managed
+# version of them would be a different picture, not a fixed one.
+_PYRENDER_OUTPUT_GAMMA = 2.2
+
+
+def _pyrender_rgba(
+    color: Tuple[float, float, float],
+    linearize: bool = False,
+) -> NDArray[np.uint8]:
+    """The opaque vertex colour to hand pyrender for a requested RGB.
+
+    Args:
+        color: Requested RGB, 0-1 range.
+        linearize: Pre-compensate for the shader's output gamma, so the
+            rendered pixel matches ``color`` rather than a lifted version of it.
+
+    Returns:
+        RGBA uint8, shape (4,).
+    """
+    if linearize:
+        color = tuple(max(c, 0.0) ** _PYRENDER_OUTPUT_GAMMA for c in color)
+    return np.array(
+        [int(color[0] * 255), int(color[1] * 255), int(color[2] * 255), 255],
+        dtype=np.uint8,
+    )
+
+
 class Renderer:
     """
     Render images from Scene using pyrender.
@@ -548,6 +580,7 @@ class Renderer:
         use_openpose_colors: bool = True,
         render_bones: bool = True,
         target_format: str = "openpose_body25_hands",
+        style: str = "openpose",
         face_mode: str = None,
         face_landmarks: Optional[NDArray[np.float32]] = None,
         face_max_angle: float = 90.0,
@@ -569,6 +602,14 @@ class Renderer:
             use_openpose_colors: If True, use OpenPose color scheme for bones
             render_bones: If False, only render joints (no bone cylinders)
             target_format: Skeleton format to render ("openpose_body25_hands", "mhr70", etc.)
+            style: Which drawing convention to colour and size the skeleton by:
+                - "openpose": this project's own scheme (default)
+                - "dwpose": the convention Wan/VACE pose maps are drawn in —
+                  dimmed body limbs, undimmed joint dots, hands a quarter as
+                  thick under a full hue sweep, blue hand keypoints. See the
+                  DWPose section of :mod:`body2colmap.skeleton`. Only defined
+                  for target_format="openpose_body25_hands".
+                Ignored when use_openpose_colors is False.
             face_mode: Face landmark rendering mode:
                 - None: No face landmarks (default)
                 - "full": Points + connectivity lines
@@ -631,9 +672,39 @@ class Renderer:
         # Get bone connectivity and colors (needed for both bones and joints)
         bones = skel_module.get_skeleton_bones(skeleton_format)
 
-        # Get bone colors (OpenPose style or single color)
+        # Get bone colors (OpenPose style or single color), and with them any
+        # per-bone width the style asks for and any joint colours it does not
+        # want derived from the bones.
+        bone_radius_scales = {}
+        joint_colors_list = None
+        linearize_colors = False
         if use_openpose_colors:
-            bone_colors = skel_module.get_bone_colors_openpose_style(skeleton_format)
+            if style == "dwpose":
+                if skeleton_format != "openpose_body25_hands":
+                    raise ValueError(
+                        f"style='dwpose' is only defined for "
+                        f"target_format='openpose_body25_hands', got "
+                        f"'{skeleton_format}'"
+                    )
+                # The style picks the connectivity too: DWPose draws no
+                # feet, so the toe and heel bones go and their joints with
+                # them (get_joint_colors_dwpose returns None for those).
+                bones = skel_module.get_skeleton_bones_dwpose()
+                bone_colors = skel_module.get_bone_colors_dwpose()
+                bone_radius_scales = skel_module.get_bone_radius_scales_dwpose()
+                # DWPose's numbers are the bytes in its output PNG, so they
+                # have to survive the shader unchanged.
+                linearize_colors = True
+                joint_colors_list = skel_module.get_joint_colors_dwpose(
+                    len(skeleton_joints)
+                )
+            elif style == "openpose":
+                bone_colors = skel_module.get_bone_colors_openpose_style(skeleton_format)
+            else:
+                raise ValueError(
+                    f"Unknown skeleton style: {style!r}. "
+                    f"Valid options: 'openpose', 'dwpose'"
+                )
         else:
             default_bone_color = bone_color if bone_color is not None else (0.0, 1.0, 0.0)
             bone_colors = {bone: default_bone_color for bone in bones}
@@ -657,7 +728,7 @@ class Renderer:
 
                 # Create cylinder along Z axis
                 cylinder = trimesh.creation.cylinder(
-                    radius=bone_radius,
+                    radius=bone_radius * bone_radius_scales.get((start_idx, end_idx), 1.0),
                     height=length,
                     sections=8
                 )
@@ -698,36 +769,37 @@ class Renderer:
 
                 # Get color for this bone
                 this_bone_color = bone_colors.get((start_idx, end_idx), (0.0, 1.0, 0.0))
-                cylinder.visual.vertex_colors = np.array([
-                    int(this_bone_color[0] * 255),
-                    int(this_bone_color[1] * 255),
-                    int(this_bone_color[2] * 255),
-                    255
-                ], dtype=np.uint8)
+                cylinder.visual.vertex_colors = _pyrender_rgba(
+                    this_bone_color, linearize=linearize_colors
+                )
 
                 mesh = pyrender.Mesh.from_trimesh(cylinder, smooth=False)
                 pr_scene.add(mesh)
 
-        # Compute per-joint colors from bone colors
-        if use_openpose_colors:
-            joint_colors_list = skel_module.get_joint_colors_from_bones(bone_colors, len(skeleton_joints))
-        else:
-            # Use single color for all joints
-            joint_colors_list = [joint_color] * len(skeleton_joints)
+        # Compute per-joint colors from bone colors, unless the style above
+        # already supplied its own table (DWPose colours a dot by its own joint
+        # index, and undimmed, so it cannot be read off the bones).
+        if joint_colors_list is None:
+            if use_openpose_colors:
+                joint_colors_list = skel_module.get_joint_colors_from_bones(bone_colors, len(skeleton_joints))
+            else:
+                # Use single color for all joints
+                joint_colors_list = [joint_color] * len(skeleton_joints)
 
         # Add joints as spheres LAST (render on top of bones)
         for joint_idx, joint_pos in enumerate(skeleton_joints):
+            # Use per-joint color. None is a style saying this joint is not
+            # drawn at all — a dot left behind by a bone the style dropped
+            # would read as a speck of noise, not as a keypoint.
+            this_joint_color = joint_colors_list[joint_idx]
+            if this_joint_color is None:
+                continue
+
             sphere = trimesh.creation.icosphere(subdivisions=2, radius=joint_radius)
             sphere.vertices += joint_pos
-
-            # Use per-joint color
-            this_joint_color = joint_colors_list[joint_idx]
-            sphere.visual.vertex_colors = np.array([
-                int(this_joint_color[0] * 255),
-                int(this_joint_color[1] * 255),
-                int(this_joint_color[2] * 255),
-                255
-            ], dtype=np.uint8)
+            sphere.visual.vertex_colors = _pyrender_rgba(
+                this_joint_color, linearize=linearize_colors
+            )
 
             mesh = pyrender.Mesh.from_trimesh(sphere, smooth=False)
             pr_scene.add(mesh)
@@ -1097,6 +1169,8 @@ class Renderer:
                 bone_radius=skel_opts.get("bone_radius", 0.008),
                 joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
                 bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
+                target_format=skel_opts.get("target_format", "openpose_body25_hands"),
+                style=skel_opts.get("style", "openpose"),
                 face_mode=face_mode,
                 face_landmarks=custom_face_landmarks,
                 face_max_angle=face_max_angle,
@@ -1120,6 +1194,8 @@ class Renderer:
                 bone_radius=skel_opts.get("bone_radius", 0.008),
                 joint_color=skel_opts.get("joint_color", (1.0, 0.0, 0.0)),
                 bone_color=skel_opts.get("bone_color", (0.0, 1.0, 0.0)),
+                target_format=skel_opts.get("target_format", "openpose_body25_hands"),
+                style=skel_opts.get("style", "openpose"),
                 face_mode=face_mode,
                 face_landmarks=custom_face_landmarks,
                 face_max_angle=face_max_angle,
