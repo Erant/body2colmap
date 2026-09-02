@@ -186,6 +186,10 @@ OPENPOSE_LEFT_HAND_BONES = [
     (43, 44),
 ]
 
+# Where the hands start: joints 0-24 are the body, 25-44 the left hand and
+# 45-64 the right.
+OPENPOSE_BODY25_HANDS_N_BODY_JOINTS = 25
+
 # Combine all bones for full skeleton
 OPENPOSE_BODY25_HANDS_ALL_BONES = (
     OPENPOSE_BODY25_HANDS_BONES +
@@ -763,3 +767,250 @@ def get_framing_y_threshold(joints: NDArray[np.float32], preset: str) -> Optiona
 
     # Should not reach here due to earlier validation
     return None
+
+
+# =============================================================================
+# DWPose / ControlNet drawing convention
+# =============================================================================
+#
+# Wan 2.2 VACE conditions on pose maps drawn by DWPose. Three implementations
+# share the same `draw_bodypose` / `draw_handpose` / `draw_facepose` — VACE's
+# own `vace/annotators/dwpose/util.py`, the one the ComfyUI ecosystem feeds it
+# (`comfyui_controlnet_aux`, inherited from ControlNet's
+# `annotator/openpose/util.py`), and MimicMotion's `mimicmotion/dwpose/util.py`
+# — so the numbers below are all three's:
+#
+#   * body = OpenPose BODY_18, and only the FIRST 17 entries of `limbSeq` are
+#     filled (`for i in range(17)`), so the two ear->shoulder limbs are never
+#     drawn. There is no MidHip keypoint: the torso is neck->RHip and
+#     neck->LHip directly. Feet are detected (`candidate[:, 18:24]`) and then
+#     never drawn at all.
+#   * every body limb is dimmed to 60% value before the joint dots go down, so
+#     the sticks read dark and only the dots are fully saturated.
+#   * `stickwidth = 4` is an ellipse semi-axis, so a limb is 8 px across in
+#     the canvas it is drawn in; joint dots are `radius=4`, i.e. exactly as
+#     wide as a limb. How wide that is once the map reaches the model depends
+#     on the canvas, and the implementations disagree: VACE draws at
+#     `RESIZE_SIZE = 1024` on the shorter side (~7 px at a 720x1280 frame),
+#     MimicMotion at `ref_w = 2160` (~2.7 px), controlnet_aux at the input
+#     resolution before resizing to its `detect_resolution`. b2crunner's
+#     `_SKELETON_RADII` is calibrated to VACE's, since VACE is the model.
+#   * hands are 20 `cv2.line`s at `thickness=2` — a quarter of a limb's width —
+#     coloured by a full hue sweep, `hsv_to_rgb([ie / 20, 1, 1])`, and NOT
+#     dimmed, because `draw_handpose` runs after the 0.6 pass. Every hand
+#     keypoint is a blue dot at the body's dot radius, the wrist included:
+#     hand keypoint 0 IS the wrist, and it lands on top of the body's own.
+#     Hands are normal in a pose map, whatever VACE's own configs do with
+#     them: MimicMotion's `draw_pose` draws body, hands and face
+#     unconditionally, and controlnet_aux's `draw_poses` defaults
+#     `draw_hand=True`. It is only VACE's two annotator configs that turn
+#     them off (`video_pose_anno` -> PoseBodyFaceVideoAnnotator, hands off;
+#     `video_pose_body_anno` -> body alone).
+#
+# The one thing the two implementations disagree on is channel order. VACE's
+# `PoseAnnotator.process` flips its canvas on the way out
+# (`detected_map_body[..., ::-1]`) and ControlNet does not, so VACE's reference
+# annotator emits this palette with R and B swapped relative to every pose map
+# fed to the model through ComfyUI. The tables below follow ControlNet — the
+# convention the community's control videos are actually drawn in.
+
+# `colors`, in the order draw_bodypose indexes it (RGB, 0-1).
+DWPOSE_BODY18_COLORS = [
+    (1.0, 0.0, 0.0),        # 0
+    (1.0, 0.333, 0.0),      # 1
+    (1.0, 0.667, 0.0),      # 2
+    (1.0, 1.0, 0.0),        # 3
+    (0.667, 1.0, 0.0),      # 4
+    (0.333, 1.0, 0.0),      # 5
+    (0.0, 1.0, 0.0),        # 6
+    (0.0, 1.0, 0.333),      # 7
+    (0.0, 1.0, 0.667),      # 8
+    (0.0, 1.0, 1.0),        # 9
+    (0.0, 0.667, 1.0),      # 10
+    (0.0, 0.333, 1.0),      # 11
+    (0.0, 0.0, 1.0),        # 12
+    (0.333, 0.0, 1.0),      # 13
+    (0.667, 0.0, 1.0),      # 14
+    (1.0, 0.0, 1.0),        # 15
+    (1.0, 0.0, 0.667),      # 16
+    (1.0, 0.0, 0.333),      # 17
+]
+
+# What draw_bodypose multiplies every limb by before drawing the joint dots.
+DWPOSE_LIMB_DIM = 0.6
+
+# draw_handpose's `thickness=2` against a limb's 2 * stickwidth = 8.
+DWPOSE_HAND_BONE_SCALE = 0.25
+
+# Every hand keypoint, drawn over whatever the body pass left there.
+DWPOSE_HAND_JOINT_COLOR = (0.0, 0.0, 1.0)
+
+# `limbSeq[:17]`, the limbs draw_bodypose actually fills, translated from
+# BODY_18 joint indices to this module's BODY_25 ones. Position in this list is
+# the index into DWPOSE_BODY18_COLORS, which is how draw_bodypose colours them.
+DWPOSE_LIMB_SEQ_BODY25 = [
+    (1, 2),    # 0  neck -> RShoulder
+    (1, 5),    # 1  neck -> LShoulder
+    (2, 3),    # 2  RShoulder -> RElbow
+    (3, 4),    # 3  RElbow -> RWrist
+    (5, 6),    # 4  LShoulder -> LElbow
+    (6, 7),    # 5  LElbow -> LWrist
+    (1, 9),    # 6  neck -> RHip
+    (9, 10),   # 7  RHip -> RKnee
+    (10, 11),  # 8  RKnee -> RAnkle
+    (1, 12),   # 9  neck -> LHip
+    (12, 13),  # 10 LHip -> LKnee
+    (13, 14),  # 11 LKnee -> LAnkle
+    (1, 0),    # 12 neck -> nose
+    (0, 15),   # 13 nose -> REye
+    (15, 17),  # 14 REye -> REar
+    (0, 16),   # 15 nose -> LEye
+    (16, 18),  # 16 LEye -> LEar
+]
+
+# BODY_18 joint index -> BODY_25 joint index. draw_bodypose gives joint i the
+# dot colour DWPOSE_BODY18_COLORS[i], so this is also the joint colour table.
+DWPOSE_BODY18_TO_BODY25 = [
+    0, 1, 2, 3, 4, 5, 6, 7,      # nose, neck, R arm, L arm
+    9, 10, 11,                   # RHip, RKnee, RAnkle  (BODY_25 skips MidHip)
+    12, 13, 14,                  # LHip, LKnee, LAnkle
+    15, 16, 17, 18,              # REye, LEye, REar, LEar
+]
+
+# BODY_25 joints that this style draws no dot for, because DWPose has no such
+# keypoint. With DWPOSE_LIMB_SEQ_BODY25 as the connectivity, no bone reaches
+# any of them either — they are listed so the renderer can skip the sphere it
+# would otherwise put at every joint in the array, which would leave a speck
+# with nothing attached to it.
+#
+#   * the feet: DWPose DETECTS them (`candidate[:, 18:24]`, extracted as
+#     `foot`) and then every implementation throws them away, because
+#     draw_bodypose only ever walks `limbSeq[:17]` and that reaches no foot
+#     keypoint.
+#   * MidHip: BODY_25 routes the torso through it, DWPose runs neck->RHip and
+#     neck->LHip directly. Both of those cross the torso and overlap, which is
+#     what a DWPose torso looks like; a Y meeting at the pelvis is not.
+#
+# So neither is a stylistic difference from a VACE pose map. They are
+# structures that have never been in one.
+DWPOSE_UNDRAWN_BODY25_JOINTS = frozenset({
+    8,           # MidHip
+    19, 20, 21,  # LBigToe, LSmallToe, LHeel
+    22, 23, 24,  # RBigToe, RSmallToe, RHeel
+})
+
+
+def _dwpose_hand_bone_colors() -> Dict[Tuple[int, int], Tuple[float, float, float]]:
+    """Colour every hand bone the way ``draw_handpose`` colours its edges.
+
+    Its ``edges`` list runs wrist->thumb, wrist->index, ... pinky, four bones
+    per finger, and hands the i'th one ``hsv_to_rgb([i / 20, 1, 1])``.
+    :data:`OPENPOSE_RIGHT_HAND_BONES` and :data:`OPENPOSE_LEFT_HAND_BONES` are
+    already in exactly that order, so position in the list is ``i``. Both hands
+    get the same sweep — ``draw_handpose`` does not distinguish them.
+
+    Returns:
+        Dictionary mapping hand bones to RGB colours (0-1 range).
+    """
+    import colorsys
+
+    colors = {}
+    for bones in (OPENPOSE_RIGHT_HAND_BONES, OPENPOSE_LEFT_HAND_BONES):
+        n = len(bones)
+        for i, bone in enumerate(bones):
+            colors[bone] = colorsys.hsv_to_rgb(i / float(n), 1.0, 1.0)
+    return colors
+
+
+def get_skeleton_bones_dwpose() -> List[Tuple[int, int]]:
+    """Get the bones the DWPose style draws, in BODY_25 joint indices.
+
+    Exactly what ``draw_bodypose`` fills and ``draw_handpose`` strokes: the 17
+    body limbs of :data:`DWPOSE_LIMB_SEQ_BODY25`, then 20 bones per hand. It
+    is NOT a subset of :data:`OPENPOSE_BODY25_HANDS_ALL_BONES` — that routes
+    the torso through MidHip, and this runs neck->hip directly — so it is
+    built here rather than filtered.
+
+    Returns:
+        List of bone connections as (start_joint_idx, end_joint_idx) tuples
+    """
+    return (
+        list(DWPOSE_LIMB_SEQ_BODY25)
+        + list(OPENPOSE_RIGHT_HAND_BONES)
+        + list(OPENPOSE_LEFT_HAND_BONES)
+    )
+
+
+def get_bone_colors_dwpose() -> Dict[Tuple[int, int], Tuple[float, float, float]]:
+    """Get DWPose bone colours for the ``openpose_body25_hands`` skeleton.
+
+    Body limbs arrive already dimmed by :data:`DWPOSE_LIMB_DIM`, which is what
+    ``draw_bodypose`` does to them; hand bones do not, because ``draw_handpose``
+    runs after that pass. See the module section above for the convention.
+
+    Returns:
+        Dictionary mapping bones to RGB colours (0-1 range).
+    """
+    # Keyed on the bone tuples get_skeleton_bones_dwpose() emits, because the
+    # renderer looks a colour up by the exact (start, end) pair it is drawing.
+    colors = {
+        bone: tuple(c * DWPOSE_LIMB_DIM for c in DWPOSE_BODY18_COLORS[limb_index])
+        for limb_index, bone in enumerate(DWPOSE_LIMB_SEQ_BODY25)
+    }
+    colors.update(_dwpose_hand_bone_colors())
+    return colors
+
+
+def get_bone_radius_scales_dwpose() -> Dict[Tuple[int, int], float]:
+    """Get the per-bone radius multipliers of the DWPose convention.
+
+    Only hands differ: ``draw_handpose`` strokes them at ``thickness=2`` where
+    a body limb is ``2 * stickwidth = 8`` across.
+
+    Returns:
+        Dictionary mapping bones to a multiplier on the base bone radius.
+        Bones absent from it are drawn at the base radius.
+    """
+    return {
+        bone: DWPOSE_HAND_BONE_SCALE
+        for bone in OPENPOSE_RIGHT_HAND_BONES + OPENPOSE_LEFT_HAND_BONES
+    }
+
+
+def get_joint_colors_dwpose(
+    num_joints: int,
+) -> List[Optional[Tuple[float, float, float]]]:
+    """Get DWPose joint-dot colours for the ``openpose_body25_hands`` skeleton.
+
+    ``draw_bodypose`` gives BODY_18 joint ``i`` the colour
+    ``DWPOSE_BODY18_COLORS[i]`` at full value — undimmed, which is what makes
+    the dots read against their own limbs. ``draw_handpose`` then paints every
+    hand keypoint blue on top, and since a hand's keypoint 0 is the wrist, the
+    two wrists end up blue as well.
+
+    Args:
+        num_joints: Total number of joints in the skeleton
+
+    Returns:
+        List of RGB colours (0-1 range), one per joint. ``None`` where DWPose
+        draws no dot at all — see :data:`DWPOSE_UNDRAWN_BODY25_JOINTS`.
+    """
+    joint_colors = [(1.0, 1.0, 1.0)] * num_joints
+
+    def assign(index, color):
+        if index < num_joints:
+            joint_colors[index] = color
+
+    for body18_index, body25_index in enumerate(DWPOSE_BODY18_TO_BODY25):
+        assign(body25_index, DWPOSE_BODY18_COLORS[body18_index])
+
+    # The hands, wrists included — draw_handpose goes down last.
+    for index in range(OPENPOSE_BODY25_HANDS_N_BODY_JOINTS, num_joints):
+        assign(index, DWPOSE_HAND_JOINT_COLOR)
+    for wrist in (4, 7):
+        assign(wrist, DWPOSE_HAND_JOINT_COLOR)
+
+    for index in DWPOSE_UNDRAWN_BODY25_JOINTS:
+        assign(index, None)
+
+    return joint_colors
