@@ -11,7 +11,7 @@ This is the main API for users of the library.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Dict, Any, Optional, Sequence, Tuple, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -22,6 +22,15 @@ from .path import (
     OrbitPath,
     compute_helical_anchor_params,
     compute_original_camera_orbit_params,
+)
+from .fade import (
+    DEFAULT_DETAIL,
+    DEFAULT_FALLOFF,
+    DEFAULT_MARGIN,
+    DEFAULT_PROFILE,
+    DEFAULT_RATE,
+    Ellipsoid,
+    SubjectFade,
 )
 from .renderer import Renderer, parse_composite_modes
 from .exporter import ColmapExporter, ImageExporter
@@ -106,6 +115,12 @@ class OrbitPipeline:
         # from the orbit, which set_orbit_params() has not run yet.
         self._background_spec: Optional[Dict[str, Any]] = None
         self._background = None
+
+        # Subject fade over the backdrop (see configure_background_fade).
+        # Stored as a spec for the same reason, plus one of its own: the
+        # ellipsoid fit is a solver run, and it should not happen for a
+        # pipeline that never renders.
+        self._fade_spec: Optional[Dict[str, Any]] = None
 
         # Set by auto_orient(); the splat overlay is incompatible with it
         self._auto_oriented = False
@@ -306,6 +321,109 @@ class OrbitPipeline:
         self._background = None
         return self
 
+    def configure_background_fade(
+        self,
+        profile: str = DEFAULT_PROFILE,
+        falloff: float = DEFAULT_FALLOFF,
+        rate: float = DEFAULT_RATE,
+        margin: float = DEFAULT_MARGIN,
+        target: str = "local",
+        color: Optional[Sequence[float]] = None,
+        detail: int = DEFAULT_DETAIL,
+    ) -> "OrbitPipeline":
+        """
+        Fade the backdrop out around the subject.
+
+        Exists because the backdrop that fixes one failure causes another. In
+        ``outline`` modes a grid running right up to the silhouette reads to a
+        video diffusion model as a hard occlusion boundary: it will not paint
+        outside it, so bulky clothing and hair get squashed back onto the
+        outline of the bare mesh. Clearing the backdrop in a shell around the
+        subject keeps the rotation cue in the far field and leaves the model
+        room to expand into.
+
+        The shell is the projection of an ellipsoid fitted to the mesh rather
+        than of any one frame's outline, so it covers the silhouette from
+        every viewpoint on the orbit. See :mod:`body2colmap.fade`.
+
+        Only meaningful alongside :meth:`configure_background`; with no
+        backdrop there is nothing to fade, and the setting is ignored.
+
+        Args:
+            profile: Decay profile — how the backdrop returns as you move away
+                from the subject. A key of
+                :data:`~body2colmap.fade.DECAY_PROFILES`.
+            falloff: Width of the fade band, as a multiple of the subject's
+                own radius. Scale-free, so it holds up across an auto-framed
+                orbit.
+            rate: Shape constant for the ``exponential``, ``gaussian`` and
+                ``inverse_square`` profiles; larger is tighter.
+            margin: Inflate the fitted ellipsoid before the fade is measured.
+                Raise it when the mesh is a bare body and the subject you want
+                generated is not.
+            target: ``"local"`` averages the backdrop's own detail away, so
+                the lines go but the wall/floor/ceiling tone carries through
+                with no visible patch; ``"color"`` uses one flat colour.
+            color: Flat colour for ``target="color"``, RGB floats in [0, 1].
+                None uses the texture's mean colour.
+            detail: Long-side resolution the backdrop is averaged down to for
+                ``target="local"``.
+
+        Returns:
+            self (for method chaining)
+
+        Raises:
+            ValueError: On an unknown profile or target, or a non-positive
+                falloff, rate, margin or detail.
+            RuntimeError: On a splat scene, which has no mesh to fit an
+                ellipsoid to.
+        """
+        if self._is_splat_scene():
+            raise RuntimeError(
+                "The background fade needs a mesh to fit its ellipsoid to, "
+                "and a splat scene has none. It is only reachable alongside "
+                "a backdrop, which splat scenes do not support either."
+            )
+
+        if margin <= 0.0:
+            raise ValueError(f"Fade margin must be > 0, got {margin}")
+
+        # A throwaway fade around a unit box, purely to run SubjectFade's own
+        # validation now: the real one is not built until the first render, and
+        # a bad profile name should be reported against the call that named it.
+        SubjectFade(
+            Ellipsoid.from_bounds(np.zeros(3), np.ones(3)),
+            profile=profile,
+            falloff=falloff,
+            rate=rate,
+            target=target,
+            color=color,
+            detail=detail,
+        )
+
+        self._fade_spec = {
+            "profile": profile,
+            "falloff": falloff,
+            "rate": rate,
+            "margin": margin,
+            "target": target,
+            "color": None if color is None else tuple(float(c) for c in color),
+            "detail": detail,
+        }
+        self._background = None
+        return self
+
+    def clear_background_fade(self) -> "OrbitPipeline":
+        """
+        Stop fading the backdrop around the subject.
+
+        Returns:
+            self (for method chaining)
+        """
+        self._fade_spec = None
+        self._background = None
+        return self
+
     def clear_background(self) -> "OrbitPipeline":
         """
         Remove the environment backdrop.
@@ -316,6 +434,26 @@ class OrbitPipeline:
         self._background_spec = None
         self._background = None
         return self
+
+    def _resolve_fade(self) -> Optional[SubjectFade]:
+        """
+        Fit the subject ellipsoid and build the fade, once.
+
+        Returns:
+            A :class:`~body2colmap.fade.SubjectFade`, or None if no fade is
+            configured.
+        """
+        if self._fade_spec is None:
+            return None
+
+        spec = dict(self._fade_spec)
+        margin = spec.pop("margin")
+        # Fitted on the mesh vertices, not on the bounding box: the box
+        # ellipsoid has to clear the box's corners, which pushes every
+        # semi-axis out by sqrt(3) and would clear far more of the backdrop
+        # than the subject warrants.
+        ellipsoid = Ellipsoid.fit(self.scene.vertices, margin=margin)
+        return SubjectFade(ellipsoid, **spec)
 
     def _resolve_background(self):
         """
@@ -360,7 +498,7 @@ class OrbitPipeline:
             radius = float(radius_scale) * float(self.orbit_params["radius"])
 
         self._background = Background.create(
-            center=center, radius=radius, **spec
+            center=center, radius=radius, fade=self._resolve_fade(), **spec
         )
         return self._background
 

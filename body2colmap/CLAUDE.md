@@ -24,7 +24,9 @@ splat_renderer.py  (depends on: camera, splat_scene + the
     ↓
 splat_anchor.py  (depends on: camera, splat_scene)
     ↓
-background.py  (depends on: camera, coordinates)
+fade.py  (depends on: camera)
+    ↓
+background.py  (depends on: camera, coordinates, fade)
     ↓
 renderer.py  (depends on: scene, camera, face, skeleton, background)
     ↓
@@ -157,6 +159,22 @@ reads as the camera moving rather than the subject spinning
 
 **Testing priority**: HIGH - every convention here is silently plausible when
 wrong (see the marker test)
+
+#### fade.py
+**Purpose**: Fade the backdrop out around the subject, so an `outline` frame
+does not present the silhouette as a hard occlusion boundary
+
+**Key components**:
+- `Ellipsoid`: stored as the linear map to the unit sphere, not as
+  (axes, rotation). That is what makes the per-pixel test two lines
+  - `Ellipsoid.fit()`: minimum-volume enclosing ellipsoid (Khachiyan), with
+    enclosure imposed exactly afterwards against the *full* point set
+  - `ray_distance()`: the one scalar the whole feature is built on
+- `SubjectFade`: profile + falloff + target, applied to a finished backdrop
+- `DECAY_PROFILES`: the seven decay shapes, all `w(0) = 1` and monotone
+
+**Testing priority**: HIGH - a fade that merely looks right on one frame can
+still let the grid run into the silhouette halfway round the orbit
 
 #### exporter.py
 **Purpose**: Export to COLMAP and other formats
@@ -945,6 +963,88 @@ flat colour of its own; there is no pyrender base layer to draw behind.
 `cli.py` raises rather than ignoring `--background`, and `pipeline.renderer`
 only assigns the backdrop for a mesh scene.
 
+
+## Backdrop Fade (2026-09)
+
+### The failure it fixes is downstream of the one the backdrop fixed
+The backdrop exists so a video model reads an orbit as camera motion. But in
+`outline` modes it also draws a grid right up to the silhouette, and VACE reads
+that as a hard occlusion boundary: it will not paint outside the outline, so
+bulky clothing and hair come out squashed onto the shape of the bare mesh. The
+fade clears a shell around the subject, keeping the rotation cue in the far
+field and leaving structure-free room next to the silhouette.
+
+So this is not a cosmetic softening. Both settings are load-bearing in
+opposite directions, which is why `falloff` is the knob most worth sweeping.
+
+### The shell is a fitted ellipsoid, not a dilated outline
+The obvious implementation — dilate the silhouette mask per frame — fails three
+ways at once, and `Ellipsoid` avoids all three:
+
+1. **It would swim.** A screen-space dilation of a per-frame mask is a
+   different world-space region every frame. A fitted ellipsoid is one fixed
+   object the camera moves around, so the clear zone is temporally consistent
+   for free — which is the whole point for a video model.
+2. **It has no depth.** The mask says nothing about how far the clear zone
+   should extend *behind* the subject, so parallax against a finite cube would
+   be wrong.
+3. **It costs a distance transform per frame.** The ellipsoid test is a
+   closest-approach computation in the space where the ellipsoid is the unit
+   sphere — one `einsum` over the ray grid.
+
+The enclosure property is what makes it safe: an ellipsoid containing the mesh
+contains its silhouette from *every* viewpoint, so the clear zone can never
+fall inside the outline on some frame. `TestClearZoneCoversTheSilhouette` pins
+exactly that, over a full orbit.
+
+### `fit()` guarantees enclosure independently of the solver
+Khachiyan is iterative and is given a loose tolerance and an iteration cap, so
+its answer is a good *shape*, not a proof. Enclosure is then imposed by
+scaling the result until the outermost point of the **full** vertex set sits on
+the surface.
+
+That is what lets the fit run on a stride of the vertices (`max_points`,
+default 4000) with no risk at all: the check is O(N) and runs on everything.
+`test_encloses_every_point_even_when_subsampled` drives `max_points` down to 20
+so the solver's answer is useless and only the guarantee is left.
+
+### `falloff` is in subject radii, and that is the point
+`ray_distance()` returns the closest approach *in units of the ellipsoid
+radius in that direction*, so `u = (m - 1) / falloff` is dimensionless. One
+`falloff` therefore works at any subject size and any orbit radius — which
+matters because auto-framing means neither is known when the value is chosen.
+
+A consequence worth knowing: the band is anisotropic in world units. It is as
+wide as the subject is in each direction, so a standing figure gets a tall
+clear zone and a narrow one. That is usually what you want; it is also why
+`falloff = 1.0` is not as aggressive as it sounds (the clear zone is the
+ellipsoid at 2x, and the subject only fills ~0.8 of frame).
+
+### The default target is local tone, not a flat colour
+Fading to one flat colour is easier to reason about but leaves a visible patch
+wherever the clear zone crosses a cube's floor/wall seam — a soft blob is still
+a shape, and shapes are what this feature exists to remove.
+`target="local"` instead area-averages the backdrop down to ~24 px on its long
+side and back up: below the texture's own frequency, so the lines vanish while
+the low-frequency shading survives exactly. The clear zone then has no edge
+against its surroundings at all.
+
+`target="color"` is kept because it is the honest control, and because a
+deliberately chosen colour (matching `render.bg_color`, say) is a legitimate
+experiment.
+
+### The fade runs inside `Background.render()`, so it cannot touch the subject
+`composite()` lays the base layer over an already-faded backdrop, so an opaque
+subject pixel is untouched by construction — there is no ordering to get wrong
+and no mask to intersect. The corollary is that `render()` now needs the
+*unrotated* world rays as well as the surface vectors: the ellipsoid lives in
+world space, `_surface_vectors()` rotates into the environment's frame. Hence
+the local `dirs` rather than a nested call.
+
+### `_texture_mean()` weights an equirect by solid angle
+An unweighted mean over an equirectangular image is dominated by the poles,
+which it oversamples enormously. Since the value is a *fallback background
+colour*, getting it wrong shows up directly as a patch of the wrong tone.
 
 ## Next Steps
 

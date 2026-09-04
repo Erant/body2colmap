@@ -42,6 +42,38 @@ All notable changes to body2colmap will be documented in this file.
     `--background-keep-alpha`
   - API: `OrbitPipeline.configure_background()`, `clear_background()`, and the
     `body2colmap.background` module
+- **Backdrop fade around the subject** (`--background-fade`): fades the backdrop toward
+  a flat tone in a shell around the subject, so an `outline` frame keeps its rotation
+  cue in the far field without presenting the silhouette as a hard boundary. Off by
+  default.
+  - **Why**: the backdrop that fixes one failure causes another. With a grid running
+    right up to the silhouette, VACE reads the outline as a hard occlusion boundary and
+    refuses to paint past it — bulky clothing and hair get squashed back onto the shape
+    of the bare mesh. A structure-free zone next to the silhouette gives it room
+  - The clear zone is the projection of a **minimum-volume ellipsoid fitted to the mesh
+    vertices**, not of any one frame's outline: an ellipsoid enclosing the mesh encloses
+    its silhouette from every viewpoint, so the zone can never fall inside the outline
+    partway round the orbit. Enclosure is imposed exactly after the solve, so the fit
+    can run on a subsample without risking a clipped vertex
+  - Seven decay profiles: `step` (the hard-edged control), `linear`, `smoothstep`
+    (default), `cosine`, `exponential`, `gaussian`, `inverse_square`. The first four
+    reach zero at the band edge; the last three have tails and take
+    `--background-fade-rate`
+  - `--background-fade-falloff` is a **multiple of the subject's own radius**, not a
+    pixel count, so one setting holds across an auto-framed orbit
+  - Fades to the backdrop's **local tone** by default — averaged below the texture's own
+    frequency, so the lines go but the wall/floor/ceiling shading carries through and
+    the clear zone has no edge against its surroundings.
+    `--background-fade-target color` uses one flat colour instead
+  - `--background-fade-margin` inflates the fitted ellipsoid, for when the mesh is a
+    bare body and the subject to be generated is not
+  - Needs a backdrop; `--background-fade` on its own is rejected rather than ignored
+  - Config: the `background.fade:` section. CLI: `--background-fade`,
+    `--no-background-fade`, `--background-fade-falloff`, `--background-fade-rate`,
+    `--background-fade-margin`, `--background-fade-target`, `--background-fade-color`,
+    `--background-fade-detail`
+  - API: `OrbitPipeline.configure_background_fade()`, `clear_background_fade()`, and the
+    `body2colmap.fade` module (`Ellipsoid`, `SubjectFade`, `DECAY_PROFILES`)
 - `orbit_params['target']`: the orbit's look-at point, so a finite backdrop can be
   centred on the subject rather than on the world origin
 - **Confidence gating for splat renders** (`--splat-confidence`): gates every pixel by

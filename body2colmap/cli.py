@@ -131,6 +131,22 @@ def main(argv: Optional[list] = None) -> int:
                 opaque=config.background.opaque,
                 params=config.background.params,
             )
+            if config.background.fade.enabled:
+                pipeline.configure_background_fade(
+                    profile=config.background.fade.profile,
+                    falloff=config.background.fade.falloff,
+                    rate=config.background.fade.rate,
+                    margin=config.background.fade.margin,
+                    target=config.background.fade.target,
+                    color=config.background.fade.color,
+                    detail=config.background.fade.detail,
+                )
+        elif config.background.fade.enabled:
+            raise ValueError(
+                "--background-fade fades the backdrop out around the subject, "
+                "but no backdrop is enabled. Add --background (e.g. "
+                "--background grid), or drop the fade."
+            )
 
         # --- Debug: render from original SAM-3D-Body viewpoint ---
         # When --use-original-camera is also active, skip the standalone debug

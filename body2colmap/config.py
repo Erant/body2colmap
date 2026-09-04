@@ -14,6 +14,15 @@ from pathlib import Path
 import argparse
 
 from .background import DEFAULT_RADIUS_SCALE
+from .fade import (
+    DECAY_PROFILES,
+    DEFAULT_DETAIL,
+    DEFAULT_FALLOFF,
+    DEFAULT_MARGIN,
+    DEFAULT_PROFILE,
+    DEFAULT_RATE,
+    FADE_TARGETS,
+)
 from .face import EYE_STYLES
 
 
@@ -51,6 +60,100 @@ def _validate_background_geometry(value: str) -> str:
             f"Invalid background geometry {value!r}. Use 'sphere' or 'cube'."
         )
     return value
+
+
+@dataclass
+class BackgroundFadeConfig:
+    """
+    Fade the backdrop out around the subject.
+
+    Exists because the backdrop that fixes one failure causes another. In
+    ``outline`` modes a grid that runs right up to the silhouette reads to a
+    video model as a hard occlusion boundary, and it will not paint outside
+    it -- bulky clothing and hair get squashed back onto the outline of the
+    bare mesh. Clearing the backdrop in a shell around the subject keeps the
+    rotation cue in the far field and gives the model room to expand.
+
+    The shell is the projection of an ellipsoid fitted to the mesh, so it
+    encloses the silhouette from every viewpoint on the orbit rather than
+    tracking one frame's outline. See :mod:`body2colmap.fade`.
+    """
+    enabled: bool = False
+
+    #: Decay profile: how the backdrop returns as you move away from the
+    #: subject. See :data:`~body2colmap.fade.DECAY_PROFILES`.
+    profile: str = DEFAULT_PROFILE
+
+    #: Width of the fade band, as a multiple of the subject's own radius.
+    #: Scale-free, so it holds up across an auto-framed orbit.
+    falloff: float = DEFAULT_FALLOFF
+
+    #: Shape constant for `exponential`, `gaussian` and `inverse_square`.
+    #: Larger = tighter. Ignored by the other profiles.
+    rate: float = DEFAULT_RATE
+
+    #: Inflate the fitted ellipsoid before the fade is measured. Raise it
+    #: when the mesh is a bare body and the target subject is not.
+    margin: float = DEFAULT_MARGIN
+
+    #: What the backdrop fades to. "local" averages the backdrop's own detail
+    #: away, so the lines go but the wall/floor/ceiling tone carries through
+    #: with no visible patch. "color" uses one flat colour.
+    target: str = "local"
+
+    #: Flat colour for target="color", RGB 0-1. null = the texture's mean.
+    color: Optional[Tuple[float, float, float]] = None
+
+    #: Long-side resolution the backdrop is averaged down to for
+    #: target="local". Wants to be well below the texture's own frequency.
+    detail: int = DEFAULT_DETAIL
+
+    def validate(self) -> None:
+        """
+        Check the settings hang together.
+
+        Raises:
+            ValueError: On an unknown profile or target, a non-positive
+                falloff, rate, margin or detail, or a malformed colour.
+        """
+        if self.profile not in DECAY_PROFILES:
+            raise ValueError(
+                f"Invalid background.fade.profile {self.profile!r}. "
+                f"Choose from: {', '.join(sorted(DECAY_PROFILES))}"
+            )
+        if self.target not in FADE_TARGETS:
+            raise ValueError(
+                f"Invalid background.fade.target {self.target!r}. Use "
+                f"{' or '.join(repr(t) for t in FADE_TARGETS)}."
+            )
+        if self.falloff <= 0.0:
+            raise ValueError(
+                f"background.fade.falloff must be > 0, got {self.falloff}. "
+                f"Use profile: step for a hard-edged clear zone."
+            )
+        if self.rate <= 0.0:
+            raise ValueError(
+                f"background.fade.rate must be > 0, got {self.rate}"
+            )
+        if self.margin <= 0.0:
+            raise ValueError(
+                f"background.fade.margin must be > 0, got {self.margin}"
+            )
+        if self.detail < 1:
+            raise ValueError(
+                f"background.fade.detail must be >= 1 pixel, got {self.detail}"
+            )
+        if self.color is not None:
+            if len(self.color) != 3:
+                raise ValueError(
+                    f"background.fade.color must be 3 RGB floats, got "
+                    f"{self.color}"
+                )
+            if any(not 0.0 <= c <= 1.0 for c in self.color):
+                raise ValueError(
+                    f"background.fade.color components must be in [0, 1], "
+                    f"got {self.color}"
+                )
 
 
 @dataclass
@@ -116,6 +219,10 @@ class BackgroundConfig:
     #: Rejected when `texture` names a file.
     params: Dict[str, Any] = field(default_factory=dict)
 
+    #: Fade the backdrop out around the subject, so an outline frame does not
+    #: read as a hard occlusion boundary.
+    fade: BackgroundFadeConfig = field(default_factory=BackgroundFadeConfig)
+
     def validate(self) -> None:
         """
         Check the settings hang together.
@@ -151,6 +258,7 @@ class BackgroundConfig:
             raise ValueError(
                 f"background.resolution must be >= 8, got {self.resolution}"
             )
+        self.fade.validate()
 
 
 @dataclass
@@ -611,6 +719,34 @@ class Config:
             config.background.rotation_deg = args.background_rotation
         if args.background_keep_alpha:
             config.background.opaque = False
+        if args.background_fade is not None:
+            config.background.fade.enabled = True
+            config.background.fade.profile = args.background_fade
+        if args.no_background_fade:
+            config.background.fade.enabled = False
+        if args.background_fade_falloff is not None:
+            config.background.fade.falloff = args.background_fade_falloff
+        if args.background_fade_rate is not None:
+            config.background.fade.rate = args.background_fade_rate
+        if args.background_fade_margin is not None:
+            config.background.fade.margin = args.background_fade_margin
+        if args.background_fade_target is not None:
+            config.background.fade.target = args.background_fade_target
+        if args.background_fade_detail is not None:
+            config.background.fade.detail = args.background_fade_detail
+        if args.background_fade_color:
+            try:
+                r, g, b = [float(x) for x in args.background_fade_color.split(',')]
+            except ValueError:
+                raise ValueError(
+                    f"Invalid --background-fade-color format: "
+                    f"{args.background_fade_color}. Use R,G,B (e.g., 0.5,0.5,0.5)"
+                )
+            config.background.fade.color = (r, g, b)
+            # Naming a colour is only meaningful against the flat target, and
+            # silently ignoring it would look like the colour did not work.
+            if args.background_fade_target is None:
+                config.background.fade.target = "color"
         config.background.validate()
 
         # Export overrides
@@ -679,6 +815,19 @@ class Config:
                 'radius_scale', DEFAULT_RADIUS_SCALE
             )
 
+        fade_data = background_data.get('fade') or {}
+        fade_color = fade_data.get('color')
+        background_fade = BackgroundFadeConfig(
+            enabled=fade_data.get('enabled', False),
+            profile=fade_data.get('profile', DEFAULT_PROFILE),
+            falloff=fade_data.get('falloff', DEFAULT_FALLOFF),
+            rate=fade_data.get('rate', DEFAULT_RATE),
+            margin=fade_data.get('margin', DEFAULT_MARGIN),
+            target=fade_data.get('target', 'local'),
+            color=None if fade_color is None else tuple(fade_color),
+            detail=fade_data.get('detail', DEFAULT_DETAIL),
+        )
+
         background = BackgroundConfig(
             enabled=background_data.get('enabled', False),
             geometry=_validate_background_geometry(
@@ -691,6 +840,7 @@ class Config:
             rotation_deg=background_data.get('rotation_deg', 0.0),
             opaque=background_data.get('opaque', True),
             params=dict(background_data.get('params') or {}),
+            fade=background_fade,
         )
         background.validate()
 
@@ -833,6 +983,19 @@ class Config:
                 'rotation_deg': self.background.rotation_deg,
                 'opaque': self.background.opaque,
                 'params': dict(self.background.params),
+                'fade': {
+                    'enabled': self.background.fade.enabled,
+                    'profile': self.background.fade.profile,
+                    'falloff': self.background.fade.falloff,
+                    'rate': self.background.fade.rate,
+                    'margin': self.background.fade.margin,
+                    'target': self.background.fade.target,
+                    'color': (
+                        None if self.background.fade.color is None
+                        else list(self.background.fade.color)
+                    ),
+                    'detail': self.background.fade.detail,
+                },
             },
             'camera': {
                 'focal_length': self.camera.focal_length,
@@ -1025,6 +1188,62 @@ background:
   # for blender_sky, or {n_per_face: 8} for a cube checker. Rejected when
   # `texture` names a file.
   params: {}
+
+  # Fade the backdrop out around the subject.
+  #
+  # Purpose: the backdrop that fixes one failure causes another. In outline
+  # modes a grid running right up to the silhouette reads to a video model as
+  # a hard occlusion boundary, so it refuses to paint outside it and bulky
+  # clothing or hair gets squashed onto the outline of the bare mesh. Clearing
+  # the backdrop in a shell around the subject keeps the rotation cue in the
+  # far field and leaves room to expand into.
+  #
+  # The shell is the projection of an ellipsoid fitted to the mesh, not of one
+  # frame's outline, so it covers the silhouette from every viewpoint on the
+  # orbit.
+  fade:
+    # Fade at all
+    enabled: false
+
+    # How the backdrop returns as you move away from the subject:
+    #   step           - hard cut at the band edge; the control condition
+    #   linear         - straight ramp, with a visible slope break
+    #   smoothstep     - Hermite ramp, flat at both ends (default)
+    #   cosine         - raised cosine; steeper through the middle
+    #   exponential    - steepest at the silhouette, long thin tail
+    #   gaussian       - flat at the silhouette, then falls away
+    #   inverse_square - the heaviest tail; a faint wash over the whole frame
+    # The first four reach zero exactly at the band edge; the last three have
+    # tails that never quite do.
+    profile: "smoothstep"
+
+    # Width of the fade band, as a multiple of the subject's own radius.
+    # 1.0 means the backdrop is fully back by twice the subject's extent.
+    # Scale-free, so it holds up across an auto-framed orbit.
+    falloff: 1.0
+
+    # Shape constant for exponential / gaussian / inverse_square; larger is
+    # tighter. Ignored by the other profiles.
+    rate: 4.0
+
+    # Inflate the fitted ellipsoid before the fade is measured. Raise it when
+    # the mesh is a bare body and the subject you want generated is not.
+    margin: 1.0
+
+    # What the backdrop fades to:
+    #   local - the backdrop's own colour with its detail averaged away, so
+    #           the lines go but the wall/floor/ceiling tone carries through
+    #           and the clear zone has no edge against its surroundings
+    #   color - one flat colour over the whole clear zone
+    target: "local"
+
+    # Flat colour for target: color, as RGB 0-1. null = the texture's mean,
+    # which is the one flat colour that leaves the frame's tone unchanged.
+    color: null
+
+    # Long-side resolution the backdrop is averaged down to for target: local.
+    # Wants to be well below the texture's own frequency.
+    detail: 24
 
 # Camera configuration
 camera:
@@ -1401,6 +1620,79 @@ def create_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fill only RGB behind the subject, leaving the silhouette alpha "
              "intact as a mask. Default is to force alpha opaque"
+    )
+
+    # Subject fade
+    fade_group = parser.add_argument_group(
+        "Background Fade Options",
+        "Fade the backdrop out around the subject. In outline modes a grid "
+        "running right up to the silhouette reads to a video model as a hard "
+        "occlusion boundary, so it will not paint bulky clothing or hair "
+        "outside the bare mesh's outline. The clear zone is the projection of "
+        "an ellipsoid fitted to the mesh, so it covers the silhouette from "
+        "every viewpoint on the orbit."
+    )
+    fade_group.add_argument(
+        "--background-fade",
+        type=str,
+        metavar="PROFILE",
+        choices=sorted(DECAY_PROFILES),
+        help="Enable the fade with this decay profile: "
+             + ", ".join(sorted(DECAY_PROFILES))
+             + ". 'step' is the hard-edged control; 'smoothstep' is the "
+               "default shape"
+    )
+    fade_group.add_argument(
+        "--no-background-fade",
+        action="store_true",
+        help="Disable the fade, overriding a config file that enables it"
+    )
+    fade_group.add_argument(
+        "--background-fade-falloff",
+        type=float,
+        metavar="FACTOR",
+        help=f"Width of the fade band, as a multiple of the subject's own "
+             f"radius (default: {DEFAULT_FALLOFF:g}). Scale-free, so it holds "
+             f"up across an auto-framed orbit"
+    )
+    fade_group.add_argument(
+        "--background-fade-rate",
+        type=float,
+        metavar="K",
+        help=f"Shape constant for the exponential, gaussian and "
+             f"inverse_square profiles; larger is tighter (default: "
+             f"{DEFAULT_RATE:g}). Ignored by the others"
+    )
+    fade_group.add_argument(
+        "--background-fade-margin",
+        type=float,
+        metavar="FACTOR",
+        help=f"Inflate the fitted ellipsoid before the fade is measured "
+             f"(default: {DEFAULT_MARGIN:g}). Raise it when the mesh is a "
+             f"bare body and the subject is not"
+    )
+    fade_group.add_argument(
+        "--background-fade-target",
+        type=str,
+        choices=sorted(FADE_TARGETS),
+        help="What the backdrop fades to: 'local' (default) averages its own "
+             "detail away, so the lines go but the wall/floor/ceiling tone "
+             "carries through; 'color' uses one flat colour"
+    )
+    fade_group.add_argument(
+        "--background-fade-color",
+        type=str,
+        metavar="R,G,B",
+        help="Flat fade colour as RGB floats 0-1 (default: the texture's "
+             "mean). Implies --background-fade-target color"
+    )
+    fade_group.add_argument(
+        "--background-fade-detail",
+        type=int,
+        metavar="PIXELS",
+        help=f"Long-side resolution the backdrop is averaged down to for the "
+             f"'local' target (default: {DEFAULT_DETAIL}). Wants to be well "
+             f"below the texture's own frequency"
     )
 
     # Camera options

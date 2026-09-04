@@ -33,6 +33,8 @@ Each module has a single, clear responsibility:
 - `scene.py`: 3D scene management (mesh, skeleton, lighting)
 - `renderer.py`: Image rendering (mesh, depth, outline, skeleton modes)
 - `background.py`: Environment backdrop (sphere/cube) drawn behind the base layer
+- `fade.py`: Bounding ellipsoid + decay profiles, fading the backdrop out
+  around the subject
 - `splat_scene.py` / `splat_renderer.py`: Gaussian splat storage, and
   rasterization via the external `brush-splat-render` binary
 - `splat_anchor.py`: Place an externally-built splat in world coords
@@ -80,6 +82,7 @@ body2colmap/
 │   ├── scene.py                 # Scene management
 │   ├── renderer.py              # Rendering engine
 │   ├── background.py            # Environment backdrop (sphere/cube)
+│   ├── fade.py                  # Backdrop fade around the subject
 │   ├── exporter.py              # Export to COLMAP/other formats
 │   ├── utils.py                 # Auto-framing, homography warp, focal length
 │   ├── pipeline.py              # High-level API
@@ -93,6 +96,7 @@ body2colmap/
 │   ├── test_scene.py
 │   ├── test_renderer.py
 │   ├── test_background.py
+│   ├── test_fade.py
 │   └── test_exporter.py
 └── examples/                    # Example usage
     └── CLAUDE.md                # Example documentation
@@ -641,6 +645,102 @@ a plausible-looking sky; only comparing against `Camera.project()` catches
 them. Measured: sub-pixel agreement (0.75 px tolerance) across four marker
 directions, on both sphere and cube.
 
+
+## Backdrop Fade (2026-09)
+
+### Overview
+`fade.py` fades the backdrop toward a flat tone in a shell around the subject.
+It exists because the backdrop broke something while fixing something else: in
+`outline` modes a grid running right up to the silhouette reads to VACE as a
+**hard occlusion boundary**, so it refuses to paint outside the outline and
+bulky clothing and hair come out squashed onto the shape of the bare mesh. A
+structure-free zone next to the silhouette gives the model room to expand,
+while the far field keeps the rotation cue the backdrop was added for.
+
+Configurable via the `background.fade:` config section or the
+`--background-fade*` CLI flags. Off by default; enabling it with
+`--background-fade PROFILE` names the decay shape in the same flag, matching
+`--background`'s own shape.
+
+### Key Design: The Shell Is a Fitted Ellipsoid, Not a Dilated Outline
+The clear zone is the projection of a minimum-volume ellipsoid fitted to the
+**mesh vertices**, and only incidentally looks like a fattened silhouette.
+Three reasons, none of which a per-frame mask dilation can supply:
+
+- **An ellipsoid enclosing the mesh encloses its silhouette from every
+  viewpoint.** The clear zone therefore cannot fall inside the outline partway
+  round the orbit — a failure that would be invisible in the frame you checked.
+- **It is one fixed world-space object**, so the clear zone is a region the
+  camera moves around rather than a screen effect that swims frame to frame.
+  For a video model that temporal consistency is the whole game.
+- **The per-pixel test is two lines.** Transform the ray into the space where
+  the ellipsoid is the unit sphere and take its closest approach to the origin;
+  no distance transform, no silhouette rasterization.
+
+A capsule was the other candidate — the user's own framing — and hugs a
+standing figure slightly better along the spine. It was not taken because it
+does not linearize: the "how far outside am I" scalar stops being a norm and
+the ray test grows a segment case. `margin` covers the same ground.
+
+### Key Design: Enclosure Is Imposed, Not Solved For
+Khachiyan's algorithm is iterative, given a loose tolerance and an iteration
+cap. Its answer is a good *shape*, not a proof of enclosure. `Ellipsoid.fit()`
+therefore scales the result until the outermost point of the **full** vertex
+set sits exactly on the surface.
+
+That is what lets the fit run on a stride of the vertices — 4000 by default,
+~50 ms on an SMPL-X mesh — with no risk of clipping a stray vertex. The
+guarantee is O(N) and runs on everything.
+
+### Key Design: `falloff` Is In Subject Radii, Not Pixels
+`ray_distance()` returns the closest approach in units of the ellipsoid's own
+radius in that direction, so the band width is dimensionless. One setting holds
+across an auto-framed orbit at any subject size or orbit radius — neither of
+which is known when the value is chosen.
+
+The band is consequently anisotropic in world units: as wide as the subject is
+in each direction, so a standing figure gets a tall clear zone and a narrow
+one. This is also why `falloff: 1.0` is milder than it sounds — the clear zone
+is the ellipsoid at 2x, against a subject filling ~0.8 of the frame.
+
+### Key Design: Seven Profiles, Split Into Compact and Tailed
+`step`, `linear`, `smoothstep` (default) and `cosine` reach zero exactly at the
+band edge. `exponential`, `gaussian` and `inverse_square` have tails that never
+quite do, and take `rate` to tighten them. `inverse_square`'s tail is the heavy
+one: still 2.7% faded at three band widths out at the default rate, which reads
+as a faint wash over the whole frame. That is the profile's character and it is
+pinned in `tests/test_fade.py`; it is also why a compact profile is the default.
+
+`step` is the control condition — a plain hole in the backdrop — and is what
+the coverage tests use, since it makes the clear zone a clean boolean.
+
+### Key Design: The Default Fades To Local Tone, Not To A Flat Colour
+A single flat colour leaves a visible patch wherever the clear zone crosses a
+cube's floor/wall seam, and a soft blob is still a shape — which is what this
+feature exists to remove. `target: local` instead area-averages the backdrop
+down to ~24 px on its long side and back up. That is below the texture's own
+frequency, so the lines vanish while the low-frequency shading survives
+exactly, and the clear zone has no edge against its surroundings.
+
+`target: color` is kept as the honest control, and for the legitimate case of
+matching `render.bg_color` deliberately.
+
+### Scope
+The fade runs inside `Background.render()`, so `composite()` lays the base
+layer over an already-faded backdrop and the subject is untouched by
+construction. Everything the backdrop is excluded from, the fade is excluded
+from too: no COLMAP export, no point cloud, no depth buffer, no silhouette
+mask. It needs a backdrop to fade — `--background-fade` alone is rejected
+rather than ignored — and a mesh to fit an ellipsoid to, so splat scenes are
+out for the same reason they have no backdrop.
+
+### Validation
+The load-bearing test is `TestClearZoneCoversTheSilhouette`: every projected
+vertex must be fully faded, from fifteen viewpoints spanning a full orbit at
+three elevations. A fade that is merely centred on the subject passes a
+single-frame eyeball check and fails this. The far-field half of the same test
+pins that the cue survives — a fade over the whole frame is the original
+failure with extra steps.
 
 ## Critical Implementation Details
 

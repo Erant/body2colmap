@@ -313,6 +313,74 @@ a directory of six faces (`px`/`nx`/`py`/`ny`/`pz`/`nz`, `posx`/`negx`/..., or
 `right`/`left`/`top`/`bottom`/`front`/`back`), a 4:3 horizontal cross, a 6:1
 strip, a 1:6 column, or a 2:1 equirectangular image resampled onto the cube.
 
+#### Fading the backdrop around the subject
+
+The backdrop that fixes one failure causes another. In `outline` modes a grid
+that runs right up to the silhouette reads to a video model as a **hard
+occlusion boundary**: it will not paint outside the outline, so bulky clothing
+and hair get squashed back onto the shape of the bare mesh.
+
+`--background-fade` clears the backdrop in a shell around the subject. The
+rotation cue survives in the far field, and there is structure-free room next
+to the silhouette to expand into.
+
+```bash
+# The default shape, on the default backdrop
+body2colmap estimation.npz --output-dir ./out \
+  --skeleton --render-modes outline+skeleton \
+  --background grid --background-fade smoothstep
+
+# A tighter halo, and room for clothing the bare mesh does not have
+body2colmap estimation.npz --output-dir ./out \
+  --render-modes outline --background grid \
+  --background-fade gaussian --background-fade-falloff 0.4 \
+  --background-fade-margin 1.2
+```
+
+The clear zone is the projection of an **ellipsoid fitted to the mesh**, not of
+any one frame's outline. An ellipsoid that encloses the mesh encloses its
+silhouette from every viewpoint, so the clear zone can never fall inside the
+outline partway round the orbit — and being one fixed world-space object, it is
+a region the camera moves around rather than a screen effect that swims.
+`--background-fade-margin` inflates it, which is the knob to reach for when the
+mesh is a bare body and the subject you want generated is not.
+
+`--background-fade-falloff` sets how wide the fade band is, as a **multiple of
+the subject's own radius** rather than a pixel count, so one setting holds
+across an auto-framed orbit. 1.0 means the backdrop is fully back by twice the
+subject's extent.
+
+| Profile | Shape |
+|---------|-------|
+| `step` | Hard cut at the band edge. The control condition — a plain hole |
+| `linear` | Straight ramp, with a visible slope break at each end |
+| `smoothstep` | Hermite ramp, flat at both ends. The default |
+| `cosine` | Raised cosine; like smoothstep but steeper through the middle |
+| `exponential` | Steepest right at the silhouette, then a long thin tail |
+| `gaussian` | Flat at the silhouette, then falls away |
+| `inverse_square` | The heaviest tail: still 2.7% faded at three band widths out, which reads as a faint wash over the whole frame |
+
+The first four reach zero exactly at the band edge; the last three have tails
+that never quite do, and take `--background-fade-rate` to tighten them.
+
+By default the backdrop fades to its own **local tone** — averaged down below
+the texture's own frequency, so the lines disappear but the wall/floor/ceiling
+shading carries through and the clear zone has no edge against its surroundings.
+`--background-fade-target color` uses one flat colour instead (the texture's
+mean, or `--background-fade-color`), which is easier to reason about but leaves
+a visible patch wherever it crosses a cube's floor/wall seam.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--background-fade PROFILE` | off | Enable the fade with this decay profile |
+| `--background-fade-falloff FACTOR` | `1.0` | Band width, as a multiple of the subject's radius |
+| `--background-fade-rate K` | `4.0` | Shape constant for `exponential`, `gaussian`, `inverse_square` |
+| `--background-fade-margin FACTOR` | `1.0` | Inflate the fitted ellipsoid before measuring |
+| `--background-fade-target {local,color}` | `local` | Fade to the backdrop's own tone, or to one flat colour |
+| `--background-fade-color R,G,B` | texture mean | Flat colour; implies `--background-fade-target color` |
+| `--background-fade-detail PIXELS` | `24` | Resolution the backdrop is averaged down to for `local` |
+| `--no-background-fade` | — | Disable a fade enabled by a config file |
+
 Generator parameters go in the config file, since they vary per texture:
 
 ```yaml

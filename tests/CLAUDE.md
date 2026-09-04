@@ -13,6 +13,8 @@ tests/
 ├── test_path.py          # Orbit path generation
 ├── test_scene.py         # Scene loading and management
 ├── test_renderer.py      # Rendering (may need fixtures)
+├── test_background.py    # Environment backdrop
+├── test_fade.py          # Backdrop fade around the subject
 ├── test_exporter.py      # COLMAP export
 └── test_pipeline.py      # Integration tests
 ```
@@ -48,6 +50,18 @@ tests/
    - Correct quaternion order (w,x,y,z)
    - Two lines per image in images.txt
    - Point cloud coordinates
+
+5. **fade.py**
+   - The clear zone covers every projected vertex, **from every viewpoint on a
+     full orbit**. A fade merely centred on the subject passes a single-frame
+     eyeball check and fails halfway round, which is when the grid runs back
+     into the silhouette and the feature stops working
+   - The far field stays untouched, or the backdrop's own rotation cue is lost
+     and the fix reintroduces the problem it was added for
+   - `Ellipsoid.fit()` encloses every point **even when the solver is starved**
+     (`max_points=20`): enclosure is imposed afterwards, not solved for, and
+     that guarantee is what makes subsampling safe
+   - Every decay profile is monotone, bounded, and equals 1 at the surface
 
 ### MEDIUM PRIORITY
 

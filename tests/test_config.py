@@ -247,3 +247,106 @@ class TestBackgroundCliOverrides:
         with pytest.raises(SystemExit):
             self._config("--background-radius", "5",
                          "--background-radius-scale", "3")
+
+
+class TestBackgroundFadeConfigValidation:
+    """The fade settings, checked as a set."""
+
+    def test_off_by_default(self):
+        config = BackgroundConfig()
+        assert config.fade.enabled is False
+        config.validate()
+
+    def test_rejects_an_unknown_profile(self):
+        config = BackgroundConfig()
+        config.fade.profile = "logarithmic"
+        with pytest.raises(ValueError, match="smoothstep"):
+            config.validate()
+
+    def test_rejects_an_unknown_target(self):
+        config = BackgroundConfig()
+        config.fade.target = "blur"
+        with pytest.raises(ValueError, match="target"):
+            config.validate()
+
+    @pytest.mark.parametrize(
+        "field,value", [("falloff", 0.0), ("rate", -1.0),
+                        ("margin", 0.0), ("detail", 0)]
+    )
+    def test_rejects_non_positive_scalars(self, field, value):
+        config = BackgroundConfig()
+        setattr(config.fade, field, value)
+        with pytest.raises(ValueError, match=field):
+            config.validate()
+
+    def test_falloff_error_points_at_the_step_profile(self):
+        """falloff=0 is a plausible way to ask for a hard edge; say where it is."""
+        config = BackgroundConfig()
+        config.fade.falloff = 0.0
+        with pytest.raises(ValueError, match="step"):
+            config.validate()
+
+    def test_rejects_a_colour_out_of_range(self):
+        config = BackgroundConfig()
+        config.fade.color = (1.0, 1.5, 0.0)
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            config.validate()
+
+
+class TestBackgroundFadeCliOverrides:
+    """--background-fade and friends."""
+
+    @staticmethod
+    def _fade(*argv):
+        args = create_argument_parser().parse_args(
+            ["in.npz", "-o", "out", *argv]
+        )
+        return Config.from_args(args).background.fade
+
+    def test_off_by_default(self):
+        assert self._fade("--background", "grid").enabled is False
+
+    def test_naming_a_profile_enables_it(self):
+        """One flag is enough, matching --background's own shape."""
+        fade = self._fade("--background", "grid", "--background-fade", "gaussian")
+        assert fade.enabled is True
+        assert fade.profile == "gaussian"
+
+    def test_no_fade_wins_over_a_config_file(self):
+        assert self._fade(
+            "--background", "grid", "--background-fade", "linear",
+            "--no-background-fade",
+        ).enabled is False
+
+    def test_scalars(self):
+        fade = self._fade(
+            "--background", "grid", "--background-fade", "exponential",
+            "--background-fade-falloff", "0.4",
+            "--background-fade-rate", "6",
+            "--background-fade-margin", "1.25",
+            "--background-fade-detail", "48",
+        )
+        assert (fade.falloff, fade.rate, fade.margin, fade.detail) == (
+            0.4, 6.0, 1.25, 48
+        )
+
+    def test_a_colour_implies_the_flat_target(self):
+        """
+        Otherwise the colour would be accepted and then silently ignored,
+        which looks like the colour did not work.
+        """
+        fade = self._fade("--background", "grid", "--background-fade", "linear",
+                          "--background-fade-color", "0.5,0.5,0.5")
+        assert fade.color == (0.5, 0.5, 0.5)
+        assert fade.target == "color"
+
+    def test_an_explicit_target_still_wins(self):
+        fade = self._fade("--background", "grid", "--background-fade", "linear",
+                          "--background-fade-color", "0.5,0.5,0.5",
+                          "--background-fade-target", "local")
+        assert fade.target == "local"
+
+    def test_a_malformed_colour_is_reported(self):
+        with pytest.raises(ValueError, match="background-fade-color"):
+            self._fade("--background", "grid", "--background-fade", "linear",
+                       "--background-fade-color", "grey")

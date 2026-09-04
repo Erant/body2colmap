@@ -25,6 +25,7 @@ from numpy.typing import NDArray
 
 from .camera import Camera
 from .coordinates import spherical_to_cartesian
+from .fade import SubjectFade
 
 
 #: Default backdrop radius, as a multiple of the orbit radius.
@@ -982,6 +983,7 @@ class Background:
         radius: Optional[float] = None,
         rotation_deg: float = 0.0,
         opaque: bool = True,
+        fade: Optional[SubjectFade] = None,
     ):
         """
         Args:
@@ -999,6 +1001,10 @@ class Background:
                 producing a flat conditioning frame. If False the base layer's
                 alpha is preserved and the background only fills RGB, which
                 keeps the silhouette usable as a mask.
+            fade: Optional :class:`~body2colmap.fade.SubjectFade`, which
+                fades the backdrop out around the subject so an ``outline``
+                frame does not read as a hard occlusion boundary. Applied to
+                :meth:`render`'s output, so it never touches the subject.
 
         Raises:
             ValueError: On an unknown geometry, a malformed texture, or a
@@ -1050,6 +1056,7 @@ class Background:
         self.radius = None if radius is None else float(radius)
         self.rotation_deg = float(rotation_deg)
         self.opaque = bool(opaque)
+        self.fade = fade
 
         # Lazily built, keyed on camera intrinsics (fixed across an orbit).
         self._ray_key: Optional[Tuple[float, ...]] = None
@@ -1062,6 +1069,11 @@ class Background:
         # relative to the orbit, and detail thrown away cannot be recovered.
         self._source: Optional[Any] = None
         self._fitted_fx: Optional[float] = None
+
+        # Mean texture colour, the fallback fade colour. Cached because it is
+        # a whole-texture reduction and does not change with resolution
+        # fitting -- INTER_AREA preserves the mean.
+        self._mean_color: Optional[NDArray[np.float32]] = None
 
     # -- construction -------------------------------------------------------
 
@@ -1076,6 +1088,7 @@ class Background:
         rotation_deg: float = 0.0,
         opaque: bool = True,
         params: Optional[Dict[str, Any]] = None,
+        fade: Optional[SubjectFade] = None,
     ) -> "Background":
         """
         Build a Background from a generator name or a path.
@@ -1098,6 +1111,8 @@ class Background:
             opaque: See :meth:`__init__`.
             params: Extra keyword arguments for a generator. Rejected for a
                 loaded texture, where they would silently do nothing.
+            fade: Optional :class:`~body2colmap.fade.SubjectFade`; see
+                :meth:`__init__`.
 
         Returns:
             A Background.
@@ -1133,6 +1148,7 @@ class Background:
             radius=radius,
             rotation_deg=rotation_deg,
             opaque=opaque,
+            fade=fade,
         )
 
     # -- rendering ----------------------------------------------------------
@@ -1317,6 +1333,37 @@ class Background:
 
         return origin + t[..., None] * dirs
 
+    def _texture_mean(self) -> NDArray[np.float32]:
+        """
+        Mean colour of the texture, as RGB floats in [0, 1].
+
+        The fallback fade colour: it is the one flat colour that leaves the
+        frame's overall tone unchanged, which matters because the alternative
+        -- a guess -- reads as a patch.
+
+        Returns:
+            Shape (3,) float32 in [0, 1].
+        """
+        if self._mean_color is None:
+            if self.geometry == "sphere":
+                # Weight rows by their solid angle: an equirect image
+                # oversamples the poles badly, and an unweighted mean would be
+                # pulled toward whatever is at the zenith.
+                height = self._equirect.shape[0]
+                rows = (np.arange(height, dtype=np.float64) + 0.5) / height
+                weights = np.sin(rows * np.pi)
+                mean = (
+                    (self._equirect.astype(np.float64).mean(axis=1)
+                     * weights[:, None]).sum(axis=0) / weights.sum()
+                )
+            else:
+                mean = np.mean(
+                    [f.astype(np.float64).mean(axis=(0, 1)) for f in self._faces],
+                    axis=0,
+                )
+            self._mean_color = (mean / 255.0).astype(np.float32)
+        return self._mean_color
+
     def render(self, camera: Camera) -> NDArray[np.uint8]:
         """
         Render the environment as seen from a camera.
@@ -1334,7 +1381,11 @@ class Background:
 
         self._fit_resolution(camera)
 
-        vectors = self._surface_vectors(camera, self._world_rays(camera))
+        # Kept in a local, not folded into the call: the fade is measured
+        # against world-space rays, whereas _surface_vectors() rotates them
+        # into the environment's own frame.
+        dirs = self._world_rays(camera)
+        vectors = self._surface_vectors(camera, dirs)
         padded = self._padded_texture()
 
         if self.geometry == "sphere":
@@ -1343,7 +1394,9 @@ class Background:
             # +0.5 rather than -0.5: the one-texel pad shifts every index by 1.
             map_x = (u * width + 0.5).astype(np.float32)
             map_y = (v * height + 0.5).astype(np.float32)
-            return cv2.remap(padded, map_x, map_y, cv2.INTER_LINEAR)
+            return self._apply_fade(
+                cv2.remap(padded, map_x, map_y, cv2.INTER_LINEAR), camera, dirs
+            )
 
         face_index, s, t = cube_face_uv(vectors)
         size = self._faces[0].shape[0]
@@ -1361,7 +1414,28 @@ class Background:
                 face_texture, map_x, map_y, cv2.INTER_LINEAR
             )[mask]
 
-        return image
+        return self._apply_fade(image, camera, dirs)
+
+    def _apply_fade(
+        self,
+        image: NDArray[np.uint8],
+        camera: Camera,
+        dirs: NDArray[np.float32],
+    ) -> NDArray[np.uint8]:
+        """
+        Run the subject fade over a finished backdrop, if one is attached.
+
+        Args:
+            image: uint8 RGB backdrop.
+            camera: Camera it was rendered from.
+            dirs: (H, W, 3) world-space ray directions.
+
+        Returns:
+            ``image``, or a faded copy.
+        """
+        if self.fade is None:
+            return image
+        return self.fade.apply(image, camera, dirs, self._texture_mean())
 
     def composite(
         self,
@@ -1417,10 +1491,11 @@ class Background:
         else:
             size = f"6 x {self._faces[0].shape[0]}px faces"
         extent = "infinite" if self.radius is None else f"radius {self.radius:.3f}"
+        fade = "" if self.fade is None else f", {self.fade.describe()}"
         return (
             f"{self.geometry} ({extent}, {size}, "
             f"rotation {self.rotation_deg:g} deg, "
-            f"{'opaque' if self.opaque else 'alpha preserved'})"
+            f"{'opaque' if self.opaque else 'alpha preserved'}{fade})"
         )
 
     def __repr__(self) -> str:
