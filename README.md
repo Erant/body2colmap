@@ -278,6 +278,12 @@ Measured as per-latitude standard deviation in 8-bit levels (pinned in
 Loaded textures are whatever you give them; a panorama with landmarks around
 the horizon behaves like `grid`, a clear sky behaves like `blender_sky`.
 
+Every generator also takes `flat: true` among its `params` for its pattern-free
+form — a grid without its lines, a checker as its mean tone, the sky without
+its sun. That is what the subject fade below dissolves the pattern *into*, so
+setting it here gives you the same backdrop everywhere rather than only near
+the subject.
+
 #### Sphere or cube, and how far away
 
 The default surface is a **cube at 3x the orbit radius**. A finite radius means

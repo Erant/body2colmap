@@ -761,12 +761,21 @@ needs a *generated* texture, and is rejected rather than silently downgraded
 when given a loaded one.
 
 ### Validation
-The load-bearing test is `TestClearZoneCoversTheSilhouette`: every projected
-vertex must be fully faded, from fifteen viewpoints spanning a full orbit at
-three elevations. A fade that is merely centred on the subject passes a
+Two tests carry this feature, one per half of the idea.
+
+**Where the clear zone is**: `TestClearZoneCoversTheSilhouette` requires every
+projected vertex to be fully faded, from fifteen viewpoints spanning a full
+orbit at three elevations. A fade merely centred on the subject passes a
 single-frame eyeball check and fails this. The far-field half of the same test
 pins that the cue survives — a fade over the whole frame is the original
 failure with extra steps.
+
+**What is inside it**: `test_the_clear_zone_is_exactly_the_room_without_its_lines`
+requires the cleared pixels to be *bit-identical* to the same backdrop
+generated with `flat=True`. This is the assertion the first implementation
+lacked, and lacking it is why a blur shipped: "the detail is reduced" is a test
+a blur passes. Bit-identity is not. A companion test asserts `blur` still fails
+it, so the two targets cannot quietly converge.
 
 ## Critical Implementation Details
 

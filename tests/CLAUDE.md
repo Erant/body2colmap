@@ -62,6 +62,11 @@ tests/
      (`max_points=20`): enclosure is imposed afterwards, not solved for, and
      that guarantee is what makes subsampling safe
    - Every decay profile is monotone, bounded, and equals 1 at the surface
+   - The clear zone is **bit-identical** to a `flat=True` backdrop. Test this
+     exactly, never as "the detail is reduced" — that weaker assertion is what
+     let an area-average blur ship as if it removed the grid lines, when it
+     only spread them out. A companion test pins that `target="blur"` still
+     *fails* the exact comparison, so the two cannot converge unnoticed
 
 ### MEDIUM PRIORITY
 

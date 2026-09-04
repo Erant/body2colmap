@@ -1190,6 +1190,11 @@ background:
   # Extra arguments for a generator, e.g. {sun_azimuth_deg: 40, sun_size_deg: 6}
   # for blender_sky, or {n_per_face: 8} for a cube checker. Rejected when
   # `texture` names a file.
+  #
+  # Every generator also takes {flat: true} for its pattern-free form -- a grid
+  # without its lines, a checker as its mean tone, the sky without its sun.
+  # That is what `fade.target: plain` dissolves the pattern into, so setting it
+  # here gives you the backdrop the fade would reveal, everywhere.
   params: {}
 
   # Fade the backdrop out around the subject.
