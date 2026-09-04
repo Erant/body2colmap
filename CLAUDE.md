@@ -646,6 +646,52 @@ them. Measured: sub-pixel agreement (0.75 px tolerance) across four marker
 directions, on both sphere and cube.
 
 
+## DWPose Skeleton Style (2026-09)
+
+### Overview
+`Renderer.render_skeleton(style="dwpose")` draws the skeleton the way DWPose
+draws one, because that is the convention Wan 2.2 VACE's pose maps are in.
+Measured against a real DWPose render of the same MHR70 skeleton through one
+camera at 720x1280, the original style agreed on almost nothing: limbs ~4-5 px
+against DWPose's ~7, full brightness against its `canvas * 0.6` (mean lit
+luminance 122 vs 66), and 10 of 17 limbs the wrong hue. It was too thin, not
+too thick.
+
+Renderer-level only for now — selected as `{"skeleton": {"style": "dwpose"}}`
+in a composite, with no CLI flag yet.
+
+### Key Design: The Hues Were Wrong Structurally, Not By Typo
+BODY_25 routes the torso through MidHip and BODY_18 does not, so our palette
+spent two colour slots DWPose never spends. The upper body matched exactly and
+everything from the hips down, plus the whole head, was one step out. Fixing
+that meant adopting DWPose's topology, not correcting a colour table.
+
+### Key Design: The Style Picks Connectivity, Not Just Colour
+`get_skeleton_bones_dwpose()` builds its own 57-bone list rather than filtering
+`OPENPOSE_BODY25_HANDS_ALL_BONES`, because two of its bones are not in that
+list at all. `limbSeq[:17]` means **no feet** (DWPose detects them and draws
+none) and **no MidHip**, so neck->RHip and neck->LHip run whole across the
+chest.
+
+`get_joint_colors_dwpose()` returns None for the 7 of 65 joints DWPose has no
+keypoint for, and the renderer skips the sphere it would otherwise put at every
+joint in the array. A dot with no bone on it reads as a speck, not a keypoint.
+
+### Key Design: The Dimming Order Is Load-Bearing
+Body limbs are dimmed to 60% with the joint dots left **undimmed**, which is
+the order `draw_bodypose` does it in and the only thing making the dots read at
+all. Hands are drawn at a quarter width under `hsv_to_rgb([ie / 20, 1, 1])` and
+undimmed, because `draw_handpose` runs after the 0.6 pass. A hand's keypoint 0
+*is* the wrist and lands on top of the body's own dot.
+
+### Gotcha: pyrender Lifts Every Colour You Give It
+Its fragment shader ends on `pow(color.xyz, vec3(1.0/2.2))`, so a nominal 85
+renders as 155 — and this project's skeletons have always carried that lift.
+Asking for 0.6 got 0.79, which would have left the dimming barely applied.
+`_pyrender_rgba(linearize=True)` cancels it, but **only when a style asks**:
+the older `openpose` style keeps its lift on purpose, so it stays an unchanged
+"before" to compare against.
+
 ## Backdrop Fade (2026-09)
 
 ### Overview

@@ -42,6 +42,36 @@ All notable changes to body2colmap will be documented in this file.
     `--background-keep-alpha`
   - API: `OrbitPipeline.configure_background()`, `clear_background()`, and the
     `body2colmap.background` module
+- **DWPose skeleton style** (`Renderer.render_skeleton(style="dwpose")`, or
+  `{"skeleton": {"style": "dwpose"}}` in a composite): reproduces the convention Wan 2.2
+  VACE's pose maps are actually drawn in, rather than approximating it. Renderer-level
+  for now — not yet exposed on the CLI.
+  - **Why**: measured against a real DWPose render of the same MHR70 skeleton through
+    one camera at 720x1280, ours agreed on almost nothing — limbs ~4-5 px against
+    DWPose's ~7, full brightness against its `canvas * 0.6` (mean lit luminance 122 vs
+    66), and 10 of 17 limbs the wrong hue
+  - The hues were wrong **structurally**, not by typo: BODY_25 routes the torso through
+    MidHip and BODY_18 does not, so our palette spent two colour slots DWPose never
+    spends. The upper body matched exactly and everything from the hips down, plus the
+    whole head, was one step out
+  - The style picks **connectivity, not just colour**: `get_skeleton_bones_dwpose()`
+    builds its own 57-bone list rather than filtering the Body25 one, because two of
+    its bones are not in that list. `limbSeq[:17]` means no feet (DWPose detects them
+    and draws none) and no MidHip, so neck->RHip and neck->LHip run whole across the
+    chest
+  - Body limbs dimmed to 60% with the joint dots left **undimmed** — the order
+    `draw_bodypose` does it in, and the only thing making the dots read. Hands at a
+    quarter width under `hsv_to_rgb([ie / 20, 1, 1])`, undimmed because `draw_handpose`
+    runs after the 0.6 pass
+  - `get_joint_colors_dwpose()` returns None for the 7 of 65 joints DWPose has no
+    keypoint for, and the renderer skips the sphere it would otherwise draw there — a
+    dot with no bone on it reads as a speck, not a keypoint
+  - **Gotcha worth knowing separately**: pyrender's fragment shader ends on
+    `pow(color.xyz, vec3(1.0/2.2))`, so every vertex colour handed to it comes back
+    lifted — a nominal 85 renders as 155, and this project's skeletons have always
+    carried that. Asking for 0.6 got 0.79. `_pyrender_rgba(linearize=True)` cancels it,
+    but only when a style asks: the older `openpose` style keeps its lift deliberately,
+    so it stays an unchanged "before" to compare against
 - **Backdrop fade around the subject** (`--background-fade`): fades the backdrop toward
   a flat tone in a shell around the subject, so an `outline` frame keeps its rotation
   cue in the far field without presenting the silhouette as a hard boundary. Off by
