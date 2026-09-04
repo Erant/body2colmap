@@ -29,6 +29,7 @@ from .fade import (
     DEFAULT_MARGIN,
     DEFAULT_PROFILE,
     DEFAULT_RATE,
+    DEFAULT_TARGET,
     Ellipsoid,
     SubjectFade,
 )
@@ -327,7 +328,7 @@ class OrbitPipeline:
         falloff: float = DEFAULT_FALLOFF,
         rate: float = DEFAULT_RATE,
         margin: float = DEFAULT_MARGIN,
-        target: str = "local",
+        target: str = DEFAULT_TARGET,
         color: Optional[Sequence[float]] = None,
         detail: int = DEFAULT_DETAIL,
     ) -> "OrbitPipeline":
@@ -361,13 +362,16 @@ class OrbitPipeline:
             margin: Inflate the fitted ellipsoid before the fade is measured.
                 Raise it when the mesh is a bare body and the subject you want
                 generated is not.
-            target: ``"local"`` averages the backdrop's own detail away, so
-                the lines go but the wall/floor/ceiling tone carries through
-                with no visible patch; ``"color"`` uses one flat colour.
+            target: ``"plain"`` re-renders the backdrop without its pattern,
+                so the lines fade out and the wall behind them stays;
+                ``"color"`` uses one flat colour; ``"blur"`` averages the
+                backdrop into itself, which smears the lines rather than
+                removing them and is the fallback for a loaded texture, which
+                has no pattern-free variant.
             color: Flat colour for ``target="color"``, RGB floats in [0, 1].
                 None uses the texture's mean colour.
             detail: Long-side resolution the backdrop is averaged down to for
-                ``target="local"``.
+                ``target="blur"``.
 
         Returns:
             self (for method chaining)

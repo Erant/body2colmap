@@ -227,6 +227,7 @@ def blender_sky(
     zenith_color: Sequence[float] = (0.13, 0.28, 0.62),
     horizon_color: Sequence[float] = (0.78, 0.86, 0.95),
     ground_color: Sequence[float] = (0.045, 0.045, 0.045),
+    flat: bool = False,
 ) -> NDArray[np.float32]:
     """
     An approximation of Blender's default Sky Texture (Nishita) world.
@@ -256,6 +257,8 @@ def blender_sky(
         zenith_color: Sky color straight up.
         horizon_color: Sky color at the horizon.
         ground_color: Color below the horizon.
+        flat: Drop the sun. The sky is already a smooth gradient, so the disc
+            and its halo are the only pattern there is to remove.
 
     Returns:
         Float RGB in [0, 1], shape ``dirs.shape``.
@@ -279,7 +282,7 @@ def blender_sky(
     below = _smoothstep(0.004, -0.004, height)[..., None]
     color = sky * (1.0 - below) + ground * below
 
-    if sun_intensity > 0.0:
+    if sun_intensity > 0.0 and not flat:
         sun_dir = spherical_to_cartesian(
             azimuth_deg=sun_azimuth_deg,
             elevation_deg=sun_elevation_deg,
@@ -305,6 +308,7 @@ def gradient(
     top_color: Sequence[float] = (0.55, 0.60, 0.68),
     bottom_color: Sequence[float] = (0.10, 0.11, 0.13),
     power: float = 1.0,
+    flat: bool = False,
 ) -> NDArray[np.float32]:
     """
     A plain vertical two-stop gradient.
@@ -320,6 +324,8 @@ def gradient(
         top_color: Color at the zenith.
         bottom_color: Color at the nadir.
         power: Shaping exponent on the blend; > 1 pushes the mix downward.
+        flat: Ignored. A gradient has no pattern to remove — it is already
+            the smooth backdrop that a fade would reveal.
 
     Returns:
         Float RGB in [0, 1], shape ``dirs.shape``.
@@ -343,6 +349,7 @@ def checker(
     n_per_face: int = 4,
     color_a: Sequence[float] = (0.85, 0.85, 0.85),
     color_b: Sequence[float] = (0.18, 0.20, 0.24),
+    flat: bool = False,
 ) -> NDArray[np.float32]:
     """
     A two-tone checker — the maximum-azimuthal-signal texture.
@@ -365,12 +372,18 @@ def checker(
         n_per_face: Tiles across one cube face, per axis (cube only).
         color_a: First tile color.
         color_b: Second tile color.
+        flat: Drop the tiling and return the mean of the two colors. A checker
+            is pure pattern with no underlying shading, so its pattern-free
+            form is a single tone.
 
     Returns:
         Float RGB in [0, 1], shape ``dirs.shape``.
     """
     first = _as_rgb(color_a)
     second = _as_rgb(color_b)
+
+    if flat:
+        return np.broadcast_to((first + second) * 0.5, dirs.shape).copy()
 
     if uv is not None:
         if n_per_face < 1:
@@ -402,6 +415,7 @@ def grid(
     line_color: Sequence[float] = (0.88, 0.89, 0.92),
     floor_color: Sequence[float] = (0.24, 0.25, 0.27),
     ceiling_color: Sequence[float] = (0.58, 0.60, 0.64),
+    flat: bool = False,
 ) -> NDArray[np.float32]:
     """
     A ruled room: grid lines on flat walls, with a darker floor and lighter
@@ -426,6 +440,9 @@ def grid(
         line_color: Grid line color.
         floor_color: Base color for the downward face/hemisphere.
         ceiling_color: Base color for the upward face/hemisphere.
+        flat: Draw the room without its grid lines — walls, floor and ceiling
+            in their own colors and nothing else. This is what the lines fade
+            *to* under the subject fade; see :class:`~body2colmap.fade.SubjectFade`.
 
     Returns:
         Float RGB in [0, 1], shape ``dirs.shape``.
@@ -460,14 +477,17 @@ def grid(
         # -1 at the zenith, +1 at the nadir, matching the cube's face test.
         ground = -np.clip(dirs[..., 1], -1.0, 1.0)
 
+    up_mix = np.clip(-ground, 0.0, 1.0)[..., None]
+    down_mix = np.clip(ground, 0.0, 1.0)[..., None]
+    color = base * (1.0 - up_mix - down_mix) + ceiling * up_mix + floor * down_mix
+
+    if flat:
+        return color
+
     # Distance to the nearest cell boundary, in cells.
     du = np.minimum(su % 1.0, 1.0 - (su % 1.0))
     dv = np.minimum(sv % 1.0, 1.0 - (sv % 1.0))
     on_line = np.minimum(du, dv) < (line_width * 0.5)
-
-    up_mix = np.clip(-ground, 0.0, 1.0)[..., None]
-    down_mix = np.clip(ground, 0.0, 1.0)[..., None]
-    color = base * (1.0 - up_mix - down_mix) + ceiling * up_mix + floor * down_mix
 
     return np.where(on_line[..., None], line, color)
 
@@ -946,6 +966,49 @@ def _pad_face(face: NDArray[np.uint8]) -> NDArray[np.uint8]:
     return np.concatenate([padded[:1], padded, padded[-1:]], axis=0)
 
 
+def _check_texture(
+    texture: Union[NDArray[np.uint8], Sequence[NDArray[np.uint8]]],
+    geometry: str,
+    what: str = "texture",
+) -> Any:
+    """
+    Validate and normalize a texture for a geometry.
+
+    Args:
+        texture: An equirectangular image, or six cube faces.
+        geometry: "sphere" or "cube".
+        what: Noun for the error messages, so a plain texture's complaint does
+            not read as if the main one were wrong.
+
+    Returns:
+        A contiguous uint8 equirect array, or a list of six such faces.
+
+    Raises:
+        ValueError: On a malformed texture.
+    """
+    if geometry == "sphere":
+        equirect = np.asarray(texture)
+        if equirect.ndim != 3 or equirect.shape[2] != 3:
+            raise ValueError(
+                f"Sphere background {what} needs an (H, W, 3) image, got shape "
+                f"{equirect.shape}"
+            )
+        return np.ascontiguousarray(equirect.astype(np.uint8))
+
+    faces = list(texture)
+    if len(faces) != 6:
+        raise ValueError(f"Cube background {what} needs 6 faces, got {len(faces)}")
+    shapes = {np.asarray(f).shape for f in faces}
+    if len(shapes) != 1:
+        raise ValueError(
+            f"Cube {what} faces must all be the same size, got {sorted(shapes)}"
+        )
+    shape = shapes.pop()
+    if len(shape) != 3 or shape[2] != 3 or shape[0] != shape[1]:
+        raise ValueError(f"Cube {what} faces must be square (S, S, 3), got {shape}")
+    return [np.ascontiguousarray(np.asarray(f).astype(np.uint8)) for f in faces]
+
+
 class Background:
     """
     A static environment drawn behind a render.
@@ -984,6 +1047,9 @@ class Background:
         rotation_deg: float = 0.0,
         opaque: bool = True,
         fade: Optional[SubjectFade] = None,
+        plain_texture: Optional[
+            Union[NDArray[np.uint8], Sequence[NDArray[np.uint8]]]
+        ] = None,
     ):
         """
         Args:
@@ -1005,6 +1071,13 @@ class Background:
                 fades the backdrop out around the subject so an ``outline``
                 frame does not read as a hard occlusion boundary. Applied to
                 :meth:`render`'s output, so it never touches the subject.
+            plain_texture: The same environment with its *pattern* removed —
+                a grid's walls without their lines, a checker's mean tone —
+                and the same size as ``texture``. This is what the fade's
+                default ``target="plain"`` reveals: the lines fade out and the
+                wall behind them stays, rather than being smeared into it.
+                Only a generated texture has one; a loaded image cannot be
+                decomposed this way.
 
         Raises:
             ValueError: On an unknown geometry, a malformed texture, or a
@@ -1015,35 +1088,32 @@ class Background:
                 f"Unknown background geometry {geometry!r}. Use 'sphere' or 'cube'."
             )
 
+        checked = _check_texture(texture, geometry)
         if geometry == "sphere":
-            equirect = np.asarray(texture)
-            if equirect.ndim != 3 or equirect.shape[2] != 3:
-                raise ValueError(
-                    f"Sphere background needs an (H, W, 3) image, got shape "
-                    f"{equirect.shape}"
-                )
-            self._equirect = np.ascontiguousarray(equirect.astype(np.uint8))
-            self._faces = None
+            self._equirect, self._faces = checked, None
         else:
-            faces = list(texture)
-            if len(faces) != 6:
-                raise ValueError(
-                    f"Cube background needs 6 faces, got {len(faces)}"
-                )
-            shapes = {np.asarray(f).shape for f in faces}
-            if len(shapes) != 1:
-                raise ValueError(
-                    f"Cube faces must all be the same size, got {sorted(shapes)}"
-                )
-            shape = shapes.pop()
-            if len(shape) != 3 or shape[2] != 3 or shape[0] != shape[1]:
-                raise ValueError(
-                    f"Cube faces must be square (S, S, 3), got {shape}"
-                )
-            self._faces = [
-                np.ascontiguousarray(np.asarray(f).astype(np.uint8)) for f in faces
-            ]
-            self._equirect = None
+            self._equirect, self._faces = None, checked
+
+        if plain_texture is None:
+            self._plain_equirect = self._plain_faces = None
+        else:
+            plain = _check_texture(plain_texture, geometry, what="plain texture")
+            if geometry == "sphere":
+                if plain.shape != self._equirect.shape:
+                    raise ValueError(
+                        f"The plain texture is {plain.shape} but the texture "
+                        f"it stands in for is {self._equirect.shape}; they are "
+                        f"sampled with one set of maps and must match"
+                    )
+                self._plain_equirect, self._plain_faces = plain, None
+            else:
+                if plain[0].shape != self._faces[0].shape:
+                    raise ValueError(
+                        f"The plain texture's faces are {plain[0].shape} but "
+                        f"the texture's are {self._faces[0].shape}; they are "
+                        f"sampled with one set of maps and must match"
+                    )
+                self._plain_equirect, self._plain_faces = None, plain
 
         if radius is not None and radius <= 0.0:
             raise ValueError(f"Background radius must be > 0, got {radius}")
@@ -1058,6 +1128,17 @@ class Background:
         self.opaque = bool(opaque)
         self.fade = fade
 
+        if (fade is not None and fade.target == "plain"
+                and not self.has_plain_texture()):
+            raise ValueError(
+                "The fade's target='plain' dissolves the backdrop's pattern "
+                "into the shading behind it, which needs that shading as a "
+                "separate texture. Only a generated texture has one -- a "
+                "loaded image cannot be split into pattern and shading. Use "
+                "target='color' for a flat clear zone, or target='blur' to "
+                "average the image into itself."
+            )
+
         # Lazily built, keyed on camera intrinsics (fixed across an orbit).
         self._ray_key: Optional[Tuple[float, ...]] = None
         self._ray_cache: Optional[NDArray[np.float32]] = None
@@ -1068,7 +1149,9 @@ class Background:
         # already-downsampled copy -- render_original_view() typically zooms in
         # relative to the orbit, and detail thrown away cannot be recovered.
         self._source: Optional[Any] = None
+        self._plain_source: Optional[Any] = None
         self._fitted_fx: Optional[float] = None
+        self._padded_plain: Optional[Any] = None
 
         # Mean texture colour, the fallback fade colour. Cached because it is
         # a whole-texture reduction and does not change with resolution
@@ -1123,7 +1206,14 @@ class Background:
         """
         if texture in TEXTURE_GENERATORS:
             data = generate_texture(texture, geometry, resolution, params)
+            # The same texture with its pattern suppressed, so a fade can
+            # dissolve the pattern into the shading underneath instead of
+            # blurring the two together. Cheap: one extra rasterization, once.
+            plain = generate_texture(
+                texture, geometry, resolution, {**(params or {}), "flat": True}
+            )
         else:
+            plain = None
             if not Path(texture).expanduser().exists():
                 # A near-miss on a generator name is far more likely than a
                 # genuine missing file, so name the built-ins rather than
@@ -1149,6 +1239,7 @@ class Background:
             rotation_deg=rotation_deg,
             opaque=opaque,
             fade=fade,
+            plain_texture=plain,
         )
 
     # -- rendering ----------------------------------------------------------
@@ -1229,32 +1320,94 @@ class Background:
         import cv2
 
         if self._source is None:
-            self._source = (
-                self._equirect if self.geometry == "sphere" else list(self._faces)
-            )
+            self._source = self._current_texture()
+            self._plain_source = self._current_texture(plain=True)
 
         if self.geometry == "sphere":
             ideal_w = max(256, int(round(2.0 * np.pi * camera.fx)))
-            source = self._source
-            self._equirect = (
-                cv2.resize(source, (ideal_w, ideal_w // 2),
-                           interpolation=cv2.INTER_AREA)
-                if source.shape[1] > 2 * ideal_w else source
-            )
+
+            def fit(source):
+                # The plain texture is sampled with the *same* maps as the
+                # main one, so it has to be resized in lockstep even when its
+                # own detail would not have needed it.
+                if source is None:
+                    return None
+                return (
+                    cv2.resize(source, (ideal_w, ideal_w // 2),
+                               interpolation=cv2.INTER_AREA)
+                    if self._source.shape[1] > 2 * ideal_w else source
+                )
+
+            self._equirect = fit(self._source)
+            self._plain_equirect = fit(self._plain_source)
         else:
             ideal_s = max(64, int(round(0.5 * np.pi * camera.fx)))
-            source = self._source
-            self._faces = (
-                [cv2.resize(f, (ideal_s, ideal_s), interpolation=cv2.INTER_AREA)
-                 for f in source]
-                if source[0].shape[0] > 2 * ideal_s else list(source)
-            )
+
+            def fit(source):
+                if source is None:
+                    return None
+                return (
+                    [cv2.resize(f, (ideal_s, ideal_s),
+                                interpolation=cv2.INTER_AREA) for f in source]
+                    if self._source[0].shape[0] > 2 * ideal_s else list(source)
+                )
+
+            self._faces = fit(self._source)
+            self._plain_faces = fit(self._plain_source)
 
         self._fitted_fx = float(camera.fx)
         self._padded = None
+        self._padded_plain = None
 
-    def _padded_texture(self):
-        """Get the border-padded texture, building it on first use."""
+    def _current_texture(self, plain: bool = False):
+        """
+        The texture in use, whichever geometry this is.
+
+        Args:
+            plain: Return the pattern-free variant instead. None when the
+                texture was loaded from a file rather than generated.
+
+        Returns:
+            An equirect array, a list of six faces, or None.
+        """
+        if self.geometry == "sphere":
+            return self._plain_equirect if plain else self._equirect
+        return list(self._plain_faces) if plain and self._plain_faces else (
+            None if plain else self._faces
+        )
+
+    def has_plain_texture(self) -> bool:
+        """
+        Whether a pattern-free variant of this backdrop exists.
+
+        Only generated textures have one — a loaded image cannot be split into
+        pattern and shading — so this gates the fade's ``target="plain"``.
+
+        Returns:
+            True if :meth:`render` can reveal a plain backdrop under the fade.
+        """
+        return (self._plain_equirect if self.geometry == "sphere"
+                else self._plain_faces) is not None
+
+    def _padded_texture(self, plain: bool = False):
+        """
+        Get the border-padded texture, building it on first use.
+
+        Args:
+            plain: Pad the pattern-free variant instead.
+
+        Returns:
+            A padded equirect array, or a list of six padded faces.
+        """
+        if plain:
+            if self._padded_plain is None:
+                source = self._current_texture(plain=True)
+                self._padded_plain = (
+                    _pad_equirect(source) if self.geometry == "sphere"
+                    else [_pad_face(f) for f in source]
+                )
+            return self._padded_plain
+
         if self._padded is None:
             if self.geometry == "sphere":
                 self._padded = _pad_equirect(self._equirect)
@@ -1377,32 +1530,90 @@ class Background:
         Raises:
             ValueError: If a finite surface does not enclose the camera.
         """
-        import cv2
-
         self._fit_resolution(camera)
 
         # Kept in a local, not folded into the call: the fade is measured
         # against world-space rays, whereas _surface_vectors() rotates them
         # into the environment's own frame.
         dirs = self._world_rays(camera)
-        vectors = self._surface_vectors(camera, dirs)
-        padded = self._padded_texture()
+        maps = self._sampling_maps(camera, self._surface_vectors(camera, dirs))
 
+        image = self._sample(camera, maps)
+
+        if self.fade is None:
+            return image
+
+        # The plain backdrop is sampled with the *same* maps, so the fade
+        # dissolves the pattern into the shading that was behind it rather
+        # than smearing the two together.
+        plain = (
+            self._sample(camera, maps, plain=True)
+            if self.fade.target == "plain" else None
+        )
+        return self.fade.apply(
+            image, camera, dirs,
+            default_color=self._texture_mean(),
+            plain=plain,
+        )
+
+    def _sampling_maps(
+        self,
+        camera: Camera,
+        vectors: NDArray[np.float32],
+    ) -> Tuple[Any, ...]:
+        """
+        Texture-space sampling coordinates for every pixel.
+
+        Computed once and reused for both the textured and the plain backdrop,
+        which is what guarantees the two line up exactly.
+
+        Args:
+            camera: Camera being rendered.
+            vectors: (H, W, 3) surface lookup vectors.
+
+        Returns:
+            ``(map_x, map_y)`` for a sphere, or ``(map_x, map_y, face_index)``
+            for a cube.
+        """
         if self.geometry == "sphere":
             height, width = self._equirect.shape[:2]
             u, v = equirect_uv(vectors)
             # +0.5 rather than -0.5: the one-texel pad shifts every index by 1.
-            map_x = (u * width + 0.5).astype(np.float32)
-            map_y = (v * height + 0.5).astype(np.float32)
-            return self._apply_fade(
-                cv2.remap(padded, map_x, map_y, cv2.INTER_LINEAR), camera, dirs
-            )
+            return ((u * width + 0.5).astype(np.float32),
+                    (v * height + 0.5).astype(np.float32))
 
         face_index, s, t = cube_face_uv(vectors)
         size = self._faces[0].shape[0]
-        map_x = (s * size + 0.5).astype(np.float32)
-        map_y = (t * size + 0.5).astype(np.float32)
+        return ((s * size + 0.5).astype(np.float32),
+                (t * size + 0.5).astype(np.float32),
+                face_index)
 
+    def _sample(
+        self,
+        camera: Camera,
+        maps: Tuple[Any, ...],
+        plain: bool = False,
+    ) -> NDArray[np.uint8]:
+        """
+        Look up one texture through pre-computed sampling maps.
+
+        Args:
+            camera: Camera being rendered, for the output size.
+            maps: From :meth:`_sampling_maps`.
+            plain: Sample the pattern-free variant instead.
+
+        Returns:
+            uint8 RGB, shape (camera.height, camera.width, 3).
+        """
+        import cv2
+
+        padded = self._padded_texture(plain=plain)
+
+        if self.geometry == "sphere":
+            map_x, map_y = maps
+            return cv2.remap(padded, map_x, map_y, cv2.INTER_LINEAR)
+
+        map_x, map_y, face_index = maps
         image = np.empty((camera.height, camera.width, 3), dtype=np.uint8)
         for i, face_texture in enumerate(padded):
             mask = face_index == i
@@ -1413,29 +1624,7 @@ class Background:
             image[mask] = cv2.remap(
                 face_texture, map_x, map_y, cv2.INTER_LINEAR
             )[mask]
-
-        return self._apply_fade(image, camera, dirs)
-
-    def _apply_fade(
-        self,
-        image: NDArray[np.uint8],
-        camera: Camera,
-        dirs: NDArray[np.float32],
-    ) -> NDArray[np.uint8]:
-        """
-        Run the subject fade over a finished backdrop, if one is attached.
-
-        Args:
-            image: uint8 RGB backdrop.
-            camera: Camera it was rendered from.
-            dirs: (H, W, 3) world-space ray directions.
-
-        Returns:
-            ``image``, or a faded copy.
-        """
-        if self.fade is None:
-            return image
-        return self.fade.apply(image, camera, dirs, self._texture_mean())
+        return image
 
     def composite(
         self,

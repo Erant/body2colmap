@@ -21,6 +21,7 @@ from .fade import (
     DEFAULT_MARGIN,
     DEFAULT_PROFILE,
     DEFAULT_RATE,
+    DEFAULT_TARGET,
     FADE_TARGETS,
 )
 from .face import EYE_STYLES
@@ -96,16 +97,18 @@ class BackgroundFadeConfig:
     #: when the mesh is a bare body and the target subject is not.
     margin: float = DEFAULT_MARGIN
 
-    #: What the backdrop fades to. "local" averages the backdrop's own detail
-    #: away, so the lines go but the wall/floor/ceiling tone carries through
-    #: with no visible patch. "color" uses one flat colour.
-    target: str = "local"
+    #: What the backdrop fades to. "plain" re-renders the backdrop without
+    #: its pattern, so the lines fade out and the wall behind them stays;
+    #: "color" uses one flat colour; "blur" averages the backdrop into itself,
+    #: which smears the lines rather than removing them and is the fallback
+    #: for a loaded texture, which has no pattern-free variant.
+    target: str = DEFAULT_TARGET
 
     #: Flat colour for target="color", RGB 0-1. null = the texture's mean.
     color: Optional[Tuple[float, float, float]] = None
 
     #: Long-side resolution the backdrop is averaged down to for
-    #: target="local". Wants to be well below the texture's own frequency.
+    #: target="blur". Wants to be well below the texture's own frequency.
     detail: int = DEFAULT_DETAIL
 
     def validate(self) -> None:
@@ -123,8 +126,8 @@ class BackgroundFadeConfig:
             )
         if self.target not in FADE_TARGETS:
             raise ValueError(
-                f"Invalid background.fade.target {self.target!r}. Use "
-                f"{' or '.join(repr(t) for t in FADE_TARGETS)}."
+                f"Invalid background.fade.target {self.target!r}. "
+                f"Choose from: {', '.join(FADE_TARGETS)}"
             )
         if self.falloff <= 0.0:
             raise ValueError(
@@ -823,7 +826,7 @@ class Config:
             falloff=fade_data.get('falloff', DEFAULT_FALLOFF),
             rate=fade_data.get('rate', DEFAULT_RATE),
             margin=fade_data.get('margin', DEFAULT_MARGIN),
-            target=fade_data.get('target', 'local'),
+            target=fade_data.get('target', DEFAULT_TARGET),
             color=None if fade_color is None else tuple(fade_color),
             detail=fade_data.get('detail', DEFAULT_DETAIL),
         )
@@ -1231,17 +1234,25 @@ background:
     margin: 1.0
 
     # What the backdrop fades to:
-    #   local - the backdrop's own colour with its detail averaged away, so
-    #           the lines go but the wall/floor/ceiling tone carries through
-    #           and the clear zone has no edge against its surroundings
-    #   color - one flat colour over the whole clear zone
-    target: "local"
+    #   plain - the same backdrop with its pattern suppressed: a grid's walls
+    #           without their lines. The line colour goes to the wall colour
+    #           that was behind it, so the lines fade *out* and the shading,
+    #           the corners and the floor/ceiling split all stay. Needs a
+    #           generated texture -- a photograph cannot be split this way
+    #   color - one flat colour over the whole clear zone. Honest, but the
+    #           backdrop's shading does not survive it, so the clear zone
+    #           reads as a patch where it crosses a floor/wall seam
+    #   blur  - area-average the backdrop into itself. Available for a loaded
+    #           texture, where the other two are not, but note what it does:
+    #           a box average *spreads* a bright line into a wide grey band
+    #           rather than removing it. The lines are still there, smeared
+    target: "plain"
 
     # Flat colour for target: color, as RGB 0-1. null = the texture's mean,
     # which is the one flat colour that leaves the frame's tone unchanged.
     color: null
 
-    # Long-side resolution the backdrop is averaged down to for target: local.
+    # Long-side resolution the backdrop is averaged down to for target: blur.
     # Wants to be well below the texture's own frequency.
     detail: 24
 
@@ -1675,9 +1686,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--background-fade-target",
         type=str,
         choices=sorted(FADE_TARGETS),
-        help="What the backdrop fades to: 'local' (default) averages its own "
-             "detail away, so the lines go but the wall/floor/ceiling tone "
-             "carries through; 'color' uses one flat colour"
+        help="What the backdrop fades to: 'plain' (default) drops the backdrop's "
+             "pattern, so the lines fade out and the wall behind them "
+             "stays; 'color' uses one flat colour; 'blur' averages the "
+             "backdrop into itself, which smears the lines rather than "
+             "removing them and is the fallback for a loaded texture"
     )
     fade_group.add_argument(
         "--background-fade-color",
@@ -1691,7 +1704,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="PIXELS",
         help=f"Long-side resolution the backdrop is averaged down to for the "
-             f"'local' target (default: {DEFAULT_DETAIL}). Wants to be well "
+             f"'blur' target (default: {DEFAULT_DETAIL}). Wants to be well "
              f"below the texture's own frequency"
     )
 

@@ -61,10 +61,16 @@ All notable changes to body2colmap will be documented in this file.
     `--background-fade-rate`
   - `--background-fade-falloff` is a **multiple of the subject's own radius**, not a
     pixel count, so one setting holds across an auto-framed orbit
-  - Fades to the backdrop's **local tone** by default — averaged below the texture's own
-    frequency, so the lines go but the wall/floor/ceiling shading carries through and
-    the clear zone has no edge against its surroundings.
-    `--background-fade-target color` uses one flat colour instead
+  - **The lines fade to the wall, not into a blur.** `--background-fade-target plain`
+    (the default) renders the backdrop twice through one set of sampling maps — once
+    normally, once from the same generator with its pattern suppressed — so inside the
+    clear zone the line colour becomes the wall colour that was behind it, while the
+    shading, the corners and the floor/ceiling split stay sharp. `color` uses one flat
+    colour; `blur` averages the backdrop into itself, which spreads each line into a
+    grey band rather than removing it, and exists only because a loaded texture has no
+    pattern-free variant
+  - Each built-in generator gained a `flat=True` form (grid without lines, checker as
+    its mean tone, sky without its sun), which is what the fade dissolves into
   - `--background-fade-margin` inflates the fitted ellipsoid, for when the mesh is a
     bare body and the subject to be generated is not
   - Needs a backdrop; `--background-fade` on its own is rejected rather than ignored

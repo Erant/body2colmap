@@ -151,7 +151,10 @@ reads as the camera moving rather than the subject spinning
 - Parameterizations: `equirect_uv()` / `equirect_directions()` and
   `cube_face_uv()` / `cube_face_directions()`, each pair mutual inverses
 - Generators in `TEXTURE_GENERATORS`: `grid`, `checker`, `gradient`,
-  `blender_sky`
+  `blender_sky`. Each takes `flat=True` for its pattern-free form, which is
+  what the subject fade dissolves the pattern into
+- `_sampling_maps()` / `_sample()`: texture lookup split from map construction,
+  so the textured and plain backdrops are sampled identically
 - `DEFAULT_RADIUS_SCALE`: the default backdrop radius, as a multiple of the
   orbit radius. Lives here rather than in `config.py` because `config.py` and
   `pipeline.py` both default to it and must not drift
@@ -165,6 +168,9 @@ wrong (see the marker test)
 does not present the silhouette as a hard occlusion boundary
 
 **Key components**:
+- `SubjectFade.target`: `"plain"` (default) reveals the pattern-free backdrop,
+  `"color"` a flat colour, `"blur"` an average of the backdrop into itself.
+  Only `"plain"` actually removes a line; see below
 - `Ellipsoid`: stored as the linear map to the unit sphere, not as
   (axes, rotation). That is what makes the per-pixel test two lines
   - `Ellipsoid.fit()`: minimum-volume enclosing ellipsoid (Khachiyan), with
@@ -1020,18 +1026,35 @@ clear zone and a narrow one. That is usually what you want; it is also why
 `falloff = 1.0` is not as aggressive as it sounds (the clear zone is the
 ellipsoid at 2x, and the subject only fills ~0.8 of frame).
 
-### The default target is local tone, not a flat colour
-Fading to one flat colour is easier to reason about but leaves a visible patch
-wherever the clear zone crosses a cube's floor/wall seam — a soft blob is still
-a shape, and shapes are what this feature exists to remove.
-`target="local"` instead area-averages the backdrop down to ~24 px on its long
-side and back up: below the texture's own frequency, so the lines vanish while
-the low-frequency shading survives exactly. The clear zone then has no edge
-against its surroundings at all.
+### The lines fade to the wall, through a second texture
+`target="plain"` samples the backdrop **twice through one set of maps**: once
+normally, once from the same generator with `flat=True`. At full weight the
+pixel *is* the plain render, so the line colour becomes the wall colour that
+was behind it while the shading, the corners and the floor/ceiling split stay
+sharp.
 
-`target="color"` is kept because it is the honest control, and because a
-deliberately chosen colour (matching `render.bg_color`, say) is a legitimate
-experiment.
+`_sampling_maps()` exists for this: computing the maps once and passing them to
+`_sample()` twice is what guarantees the two renders line up to the texel.
+`_fit_resolution()` and `_padded_texture()` carry the plain texture in lockstep
+for the same reason — a plain texture resized on its own detail budget would
+not index the same way. The test asserts bit-identity against a `flat=True`
+backdrop rendered separately.
+
+**`target="blur"` is the earlier mistake, kept honestly named.** The first
+implementation area-averaged the render into itself and called it `"local"`,
+on the reasoning that a box average below the texture's frequency removes the
+lines. An average removes their *frequency*, not their brightness: the energy
+spreads into a wide grey band, so the clear zone is a smear of the grid rather
+than a grid-free wall. It stays only because a **loaded** texture has no plain
+variant and this is the only thing available there.
+`test_blur_target_smears_the_lines_instead_of_removing_them` pins the
+difference so the two cannot quietly converge.
+
+**`flat` is a generator kwarg, not a parameter override.** A table of
+"parameters that suppress this generator's pattern" cannot express `grid`:
+setting `line_color = base_color` still leaves lines on the floor and ceiling,
+which draw over their own base colours. Only the generator knows what its
+pattern is, so each one says so.
 
 ### The fade runs inside `Background.render()`, so it cannot touch the subject
 `composite()` lays the base layer over an already-faded backdrop, so an opaque

@@ -265,8 +265,8 @@ class TestBackgroundFadeConfigValidation:
 
     def test_rejects_an_unknown_target(self):
         config = BackgroundConfig()
-        config.fade.target = "blur"
-        with pytest.raises(ValueError, match="target"):
+        config.fade.target = "local"
+        with pytest.raises(ValueError, match="plain, color, blur"):
             config.validate()
 
     @pytest.mark.parametrize(
@@ -306,6 +306,11 @@ class TestBackgroundFadeCliOverrides:
     def test_off_by_default(self):
         assert self._fade("--background", "grid").enabled is False
 
+    def test_defaults_to_the_pattern_free_target(self):
+        """Not 'blur': averaging smears the lines rather than removing them."""
+        fade = self._fade("--background", "grid", "--background-fade", "linear")
+        assert fade.target == "plain"
+
     def test_naming_a_profile_enables_it(self):
         """One flag is enough, matching --background's own shape."""
         fade = self._fade("--background", "grid", "--background-fade", "gaussian")
@@ -343,8 +348,8 @@ class TestBackgroundFadeCliOverrides:
     def test_an_explicit_target_still_wins(self):
         fade = self._fade("--background", "grid", "--background-fade", "linear",
                           "--background-fade-color", "0.5,0.5,0.5",
-                          "--background-fade-target", "local")
-        assert fade.target == "local"
+                          "--background-fade-target", "blur")
+        assert fade.target == "blur"
 
     def test_a_malformed_colour_is_reported(self):
         with pytest.raises(ValueError, match="background-fade-color"):

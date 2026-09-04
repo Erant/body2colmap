@@ -58,8 +58,9 @@ DEFAULT_RATE: float = 4.0
 DEFAULT_MARGIN: float = 1.0
 
 #: Long-side resolution, in pixels, that the backdrop is area-averaged down to
-#: for ``target="local"``.  Well below the grid's own frequency, so the lines
-#: disappear and only the wall/floor/ceiling tone survives.
+#: for ``target="blur"``.  Well below the grid's own frequency -- but note that
+#: averaging *spreads* a line rather than removing it, which is why "blur" is
+#: the fallback and not the default; see :data:`FADE_TARGETS`.
 DEFAULT_DETAIL: int = 24
 
 #: Points sampled from the mesh for the ellipsoid fit.  The result is checked
@@ -137,8 +138,27 @@ DECAY_PROFILES: Dict[str, Callable[[NDArray[np.float32], float], NDArray[np.floa
     "inverse_square": _inverse_square,
 }
 
-#: How the faded region is coloured.
-FADE_TARGETS: Tuple[str, ...] = ("local", "color")
+#: What the backdrop fades *to*, in preference order.
+#:
+#: ``"plain"`` reveals the same environment with its pattern suppressed -- a
+#: grid's walls without their lines.  This is the only one that actually fades
+#: the lines *out*: the line colour goes to the wall colour that was behind it,
+#: and the wall, its shading and the room's corners all stay put.  It needs a
+#: generated texture, since a loaded photograph cannot be split into pattern
+#: and shading.
+#:
+#: ``"color"`` replaces the region with one flat colour.  Honest and easy to
+#: reason about, but the backdrop's shading does not survive it, so the clear
+#: zone reads as a patch wherever it crosses a floor/wall seam.
+#:
+#: ``"blur"`` area-averages the backdrop into itself.  Available for a loaded
+#: texture, where the other two are not, but be clear about what it does: a box
+#: average *spreads* a bright line into a wide grey band rather than removing
+#: it.  The lines are still there, smeared.  It is a fallback, not the fix.
+FADE_TARGETS: Tuple[str, ...] = ("plain", "color", "blur")
+
+#: Fade target used when none is named.
+DEFAULT_TARGET: str = "plain"
 
 
 def decay_weight(
@@ -503,9 +523,9 @@ class SubjectFade:
         profile: Decay profile name, a key of :data:`DECAY_PROFILES`.
         falloff: Band width, in multiples of the ellipsoid radius.
         rate: Shape constant for the profiles that take one.
-        target: "local" or "color"; see :meth:`__init__`.
+        target: What the backdrop fades to; see :data:`FADE_TARGETS`.
         color: Explicit fade colour as RGB floats in [0, 1], or None.
-        detail: Long-side resolution for the "local" average, in pixels.
+        detail: Long-side resolution for the "blur" average, in pixels.
     """
 
     def __init__(
@@ -514,7 +534,7 @@ class SubjectFade:
         profile: str = DEFAULT_PROFILE,
         falloff: float = DEFAULT_FALLOFF,
         rate: float = DEFAULT_RATE,
-        target: str = "local",
+        target: str = DEFAULT_TARGET,
         color: Optional[Sequence[float]] = None,
         detail: int = DEFAULT_DETAIL,
     ):
@@ -526,16 +546,18 @@ class SubjectFade:
                 radius. Scale-free: the band tracks the subject's size in
                 frame rather than a pixel count.
             rate: Shape constant for exponential / gaussian / inverse_square.
-            target: What the backdrop fades *to*. ``"local"`` uses the
-                backdrop's own colour with its detail averaged away, so the
-                lines vanish and the wall/floor/ceiling tone carries through
-                with no visible patch. ``"color"`` uses one flat colour for
-                the whole clear zone.
+            target: What the backdrop fades *to*; see :data:`FADE_TARGETS`.
+                ``"plain"`` (the default) reveals the same environment with
+                its pattern suppressed, so the lines fade out and the wall
+                stays. ``"color"`` uses one flat colour. ``"blur"`` averages
+                the backdrop into itself, which smears the lines rather than
+                removing them and exists for loaded textures, which have no
+                plain variant.
             color: RGB floats in [0, 1] for ``target="color"``. None means
                 the caller supplies a default -- in practice the texture's
                 own mean colour.
             detail: Long-side resolution the backdrop is area-averaged down
-                to for ``target="local"``. Must be >= 1, and wants to be well
+                to for ``target="blur"``. Must be >= 1, and wants to be well
                 below the texture's own frequency.
 
         Raises:
@@ -549,8 +571,8 @@ class SubjectFade:
             )
         if target not in FADE_TARGETS:
             raise ValueError(
-                f"Unknown fade target {target!r}. Use "
-                f"{' or '.join(repr(t) for t in FADE_TARGETS)}."
+                f"Unknown fade target {target!r}. Choose from: "
+                f"{', '.join(FADE_TARGETS)}"
             )
         if falloff <= 0.0:
             raise ValueError(
@@ -614,6 +636,7 @@ class SubjectFade:
         camera: Camera,
         directions: NDArray[np.float32],
         default_color: Optional[Sequence[float]] = None,
+        plain: Optional[NDArray[np.uint8]] = None,
     ) -> NDArray[np.uint8]:
         """
         Fade a rendered backdrop around the subject.
@@ -625,16 +648,37 @@ class SubjectFade:
             default_color: RGB floats in [0, 1] used when ``target="color"``
                 and no explicit colour was set. None falls back to the mean
                 of ``image``.
+            plain: The same view of the same backdrop with its pattern
+                suppressed, sampled through the same maps. Required for
+                ``target="plain"``.
 
         Returns:
             A new uint8 RGB image.
+
+        Raises:
+            ValueError: If ``target="plain"`` and no plain backdrop was given,
+                or it disagrees with ``image`` in size.
         """
+        if self.target == "plain":
+            if plain is None:
+                raise ValueError(
+                    "target='plain' fades the backdrop's pattern into the "
+                    "shading behind it, so it needs that shading rendered "
+                    "too. Only a generated texture has one; for a loaded "
+                    "image use target='color' or target='blur'."
+                )
+            if plain.shape != image.shape:
+                raise ValueError(
+                    f"The plain backdrop is {plain.shape} but the backdrop is "
+                    f"{image.shape}; they must be sampled through one set of maps"
+                )
+
         weight = self.weights(camera, directions)[..., None]
         if not np.any(weight > 0.0):
             return image
 
         base = image.astype(np.float32)
-        target = self._target_image(base, default_color)
+        target = self._target_image(base, default_color, plain)
         faded = base * (1.0 - weight) + target * weight
         return np.clip(faded + 0.5, 0, 255).astype(np.uint8)
 
@@ -642,6 +686,7 @@ class SubjectFade:
         self,
         base: NDArray[np.float32],
         default_color: Optional[Sequence[float]],
+        plain: Optional[NDArray[np.uint8]],
     ) -> NDArray[np.float32]:
         """
         The colour the backdrop fades to, as a float image or a broadcastable
@@ -650,20 +695,27 @@ class SubjectFade:
         Args:
             base: The backdrop render as float32 RGB in [0, 255].
             default_color: Fallback colour in [0, 1], or None.
+            plain: The pattern-free backdrop, for ``target="plain"``.
 
         Returns:
             Either (H, W, 3) or (3,), in [0, 255].
         """
-        if self.target == "local":
+        if self.target == "plain":
+            # Nothing is averaged: at full weight the pixel *is* the wall
+            # colour that the line was drawn over, so the line goes and the
+            # shading, the corners and the floor/ceiling split all stay.
+            return plain.astype(np.float32)
+
+        if self.target == "blur":
             import cv2
 
             height, width = base.shape[:2]
             long_side = max(height, width)
-            # Area-average down and bilinearly back up. A box average below
-            # the texture's own frequency erases the lines while preserving
-            # local tone exactly, so the clear zone has no edge against the
-            # surrounding backdrop -- which a single flat colour cannot manage
-            # across a cube's floor/wall/ceiling split.
+            # Area-average down and bilinearly back up. Note what this does
+            # and does not do: it removes the *frequency* of the lines, not
+            # the lines -- their brightness is spread into a wide band. Only
+            # target="plain" removes them, and only a generated texture has
+            # the plain variant, which is why this fallback exists at all.
             small_w = max(1, int(round(width * self.detail / long_side)))
             small_h = max(1, int(round(height * self.detail / long_side)))
             small = cv2.resize(base, (small_w, small_h), interpolation=cv2.INTER_AREA)
@@ -679,8 +731,10 @@ class SubjectFade:
 
     def describe(self) -> str:
         """One-line summary, for verbose CLI output."""
-        if self.target == "local":
-            to = f"local tone ({self.detail}px average)"
+        if self.target == "plain":
+            to = "the backdrop without its pattern"
+        elif self.target == "blur":
+            to = f"a {self.detail}px average of itself"
         elif self.color is not None:
             to = "colour (" + ", ".join(f"{c:.2f}" for c in self.color) + ")"
         else:

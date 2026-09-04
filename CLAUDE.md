@@ -714,16 +714,40 @@ pinned in `tests/test_fade.py`; it is also why a compact profile is the default.
 `step` is the control condition — a plain hole in the backdrop — and is what
 the coverage tests use, since it makes the clear zone a clean boolean.
 
-### Key Design: The Default Fades To Local Tone, Not To A Flat Colour
-A single flat colour leaves a visible patch wherever the clear zone crosses a
-cube's floor/wall seam, and a soft blob is still a shape — which is what this
-feature exists to remove. `target: local` instead area-averages the backdrop
-down to ~24 px on its long side and back up. That is below the texture's own
-frequency, so the lines vanish while the low-frequency shading survives
-exactly, and the clear zone has no edge against its surroundings.
+### Key Design: The Lines Fade To The Wall, Via A Second Texture
+`target: plain` (the default) renders the backdrop **twice through one set of
+sampling maps**: once normally, and once from the same generator with
+`flat=True`, which suppresses its pattern — a grid's walls without their lines,
+a checker's mean tone. At full fade weight the pixel *is* the plain render, so
+the line colour goes to the wall colour that was behind it and everything else
+— the wall shading, the corners, the floor/ceiling split — stays exactly where
+it was, at full sharpness.
 
-`target: color` is kept as the honest control, and for the legitimate case of
-matching `render.bg_color` deliberately.
+The two textures are fitted, padded and sampled in lockstep precisely so this
+identity holds: `tests/test_fade.py` asserts the clear zone is *bit-identical*
+to a `flat=True` backdrop rendered on its own.
+
+**Rejected: blurring the backdrop into itself.** The first implementation
+area-averaged the render down to ~24 px and back up and called it `local`,
+reasoning that a box average below the texture's own frequency removes the
+lines. It does not. An average removes a line's *frequency*, not its
+brightness: the line's energy is spread into a wide grey band, so the clear
+zone comes out as a smear of the grid rather than a grid-free wall — visibly
+so, and measurably (the cleared region reads brighter than the wall it should
+have become). It survives as `target: blur`, honestly named, because a
+**loaded** texture has no plain variant to reveal and it is the only option
+there.
+
+**Rejected: one flat colour.** `target: color` erases the backdrop's shading
+along with its lines, so the clear zone reads as a patch wherever it crosses a
+floor/wall seam — a soft blob is still a shape. Kept as the honest control and
+for deliberately matching `render.bg_color`.
+
+The `flat` kwarg lives on each generator rather than in a table of
+pattern-suppressing parameter overrides, because for `grid` there is no such
+override: setting `line_color = base_color` still leaves lines visible on the
+floor and ceiling, which use their own base colours. Only the generator knows
+what its pattern is.
 
 ### Scope
 The fade runs inside `Background.render()`, so `composite()` lays the base
@@ -732,7 +756,9 @@ construction. Everything the backdrop is excluded from, the fade is excluded
 from too: no COLMAP export, no point cloud, no depth buffer, no silhouette
 mask. It needs a backdrop to fade — `--background-fade` alone is rejected
 rather than ignored — and a mesh to fit an ellipsoid to, so splat scenes are
-out for the same reason they have no backdrop.
+out for the same reason they have no backdrop. `target: plain` additionally
+needs a *generated* texture, and is rejected rather than silently downgraded
+when given a loaded one.
 
 ### Validation
 The load-bearing test is `TestClearZoneCoversTheSilhouette`: every projected

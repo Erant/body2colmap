@@ -363,12 +363,26 @@ subject's extent.
 The first four reach zero exactly at the band edge; the last three have tails
 that never quite do, and take `--background-fade-rate` to tighten them.
 
-By default the backdrop fades to its own **local tone** — averaged down below
-the texture's own frequency, so the lines disappear but the wall/floor/ceiling
-shading carries through and the clear zone has no edge against its surroundings.
-`--background-fade-target color` uses one flat colour instead (the texture's
-mean, or `--background-fade-color`), which is easier to reason about but leaves
-a visible patch wherever it crosses a cube's floor/wall seam.
+#### What the lines fade *to*
+
+By default (`--background-fade-target plain`) the backdrop is rendered twice:
+once normally, and once with its pattern suppressed — a grid's walls without
+their lines. Inside the clear zone you get the second one, so **the line colour
+becomes the wall colour that was behind it**. The lines go; the wall shading,
+the corners and the floor/ceiling split all stay, at full sharpness. This needs
+a generated texture, since a photograph cannot be split into pattern and
+shading.
+
+`--background-fade-target color` replaces the region with one flat colour (the
+texture's mean, or `--background-fade-color`). Easy to reason about, but the
+backdrop's shading does not survive, so the clear zone reads as a patch
+wherever it crosses a floor/wall seam.
+
+`--background-fade-target blur` area-averages the backdrop into itself. Be
+clear about what this does: a box average removes the lines' *frequency*, not
+their brightness — each line is spread into a wide grey band rather than
+removed, so the clear zone is a smear of the grid. It exists because a
+**loaded** texture has no pattern-free variant and it is the only option there.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -376,9 +390,9 @@ a visible patch wherever it crosses a cube's floor/wall seam.
 | `--background-fade-falloff FACTOR` | `1.0` | Band width, as a multiple of the subject's radius |
 | `--background-fade-rate K` | `4.0` | Shape constant for `exponential`, `gaussian`, `inverse_square` |
 | `--background-fade-margin FACTOR` | `1.0` | Inflate the fitted ellipsoid before measuring |
-| `--background-fade-target {local,color}` | `local` | Fade to the backdrop's own tone, or to one flat colour |
+| `--background-fade-target {plain,color,blur}` | `plain` | Reveal the backdrop without its pattern, one flat colour, or an average of itself |
 | `--background-fade-color R,G,B` | texture mean | Flat colour; implies `--background-fade-target color` |
-| `--background-fade-detail PIXELS` | `24` | Resolution the backdrop is averaged down to for `local` |
+| `--background-fade-detail PIXELS` | `24` | Resolution the backdrop is averaged down to for `blur` |
 | `--no-background-fade` | — | Disable a fade enabled by a config file |
 
 Generator parameters go in the config file, since they vary per texture:

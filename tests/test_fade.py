@@ -308,6 +308,10 @@ class TestApply:
         fade = SubjectFade(ellipsoid, profile=profile, **kwargs)
         return camera, fade, world_rays(camera)
 
+    def test_target_names_are_checked(self):
+        with pytest.raises(ValueError, match="plain, color, blur"):
+            SubjectFade(Ellipsoid(np.zeros(3), np.eye(3)), target="local")
+
     def test_flat_colour_target(self):
         camera, fade, dirs = self._setup(target="color", color=(1.0, 0.0, 0.0))
         image = np.full((96, 96, 3), 40, dtype=np.uint8)
@@ -333,27 +337,63 @@ class TestApply:
 
         assert tuple(faded[48, 48]) == (255, 0, 0)
 
-    def test_local_target_erases_detail_but_keeps_tone(self):
+    def test_plain_target_reveals_the_pattern_free_backdrop(self):
         """
-        What `target="local"` is for: the lines go, the wall tone stays, so
-        the clear zone has no edge against the surrounding backdrop.
+        The contract of the default target: at full weight the pixel *is* the
+        plain backdrop, exactly. No averaging, so the line is gone rather than
+        spread out.
         """
-        # detail=8 puts the averaging box at 12 px, two whole line periods, so
-        # the box average is exact rather than beating against the pattern.
-        camera, fade, dirs = self._setup(target="local", detail=8)
+        camera, fade, dirs = self._setup(target="plain")
+        image = np.full((96, 96, 3), 100, dtype=np.uint8)
+        image[:, ::6] = 200                       # "grid lines"
+        plain = np.full((96, 96, 3), 100, dtype=np.uint8)   # the walls alone
+
+        faded = fade.apply(image, camera, dirs, plain=plain)
+        cleared = fade.weights(camera, dirs) > 0.99
+
+        np.testing.assert_array_equal(faded[cleared], plain[cleared])
+
+    def test_plain_target_keeps_shading_a_flat_colour_would_lose(self):
+        """Why "plain" beats "color": the backdrop's own shading survives."""
+        camera, fade, dirs = self._setup(target="plain")
+        ramp = np.linspace(60, 180, 96).astype(np.uint8)
+        plain = np.repeat(ramp[:, None, None], 96, axis=1).repeat(3, axis=2)
+        image = plain.copy()
+        image[:, ::6] = 240
+
+        faded = fade.apply(image, camera, dirs, plain=plain)
+        cleared = fade.weights(camera, dirs) > 0.99
+
+        # The vertical ramp is intact where the lines were removed.
+        np.testing.assert_array_equal(faded[cleared], plain[cleared])
+        assert faded[cleared].std() > 15.0
+
+    def test_blur_target_smears_the_lines_instead_of_removing_them(self):
+        """
+        Pinned deliberately, because this is the trap the default avoids: a
+        box average removes the lines' *frequency*, not their brightness. The
+        clear zone comes out brighter than the wall it is supposed to become.
+        """
+        camera, fade, dirs = self._setup(target="blur", detail=8)
         image = np.full((96, 96, 3), 100, dtype=np.uint8)
         image[:, ::6] = 200                       # "grid lines"
 
         faded = fade.apply(image, camera, dirs)
         cleared = fade.weights(camera, dirs) > 0.99
 
-        assert faded[cleared].std() < 3.0                 # detail gone
-        assert abs(float(faded[cleared].mean()) - float(image.mean())) < 6.0
+        assert float(faded[cleared].mean()) > 110.0
+
+    def test_plain_target_demands_a_plain_backdrop(self):
+        camera, fade, dirs = self._setup(target="plain")
+        image = np.full((96, 96, 3), 40, dtype=np.uint8)
+
+        with pytest.raises(ValueError, match="generated texture"):
+            fade.apply(image, camera, dirs)
 
     def test_a_fade_that_reaches_nothing_returns_the_image_untouched(self):
         camera = make_camera(position=(0.0, 0.0, 3.0))
         far = Ellipsoid(np.array([0.0, 0.0, 500.0]), np.eye(3))
-        fade = SubjectFade(far, profile="step")
+        fade = SubjectFade(far, profile="step", target="color")
         image = np.full((72, 96, 3), 40, dtype=np.uint8)
 
         assert fade.apply(image, camera, world_rays(camera)) is image
@@ -401,31 +441,62 @@ class TestBackgroundIntegration:
         return make_camera(width=160, height=160, focal=140.0,
                            position=(0.0, 0.0, 4.0))
 
-    def test_render_clears_the_middle_and_keeps_the_edges(self):
-        camera = self._camera()
-        plain = self._plain().render(camera)
-        # detail=8 rather than the default: this camera sees the cube's grid
-        # cells at ~37 px, so the default's 7 px averaging box is only just
-        # wide enough to swallow a line.
-        faded = self._background(
-            profile="step", target="local", detail=8
-        ).render(camera)
-
-        cleared = SubjectFade(
-            self._ellipsoid(), profile="step"
+    @staticmethod
+    def _cleared(camera, ellipsoid):
+        return SubjectFade(
+            ellipsoid, profile="step", target="color"
         ).weights(camera, world_rays(camera)) > 0.99
 
-        # Measured as neighbour-to-neighbour variation, not as a plain
-        # standard deviation: "local" deliberately keeps the low-frequency
-        # wall/floor tone, and only the grid lines are supposed to go.
-        inside = cleared[:, :-1] & cleared[:, 1:]
+    def test_the_clear_zone_is_exactly_the_room_without_its_lines(self):
+        """
+        The load-bearing contract, and the one an earlier implementation got
+        wrong: inside the clear zone the render must be *bit-identical* to the
+        same backdrop generated with ``flat=True``. That is what "the lines
+        fade to the wall colour" means. Anything that averages the lines into
+        their surroundings -- a blur, however wide -- fails this while still
+        looking soft and plausible.
+        """
+        camera = self._camera()
+        faded = self._background(profile="step").render(camera)
 
-        def detail(image):
-            steps = np.abs(np.diff(image.astype(float), axis=1)).mean(axis=2)
-            return float(steps[inside].mean())
+        lines_removed = Background.create(
+            "grid", "cube", resolution=256, center=np.zeros(3), radius=8.0,
+            params={"flat": True},
+        ).render(camera)
+        untouched = self._plain().render(camera)
+        cleared = self._cleared(camera, self._ellipsoid())
 
-        assert detail(faded) < detail(plain) / 10.0
-        np.testing.assert_array_equal(faded[~cleared], plain[~cleared])
+        np.testing.assert_array_equal(faded[cleared], lines_removed[cleared])
+        np.testing.assert_array_equal(faded[~cleared], untouched[~cleared])
+
+    def test_the_clear_zone_keeps_the_room_a_flat_colour_would_erase(self):
+        """
+        The clear zone is not a hole. The wall/floor/ceiling split survives
+        inside it, which is what stops it reading as a patch of its own.
+        """
+        camera = self._camera()
+        faded = self._background(profile="step").render(camera)
+        cleared = self._cleared(camera, self._ellipsoid())
+
+        assert faded[cleared].std() > 5.0
+
+    def test_blur_leaves_the_lines_behind_where_plain_does_not(self):
+        """Pinned as a contrast, so the two targets cannot quietly converge."""
+        camera = self._camera()
+        cleared = self._cleared(camera, self._ellipsoid())
+        lines_removed = Background.create(
+            "grid", "cube", resolution=256, center=np.zeros(3), radius=8.0,
+            params={"flat": True},
+        ).render(camera)
+
+        blurred = self._background(
+            profile="step", target="blur", detail=8
+        ).render(camera)
+
+        error = np.abs(
+            blurred[cleared].astype(float) - lines_removed[cleared].astype(float)
+        ).mean()
+        assert error > 2.0
 
     def test_texture_mean_is_the_fallback_colour(self):
         background = self._background(profile="step", target="color")
