@@ -285,7 +285,11 @@ def transform_splat_scene(
         centroid: 3-vector added before applying ``M``.
 
     Returns:
-        A new :class:`SplatScene` in world coordinates.
+        A new :class:`SplatScene` in world coordinates. ``extras`` are copied
+        through row for row and NOT reoriented: they are opaque per-Gaussian
+        scalars to this module, so a directional extra (brush's ``ev_dir_*``)
+        would come out in the source frame. No pipeline anchors an
+        evidence-bearing splat -- those are SH degree 3 and refused below.
 
     Raises:
         ValueError: If the scene carries higher-order spherical harmonics.
@@ -321,6 +325,7 @@ def transform_splat_scene(
             opacities=np.asarray(scene.opacities, np.float32).copy(),
             sh_coeffs=np.asarray(scene.sh_coeffs, np.float32).copy(),
             sh_degree=scene.sh_degree,
+            extras={k: v.copy() for k, v in scene.extras.items()},
         )
 
     R = _quats_to_matrices(scene.quats)                       # (N, 3, 3)
@@ -355,6 +360,7 @@ def transform_splat_scene(
         opacities=np.asarray(scene.opacities, np.float32).copy(),
         sh_coeffs=np.asarray(scene.sh_coeffs, np.float32).copy(),
         sh_degree=scene.sh_degree,
+        extras={k: v.copy() for k, v in scene.extras.items()},
     )
 
 

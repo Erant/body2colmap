@@ -11,8 +11,17 @@ already in world coordinates (Y-up, Z-out).
 """
 
 import numpy as np
-from typing import Tuple, Optional
+from typing import Dict, Tuple, Optional
 from numpy.typing import NDArray
+
+
+# The vertex columns the scene understands. Anything else in a .ply is an
+# extra: carried through unchanged so a load-and-save round trip is lossless.
+_STANDARD_COLUMNS = frozenset(
+    ["x", "y", "z", "scale_0", "scale_1", "scale_2",
+     "rot_0", "rot_1", "rot_2", "rot_3", "opacity",
+     "f_dc_0", "f_dc_1", "f_dc_2"]
+)
 
 
 class SplatScene:
@@ -26,6 +35,13 @@ class SplatScene:
         opacities: (N,) opacity values (logit-space from training)
         sh_coeffs: (N, K, 3) spherical harmonics coefficients
         sh_degree: int, SH degree (typically 3, giving 16 coeffs)
+        extras: dict of name -> (N,) array, every per-Gaussian vertex property
+            the .ply carried beyond the standard 3DGS columns. Opaque to this
+            class: nothing here reads them, but ``to_ply`` writes them back so
+            a load-and-save round trip does not strip what a trainer attached
+            (brush's ``ev_*`` multi-view evidence block, which
+            ``brush-splat-render --confidence`` gates on, is the case that
+            motivated this). Insertion order is the column order on disk.
 
     The interface mirrors Scene:
         - get_bounds() -> (min_corner, max_corner)
@@ -40,7 +56,8 @@ class SplatScene:
         quats: NDArray[np.float32],
         opacities: NDArray[np.float32],
         sh_coeffs: NDArray[np.float32],
-        sh_degree: int = 3
+        sh_degree: int = 3,
+        extras: Optional[Dict[str, NDArray]] = None,
     ):
         """
         Initialize SplatScene.
@@ -52,6 +69,14 @@ class SplatScene:
             opacities: (N,) opacity values
             sh_coeffs: (N, K, 3) spherical harmonics coefficients
             sh_degree: SH degree (default 3)
+            extras: Extra per-Gaussian vertex properties, name -> (N,) array,
+                written back by :meth:`to_ply` after the standard columns and
+                otherwise ignored. Each array must have one value per
+                Gaussian; the dtype is kept as given.
+
+        Raises:
+            ValueError: If an extra is not one value per Gaussian, or is named
+                like a standard column.
         """
         self.means = np.asarray(means, dtype=np.float32)
         self.scales = np.asarray(scales, dtype=np.float32)
@@ -59,6 +84,21 @@ class SplatScene:
         self.opacities = np.asarray(opacities, dtype=np.float32)
         self.sh_coeffs = np.asarray(sh_coeffs, dtype=np.float32)
         self.sh_degree = sh_degree
+
+        n = len(self.means)
+        self.extras: Dict[str, NDArray] = {}
+        for name, values in (extras or {}).items():
+            if name in _STANDARD_COLUMNS or name.startswith("f_rest_"):
+                raise ValueError(
+                    f"extra '{name}' collides with a standard splat column"
+                )
+            arr = np.asarray(values)
+            if arr.shape != (n,):
+                raise ValueError(
+                    f"extra '{name}' must be one value per Gaussian, shape "
+                    f"({n},), got {arr.shape}"
+                )
+            self.extras[name] = arr
 
         # Cached computations
         self._bounds: Optional[Tuple[NDArray[np.float32], NDArray[np.float32]]] = None
@@ -75,6 +115,10 @@ class SplatScene:
         - opacity: opacity logit
         - f_dc_0, f_dc_1, f_dc_2: DC spherical harmonics
         - f_rest_*: higher-order SH coefficients
+
+        Every other vertex property (brush's ``ev_*`` evidence block, normals,
+        anything a tool attached) lands in ``extras`` in file order, dtype
+        intact, and :meth:`to_ply` writes it back.
 
         Args:
             filepath: Path to .ply file
@@ -172,13 +216,22 @@ class SplatScene:
             # Default to 3, will use what we have
             sh_degree = 3
 
+        # Whatever the file carries beyond the columns above. Copied out of
+        # plyfile's memmap-backed record array so the scene owns its data.
+        extras = {
+            name: np.array(vertex[name])
+            for name in vertex.data.dtype.names
+            if name not in _STANDARD_COLUMNS and not name.startswith('f_rest_')
+        }
+
         return cls(
             means=means,
             scales=scales,
             quats=quats,
             opacities=opacities,
             sh_coeffs=sh_coeffs,
-            sh_degree=sh_degree
+            sh_degree=sh_degree,
+            extras=extras,
         )
 
     def get_bounds(self) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
@@ -299,7 +352,9 @@ class SplatScene:
 
         Produces a file compatible with from_ply() and standard 3DGS tools.
         All values are written in their native spaces (log-scale, logit-opacity,
-        raw SH coefficients).
+        raw SH coefficients). ``extras`` follow the standard columns, in
+        insertion order, so a file loaded with :meth:`from_ply` is written
+        back with every property it came with.
 
         Args:
             filepath: Path to output .ply file
@@ -325,6 +380,8 @@ class SplatScene:
         ]
         for i in range(n_sh_rest * 3):
             props.append((f'f_rest_{i}', 'f4'))
+        for name, values in self.extras.items():
+            props.append((name, values.dtype.str))
 
         vertex_data = np.empty(n_gaussians, dtype=props)
 
@@ -358,14 +415,19 @@ class SplatScene:
             vertex_data[f'f_rest_{i + n_sh_rest}'] = self.sh_coeffs[:, i + 1, 1]
             vertex_data[f'f_rest_{i + 2 * n_sh_rest}'] = self.sh_coeffs[:, i + 1, 2]
 
+        # Extras, verbatim
+        for name, values in self.extras.items():
+            vertex_data[name] = values
+
         element = PlyElement.describe(vertex_data, 'vertex')
         PlyData([element]).write(filepath)
 
     def __repr__(self) -> str:
         """String representation for debugging."""
+        extras = f", extras={list(self.extras)}" if self.extras else ""
         return (
             f"SplatScene(gaussians={len(self.means)}, "
-            f"sh_degree={self.sh_degree})"
+            f"sh_degree={self.sh_degree}{extras})"
         )
 
     def __len__(self) -> int:

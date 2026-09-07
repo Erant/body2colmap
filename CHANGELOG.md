@@ -4,6 +4,16 @@ All notable changes to body2colmap will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **`SplatScene` no longer strips extra vertex properties on a load-and-save round
+  trip.** `from_ply` collects every column beyond the standard 3DGS set into
+  `scene.extras` (name -> per-Gaussian array, file order, dtype intact) and `to_ply`
+  writes them back after the standard columns. brush's `ev_*` multi-view evidence
+  block was the casualty: a scene staged through `to_ply` for `brush-splat-render
+  --confidence` lost it, the renderer warned "--confidence without evidence", and the
+  gate silently became plain alpha. `transform_splat_scene` copies extras through by
+  row (unreoriented; it refuses the SH-degree-3 splats evidence rides on anyway)
+
 ### Added
 - **Environment backdrop** (`--background`): draws a world-fixed sphere or cube behind
   the render, so an orbit reads as the camera moving rather than the subject spinning on
