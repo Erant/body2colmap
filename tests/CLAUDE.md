@@ -16,6 +16,7 @@ tests/
 ├── test_background.py    # Environment backdrop
 ├── test_fade.py          # Backdrop fade around the subject
 ├── test_splat_mask.py    # Inactive/reactive mask over a splat overlay
+├── test_outline.py       # Two-tone outline from a coverage mask
 ├── test_exporter.py      # COLMAP export
 └── test_pipeline.py      # Integration tests
 ```
@@ -77,6 +78,20 @@ tests/
      the sequence would silently misalign every frame after it
    - `apply()` replaces alpha and leaves RGB alone: an inactive pixel is
      marked, not erased
+
+7. **renderer.py** (`outline_from_mask`, `Renderer.render_outline(mask=)`)
+   - The drawing is a pure function of a boolean mask, so it is tested
+     without GL: fill and stroke geometry on a hand-built mask, and alpha ==
+     mask | stroke band
+   - Colours land as plain `int(c * 255)` bytes — **no gamma**. A downstream
+     (b2crunner's `_outline_grey`) nudges by half a level to survive exactly
+     that truncation, so a "fix" that rounds or linearizes here shifts every
+     fill it draws
+   - A supplied mask never touches the mesh: `render_outline(mask=...)` on a
+     Renderer whose `render_mask` raises must still draw. That is the whole
+     point of the seam — a silhouette from a matte, not from the body model
+   - A mask of the wrong shape or dtype is refused, never resampled: the
+     caller owns the pixel grid
 
 ### MEDIUM PRIORITY
 

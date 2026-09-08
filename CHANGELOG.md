@@ -15,6 +15,21 @@ All notable changes to body2colmap will be documented in this file.
   row (unreoriented; it refuses the SH-degree-3 splats evidence rides on anyway)
 
 ### Added
+- **An outline drawn from a supplied mask.** `Renderer.render_outline` takes
+  `mask=`, a boolean (height, width) array that replaces the mesh silhouette, and
+  `render_composite` forwards `modes["outline"]["mask"]` to it. The drawing itself
+  moved to a module-level `outline_from_mask(mask, ...)` — the same fill, stroke,
+  colours and blur, on any coverage mask, with no GL and no mesh
+  - **Why**: the mesh silhouette is wrong wherever hair and clothing leave the body
+    model. A matte of the subject — of a photograph, or of a frame a video model
+    generated from the mesh drawing — is a better opinion of where the subject is,
+    and the outline is the one layer of a `outline+skeleton+splat` frame that can
+    take it without touching the skeleton or the splat
+  - The mask must be on the renderer's pixel grid; a wrong shape or a non-boolean
+    dtype is a `ValueError`, never a silent resample. Alpha then tracks the mask
+    rather than mesh coverage
+  - `render_mask` is not called when a mask is given, so a mesh-free Renderer can
+    draw the outline
 - **Inactive-region mask for `*+splat` composites** (`--splat-inactive-mask`):
   replaces each frame's alpha with the inactive/reactive mask a conditioned video
   model takes — **0 over the splat** ("already real, keep it"), **255 elsewhere**

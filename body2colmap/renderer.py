@@ -159,6 +159,110 @@ def _pyrender_rgba(
     )
 
 
+def outline_from_mask(
+    mask: NDArray[np.bool_],
+    fg_color: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    bg_color: Optional[Tuple[float, float, float]] = (1.0, 1.0, 1.0),
+    style: str = "filled",
+    thickness: int = 3,
+    blur: int = 4,
+) -> NDArray[np.uint8]:
+    """
+    Draw a flat two-tone outline from a boolean coverage mask.
+
+    This is the whole of what :meth:`Renderer.render_outline` does once it
+    has a silhouette: it is a module-level function so the silhouette can
+    come from somewhere other than the mesh. `render_outline` hands it the
+    depth-buffer mask by default; a caller with a better opinion of where
+    the subject is — a matte of a photograph or of a generated frame, say —
+    hands its own through `render_outline(mask=...)`.
+
+    No GL, no mesh, no gamma: the colours are written into the buffer as
+    plain ``int(c * 255)`` bytes, exactly as they always were, because
+    nothing here passes through pyrender's shader.
+
+    Args:
+        mask: Boolean array, shape (height, width). True where the subject
+            covers the pixel.
+        fg_color: RGB color (0-1 range) for the subject
+        bg_color: RGB color (0-1 range) for the background. If None, the
+            background RGB is left black (alpha is 0 there either way).
+        style: "filled" fills the whole silhouette; "stroke" draws only a
+            band along its boundary and gives the interior bg_color.
+        thickness: Stroke width in pixels. Only used when style="stroke".
+        blur: Blur radius in pixels, applied to color and alpha together.
+            0 leaves hard two-tone edges.
+
+    Returns:
+        RGBA image, shape (height, width, 4), dtype uint8. Alpha is 255
+        over the mask (unioned with the outer half of a stroke), so the
+        image works as a composite base layer and as a training mask.
+
+    Raises:
+        ValueError: If style is not "filled" or "stroke", if blur is
+            negative, or if the mask is not a 2-D boolean array.
+    """
+    if style not in ("filled", "stroke"):
+        raise ValueError(
+            f"Unknown outline style: {style!r}. Use 'filled' or 'stroke'."
+        )
+    if blur < 0:
+        raise ValueError(f"Outline blur must be >= 0, got {blur}")
+    mask = np.asarray(mask)
+    if mask.ndim != 2 or mask.dtype != np.bool_:
+        raise ValueError(
+            "Outline mask must be a 2-D boolean array, got "
+            f"shape {mask.shape} dtype {mask.dtype}"
+        )
+    height, width = mask.shape
+
+    if style == "stroke":
+        import cv2
+
+        # Kernel radius is half the requested width so the band straddles
+        # the silhouette boundary and ends up ~thickness px across.
+        radius = max(1, int(round(thickness / 2.0)))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+        )
+        mask_u8 = mask.astype(np.uint8)
+        # Default morphology border handling treats outside-the-image as
+        # neutral, so a silhouette running off the edge is not given a
+        # spurious stroke along the image border.
+        outer = cv2.dilate(mask_u8, kernel)
+        inner = cv2.erode(mask_u8, kernel)
+        fg_mask = (outer > 0) & (inner == 0)
+    else:
+        fg_mask = mask
+
+    fg_rgb = np.array([int(c * 255) for c in fg_color], dtype=np.uint8)
+    if bg_color is None:
+        bg_rgb = np.zeros(3, dtype=np.uint8)
+    else:
+        bg_rgb = np.array([int(c * 255) for c in bg_color], dtype=np.uint8)
+
+    # Alpha tracks coverage (not the drawn foreground) so "outline" behaves
+    # like "mesh"/"depth" as a composite base and as a mask. The union
+    # keeps the outward half of a stroke from being clipped.
+    alpha_mask = mask | fg_mask
+
+    image = np.empty((height, width, 4), dtype=np.uint8)
+    image[:, :, :3] = np.where(fg_mask[:, :, None], fg_rgb, bg_rgb)
+    image[:, :, 3] = alpha_mask.astype(np.uint8) * 255
+
+    if blur > 0:
+        import cv2
+
+        # Blur color and alpha together so the two edges stay in step.
+        # Applied here rather than in render_composite() so that overlays
+        # (e.g. the skeleton in "outline+skeleton") stay sharp: they are
+        # composited on top of the already-blurred base.
+        ksize = 2 * int(blur) + 1
+        image = cv2.GaussianBlur(image, (ksize, ksize), 0)
+
+    return image
+
+
 class Renderer:
     """
     Render images from Scene using pyrender.
@@ -485,6 +589,7 @@ class Renderer:
         style: str = "filled",
         thickness: int = 3,
         blur: int = 4,
+        mask: Optional[NDArray[np.bool_]] = None,
     ) -> NDArray[np.uint8]:
         """
         Render the mesh as a flat two-tone outline.
@@ -493,8 +598,16 @@ class Renderer:
         foreground color, so the only information in the image is the shape of
         the silhouette. Useful as a control/conditioning image.
 
+        The silhouette is the mesh's by default (:meth:`render_mask`). Pass
+        ``mask`` to draw a silhouette from somewhere else — a matte of a
+        photograph or of a generated frame — through the same fill, colours
+        and blur; the drawing is then :func:`outline_from_mask`'s, and the
+        mesh is not rasterized at all. The mask must already be on this
+        renderer's pixel grid: a caller who resampled it knows how, this
+        method does not.
+
         Args:
-            camera: Camera to render from
+            camera: Camera to render from (unused when ``mask`` is given)
             fg_color: RGB color (0-1 range) for the mesh
             bg_color: RGB color (0-1 range) for the background. If None, the
                 background RGB is left black (alpha is 0 there either way).
@@ -506,10 +619,13 @@ class Renderer:
             blur: Blur radius in pixels, applied to both color and alpha so
                 the edge softens consistently. 0 disables blurring, leaving
                 hard two-tone edges.
+            mask: Optional boolean array, shape (height, width), True where
+                the subject covers the pixel. Replaces the mesh silhouette.
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8.
-            Alpha = 255 over the mesh silhouette, matching mesh/depth mode so
+            Alpha = 255 over the silhouette (the mesh's, or ``mask``),
+            matching mesh/depth mode so
             the result works as a composite base layer and as a training mask.
             For style="stroke" the alpha additionally covers the outer half of
             the boundary band (a ~thickness/2 px dilation of the silhouette),
@@ -517,63 +633,27 @@ class Renderer:
             With blur > 0 both edges become gradients rather than hard steps.
 
         Raises:
-            ValueError: If style is not "filled" or "stroke", or if blur is
-                negative.
+            ValueError: If style is not "filled" or "stroke", if blur is
+                negative, or if ``mask`` is not a boolean array of this
+                renderer's (height, width).
         """
-        if style not in ("filled", "stroke"):
-            raise ValueError(
-                f"Unknown outline style: {style!r}. Use 'filled' or 'stroke'."
-            )
-        if blur < 0:
-            raise ValueError(f"Outline blur must be >= 0, got {blur}")
-
-        mask = self.render_mask(camera)
-
-        if style == "stroke":
-            import cv2
-
-            # Kernel radius is half the requested width so the band straddles
-            # the silhouette boundary and ends up ~thickness px across.
-            radius = max(1, int(round(thickness / 2.0)))
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
-            )
-            mask_u8 = mask.astype(np.uint8)
-            # Default morphology border handling treats outside-the-image as
-            # neutral, so a silhouette running off the edge is not given a
-            # spurious stroke along the image border.
-            outer = cv2.dilate(mask_u8, kernel)
-            inner = cv2.erode(mask_u8, kernel)
-            fg_mask = (outer > 0) & (inner == 0)
+        if mask is None:
+            mask = self.render_mask(camera)
         else:
-            fg_mask = mask
-
-        fg_rgb = np.array([int(c * 255) for c in fg_color], dtype=np.uint8)
-        if bg_color is None:
-            bg_rgb = np.zeros(3, dtype=np.uint8)
-        else:
-            bg_rgb = np.array([int(c * 255) for c in bg_color], dtype=np.uint8)
-
-        # Alpha tracks mesh coverage (not the drawn foreground) so "outline"
-        # behaves like "mesh"/"depth" as a composite base and as a mask. The
-        # union keeps the outward half of a stroke from being clipped.
-        alpha_mask = mask | fg_mask
-
-        image = np.empty((self.height, self.width, 4), dtype=np.uint8)
-        image[:, :, :3] = np.where(fg_mask[:, :, None], fg_rgb, bg_rgb)
-        image[:, :, 3] = alpha_mask.astype(np.uint8) * 255
-
-        if blur > 0:
-            import cv2
-
-            # Blur color and alpha together so the two edges stay in step.
-            # Applied here rather than in render_composite() so that overlays
-            # (e.g. the skeleton in "outline+skeleton") stay sharp: they are
-            # composited on top of the already-blurred base.
-            ksize = 2 * int(blur) + 1
-            image = cv2.GaussianBlur(image, (ksize, ksize), 0)
-
-        return image
+            mask = np.asarray(mask)
+            if mask.shape != (self.height, self.width):
+                raise ValueError(
+                    "Outline mask must match the render size: expected "
+                    f"({self.height}, {self.width}), got {mask.shape}"
+                )
+        return outline_from_mask(
+            mask,
+            fg_color=fg_color,
+            bg_color=bg_color,
+            style=style,
+            thickness=thickness,
+            blur=blur,
+        )
 
     def render_skeleton(
         self,
@@ -1087,7 +1167,9 @@ class Renderer:
 
                   Recognized base layers: "mesh", "depth", "outline"
                   (checked in that order). Recognized overlays: "skeleton",
-                  "face".
+                  "face". An "outline" entry may carry ``"mask"``, a boolean
+                  (height, width) array that replaces the mesh silhouette —
+                  see :meth:`render_outline`.
             splat_layer: Optional pre-rendered RGBA Gaussian-splat layer with
                 **straight** alpha, composited last (on top of everything).
                 It is passed in already rendered rather than named in ``modes``
@@ -1144,6 +1226,7 @@ class Renderer:
                 style=outline_opts.get("style", "filled"),
                 thickness=outline_opts.get("thickness", 3),
                 blur=outline_opts.get("blur", 4),
+                mask=outline_opts.get("mask"),
             )
 
         if base_image is not None:
