@@ -9,8 +9,10 @@ from body2colmap.config import (
     BackgroundConfig,
     Config,
     SkeletonConfig,
+    SplatConfig,
     _validate_background_geometry,
     _validate_eye_style,
+    _validate_inactive_mask_threshold,
     _validate_pupil_scale,
     create_argument_parser,
 )
@@ -355,3 +357,73 @@ class TestBackgroundFadeCliOverrides:
         with pytest.raises(ValueError, match="background-fade-color"):
             self._fade("--background", "grid", "--background-fade", "linear",
                        "--background-fade-color", "grey")
+
+
+class TestInactiveMaskConfig:
+    """The conditioning mask over a splat overlay."""
+
+    @staticmethod
+    def _config(*argv):
+        args = create_argument_parser().parse_args(
+            ["in.npz", "-o", "out", *argv]
+        )
+        return Config.from_args(args).splat
+
+    def test_off_by_default(self):
+        """It is an extra output, so it has to be asked for."""
+        splat = SplatConfig()
+        assert splat.inactive_mask is False
+        assert splat.inactive_mask_options() is None
+
+    def test_defaults_demand_near_full_coverage(self):
+        """A partly covered pixel is a blend, and blends are not preserved."""
+        assert SplatConfig().inactive_mask_threshold == 0.9
+        assert SplatConfig().inactive_mask_grow == 0
+
+    def test_enabling_it_builds_the_options(self):
+        options = SplatConfig(
+            inactive_mask=True,
+            inactive_mask_threshold=0.5,
+            inactive_mask_grow=-2,
+        ).inactive_mask_options()
+        assert options.threshold == 0.5
+        assert options.grow == -2
+
+    def test_cli_flags(self):
+        splat = self._config(
+            "--splat-inactive-mask",
+            "--splat-mask-threshold", "0.75",
+            "--splat-mask-grow", "-3",
+        )
+        assert splat.inactive_mask is True
+        assert splat.inactive_mask_threshold == 0.75
+        assert splat.inactive_mask_grow == -3
+
+    def test_a_threshold_in_eight_bit_levels_is_rejected(self):
+        """0-255 is the likely mistake, and clamping it would hide it."""
+        with pytest.raises(ValueError, match="inactive_mask_threshold"):
+            _validate_inactive_mask_threshold(128)
+        with pytest.raises(ValueError, match="inactive_mask_threshold"):
+            self._config("--splat-mask-threshold", "128")
+
+    def test_round_trips_through_yaml(self, tmp_path):
+        config = Config(input_file="in.npz")
+        config.splat.inactive_mask = True
+        config.splat.inactive_mask_threshold = 0.6
+        config.splat.inactive_mask_grow = 2
+
+        path = tmp_path / "config.yaml"
+        config.to_yaml(str(path))
+        loaded = Config.from_yaml(
+            str(path), input_file_override="in.npz"
+        ).splat
+
+        assert loaded.inactive_mask is True
+        assert loaded.inactive_mask_threshold == 0.6
+        assert loaded.inactive_mask_grow == 2
+
+    def test_a_bad_threshold_in_a_file_is_rejected(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("splat:\n  inactive_mask_threshold: 12\n")
+        with pytest.raises(ValueError, match="inactive_mask_threshold"):
+            Config.from_yaml(str(path), input_file_override="in.npz")

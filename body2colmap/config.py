@@ -373,6 +373,32 @@ def _validate_pupil_scale(value: float) -> float:
     return value
 
 
+def _validate_inactive_mask_threshold(value: float) -> float:
+    """
+    Validate that an inactive-mask threshold is in (0, 1].
+
+    It is a fraction of splat alpha, so 8-bit levels are the likely mistake and
+    an out-of-range value is rejected rather than clamped: clamping 128 to 1.0
+    would quietly produce a mask covering only fully opaque pixels while the
+    config claimed something else.
+
+    Args:
+        value: Splat alpha at or above which a pixel counts as covered
+
+    Returns:
+        The validated value
+
+    Raises:
+        ValueError: If the value is outside (0, 1]
+    """
+    if not 0.0 < value <= 1.0:
+        raise ValueError(
+            f"inactive_mask_threshold must be in (0, 1], got {value}. "
+            f"It is a fraction of splat alpha, not an 8-bit level."
+        )
+    return value
+
+
 @dataclass
 class SkeletonConfig:
     """Skeleton rendering configuration."""
@@ -401,6 +427,10 @@ class SplatConfig:
     SAM-3D-Body (see ~/Projects/masktest), composited on top of the skeleton
     via the ``splat`` overlay layer, e.g. ``modes: ["skeleton+splat"]``.
 
+    The overlay's ``inactive_mask`` fields belong to the first group: they
+    describe a mask over the overlay, carried in the rendered frames' alpha
+    channel.
+
     **The rasterizer** (``renderer_binary`` and the confidence fields).
     Applies to any splat rendering, including a ``.ply`` input rendered as the
     base layer. Confidence gating is valid only for that base case — an
@@ -414,6 +444,12 @@ class SplatConfig:
     scale: Optional[float] = None       # None = fit the depth gauge against the mesh
     reconcile_intrinsics: bool = True
     max_angle_deg: float = 45.0         # cull past this far off the source view
+
+    # Conditioning mask marking the overlay inactive (i.e. to be preserved),
+    # written into the frames' alpha channel in place of the silhouette.
+    inactive_mask: bool = False
+    inactive_mask_threshold: float = 0.9   # splat alpha counting as covered
+    inactive_mask_grow: int = 0            # px; negative shrinks
 
     # Rasterizer: brush-splat-render. None resolves $BRUSH_SPLAT_RENDER, then PATH.
     renderer_binary: Optional[str] = None
@@ -446,6 +482,22 @@ class SplatConfig:
             sidecar=self.confidence_sidecar,
             dataset=self.confidence_dataset,
             extra_args=tuple(self.confidence_extra_args),
+        )
+
+    def inactive_mask_options(self):
+        """
+        Build :class:`~body2colmap.splat_renderer.InactiveMaskOptions`, or None.
+
+        None when the mask is off, which is what
+        :meth:`~body2colmap.pipeline.OrbitPipeline.render_composite_all` wants
+        for the unmasked case.
+        """
+        if not self.inactive_mask:
+            return None
+        from .splat_renderer import InactiveMaskOptions
+        return InactiveMaskOptions(
+            threshold=self.inactive_mask_threshold,
+            grow=self.inactive_mask_grow,
         )
 
     def resolved_meta_json(self) -> Optional[str]:
@@ -672,6 +724,14 @@ class Config:
             config.splat.reconcile_intrinsics = False
         if args.splat_max_angle is not None:
             config.splat.max_angle_deg = args.splat_max_angle
+        if args.splat_inactive_mask:
+            config.splat.inactive_mask = True
+        if args.splat_mask_threshold is not None:
+            config.splat.inactive_mask_threshold = _validate_inactive_mask_threshold(
+                args.splat_mask_threshold
+            )
+        if args.splat_mask_grow is not None:
+            config.splat.inactive_mask_grow = args.splat_mask_grow
         if args.splat_renderer is not None:
             config.splat.renderer_binary = args.splat_renderer
         if args.splat_confidence:
@@ -917,6 +977,11 @@ class Config:
             scale=splat_data.get('scale'),
             reconcile_intrinsics=splat_data.get('reconcile_intrinsics', True),
             max_angle_deg=splat_data.get('max_angle_deg', 45.0),
+            inactive_mask=splat_data.get('inactive_mask', False),
+            inactive_mask_threshold=_validate_inactive_mask_threshold(
+                splat_data.get('inactive_mask_threshold', 0.9)
+            ),
+            inactive_mask_grow=int(splat_data.get('inactive_mask_grow', 0)),
             renderer_binary=splat_data.get('renderer_binary'),
             confidence=splat_data.get('confidence', False),
             cull_color=_opt_tuple(splat_data.get('cull_color'), 3, float),
@@ -1046,6 +1111,9 @@ class Config:
                 'scale': self.splat.scale,
                 'reconcile_intrinsics': self.splat.reconcile_intrinsics,
                 'max_angle_deg': self.splat.max_angle_deg,
+                'inactive_mask': self.splat.inactive_mask,
+                'inactive_mask_threshold': self.splat.inactive_mask_threshold,
+                'inactive_mask_grow': self.splat.inactive_mask_grow,
                 'renderer_binary': self.splat.renderer_binary,
                 'confidence': self.splat.confidence,
                 'cull_color': (
@@ -1397,6 +1465,22 @@ splat:
   # Drop the splat on frames more than this many degrees off its source view.
   # It is a 2.5-D shell with nothing behind the subject.
   max_angle_deg: 45.0
+
+  # Replace each frame's alpha with a conditioning mask marking the splat as
+  # the inactive region (alpha 0: already real, keep it) and the rest of the
+  # frame as reactive (alpha 255: generate it) -- the convention Wan 2.2 VACE
+  # takes. RGB is untouched; what is lost is the silhouette alpha, so this and
+  # a 3DGS training mask cannot come out of the same run. Needs a *+splat mode.
+  inactive_mask: false
+
+  # Splat alpha, 0-1, at or above which a pixel is marked inactive. High by
+  # default: a partly covered pixel is a blend of the splat with the synthetic
+  # layers under it, and preserving it preserves the synthetic half too.
+  inactive_mask_threshold: 0.9
+
+  # Grow the inactive region by this many pixels; negative shrinks it, pulling
+  # the boundary clear of the splat's antialiased edge.
+  inactive_mask_grow: 0
 
   # Path to the brush-splat-render binary that rasterizes splats.
   # null = $BRUSH_SPLAT_RENDER, then PATH.
@@ -1919,6 +2003,31 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Cull the splat past this many degrees off its source view "
              "(default 45). It is a 2.5-D shell with nothing behind it, so "
              "past roughly 45 deg its open edge flares into view"
+    )
+    splat_group.add_argument(
+        "--splat-inactive-mask",
+        action="store_true",
+        help="Replace each frame's alpha with a conditioning mask: 0 over the "
+             "splat (already real, keep it), 255 elsewhere (generate it) -- "
+             "the convention Wan 2.2 VACE takes. RGB is untouched, but the "
+             "silhouette alpha is lost. Needs a *+splat render mode"
+    )
+    splat_group.add_argument(
+        "--splat-mask-threshold",
+        type=float,
+        metavar="A",
+        help="Splat alpha, 0-1, at or above which a pixel is marked inactive "
+             "(default 0.9). Below full coverage the frame is a blend of the "
+             "splat with the layers under it, so preserving such a pixel "
+             "preserves the synthetic half of it too"
+    )
+    splat_group.add_argument(
+        "--splat-mask-grow",
+        type=int,
+        metavar="PX",
+        help="Grow the inactive region by PX pixels, or shrink it when "
+             "negative (default 0). Shrinking pulls the boundary clear of the "
+             "splat's antialiased edge"
     )
     splat_group.add_argument(
         "--splat-renderer",

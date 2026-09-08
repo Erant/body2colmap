@@ -528,6 +528,42 @@ starts flaring by 45°, and by 60° the shell is mostly edge. On a 72-frame full
 circle that keeps the face on roughly 20 frames, centred on the anchor. Raise it
 if you would rather have coverage than a clean silhouette.
 
+#### The inactive-region mask
+
+`--splat-inactive-mask` replaces each frame's alpha channel with a conditioning
+mask splitting the frame in two: **alpha 0 over the splat** ("already real,
+keep it") and **alpha 255 everywhere else** ("synthetic, generate it"). That is
+the inactive/reactive convention Wan 2.2 VACE takes, and it is the point of
+compositing a real face in at all — without the mask nothing tells the model
+that one part of the frame is a photograph and the rest is an annotation.
+
+RGB is untouched: an inactive pixel is *marked*, not erased. What is displaced
+is the composite's usual alpha, the subject silhouette, so a single run gives
+you either the conditioning mask or a 3DGS training mask, not both.
+
+```bash
+body2colmap estimation.npz -o ./out --config circular-splat.yaml \
+  --splat-overlay face_splat.ply --splat-crop 141,0,594,477 \
+  --splat-inactive-mask
+```
+
+Notes:
+
+- **Only frames rendered in a `*+splat` mode are masked.** Other modes in the
+  same run keep their silhouette alpha.
+- **A culled frame is wholly reactive.** Past `--splat-max-angle` there is no
+  splat in the frame, so alpha comes out uniformly 255 — the sequence still
+  lines up frame for frame, which a mask a model consumes as a video has to.
+- `--splat-mask-threshold` (default `0.9`) is the splat alpha at or above which
+  a pixel is marked inactive. It is deliberately high: below full coverage the
+  frame is a *blend* of the splat with the layers under it, and preserving such
+  a pixel preserves the synthetic half of it too.
+- `--splat-mask-grow PX` grows the inactive region, or shrinks it when negative.
+  Shrinking is the useful direction — it pulls the boundary clear of the splat's
+  antialiased edge.
+- Needs `--splat-overlay` and a `*+splat` mode; asking without either is an
+  error, not a silently uniform mask.
+
 #### Constraints
 
 - Use with `--use-original-camera` (or `original_focal_length=` in the Python
@@ -540,7 +576,8 @@ if you would rather have coverage than a clean silhouette.
   auto-orient.
 - The splat contributes to the composite's alpha channel (it is real subject
   coverage, like the mesh silhouette). The skeleton does not — it is an
-  annotation.
+  annotation. `--splat-inactive-mask` replaces that alpha outright; see
+  [The inactive-region mask](#the-inactive-region-mask).
 - A `.ply` **input** is a different feature: there `splat` is the base layer and
   the whole scene is rendered as a splat. That cannot be combined with an
   overlay, and body2colmap raises if you try.
@@ -556,6 +593,9 @@ if you would rather have coverage than a clean silhouette.
 | `--splat-scale S` | fitted | Depth gauge; omit to fit it against the mesh |
 | `--splat-max-angle DEGREES` | `45` | Cull past this far off the splat's source view |
 | `--splat-no-reconcile` | off | Place with a uniform scale, ignoring the splat's own focal |
+| `--splat-inactive-mask` | off | Put the inactive/reactive mask in the frames' alpha instead of the silhouette |
+| `--splat-mask-threshold A` | `0.9` | Splat alpha at or above which a pixel is marked inactive |
+| `--splat-mask-grow PX` | `0` | Grow the inactive region; negative shrinks it |
 | `--splat-renderer PATH` | `$BRUSH_SPLAT_RENDER`, then `PATH` | The `brush-splat-render` binary |
 
 ```yaml
@@ -567,6 +607,9 @@ splat:
   scale: null                     # null = fit against the mesh
   reconcile_intrinsics: true
   max_angle_deg: 45.0
+  inactive_mask: false            # alpha becomes the VACE mask, not the silhouette
+  inactive_mask_threshold: 0.9    # splat alpha counting as covered
+  inactive_mask_grow: 0           # px; negative shrinks the inactive region
   renderer_binary: null           # null = $BRUSH_SPLAT_RENDER, then PATH
 ```
 

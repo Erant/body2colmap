@@ -111,6 +111,31 @@ def main(argv: Optional[list] = None) -> int:
                 "exists for a splat trained on a dataset."
             )
 
+        # The inactive mask marks an overlay splat against the synthetic layers
+        # around it, so it needs both the overlay and a mode that composites
+        # it. Checked here, before any rendering: the mask is the point of the
+        # run that asks for it, and finding out at export time wastes the orbit.
+        if config.splat.inactive_mask:
+            if is_splat:
+                raise ValueError(
+                    "--splat-inactive-mask needs a .npz input. It marks the "
+                    "splat overlay as the real content within a synthetic "
+                    "frame, and a .ply input is entirely splat -- the mask "
+                    "would be uniformly inactive."
+                )
+            if not config.splat.overlay_ply:
+                raise ValueError(
+                    "--splat-inactive-mask marks the splat overlay, and no "
+                    "splat was given. Pass --splat-overlay PLY."
+                )
+            if not any("splat" in mode.split("+") for mode in config.render.modes):
+                raise ValueError(
+                    "--splat-inactive-mask needs a render mode that "
+                    "composites the splat, e.g. --render-modes "
+                    "skeleton+splat. The mask marks where the splat is in the "
+                    f"frame; {config.render.modes} puts it in none of them."
+                )
+
         # Environment backdrop. Stored now, built at first render -- a finite
         # radius is measured against the orbit, which is not set up yet.
         if config.background.enabled:
@@ -557,12 +582,23 @@ def main(argv: Optional[list] = None) -> int:
                             "but no splat was attached. Pass --splat-overlay PLY."
                         )
 
-                    # Render composite for all frames
-                    mode_images = pipeline.render_composite_all(composite_modes)
+                    # Render composite for all frames. The conditioning mask
+                    # only goes on a mode that actually carries the splat --
+                    # elsewhere alpha stays the silhouette.
+                    mask_options = (
+                        config.splat.inactive_mask_options()
+                        if "splat" in layers else None
+                    )
+                    mode_images = pipeline.render_composite_all(
+                        composite_modes, inactive_mask=mask_options
+                    )
                     rendered[mode_str] = mode_images
 
                     if args.verbose:
                         print(f"  Rendered {len(mode_images)} {mode_str} frames")
+                        if mask_options is not None:
+                            print("    alpha carries the inactive mask: "
+                                  "0 over the splat, 255 elsewhere")
                 else:
                     # Single mode rendering
                     render_kwargs = {

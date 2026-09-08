@@ -15,6 +15,35 @@ All notable changes to body2colmap will be documented in this file.
   row (unreoriented; it refuses the SH-degree-3 splats evidence rides on anyway)
 
 ### Added
+- **Inactive-region mask for `*+splat` composites** (`--splat-inactive-mask`):
+  replaces each frame's alpha with the inactive/reactive mask a conditioned video
+  model takes — **0 over the splat** ("already real, keep it"), **255 elsewhere**
+  ("synthetic, generate it"), the convention Wan 2.2 VACE uses. Off by default.
+  - **Why**: the splat is the one part of a `skeleton+splat` frame that is real
+    photographic content, and without a mask nothing says so. Marking it inactive
+    is what stops the model repainting the face the overlay exists to carry
+  - In the alpha channel rather than a parallel `masks/` sequence, because that is
+    where the downstream already reads it (b2crunner's `wan22_vace_denoise` takes
+    the frame's own alpha as `control_masks`). RGB is untouched — an inactive pixel
+    is marked, not erased
+  - The cost is that alpha stops meaning subject coverage, so one run yields either
+    the conditioning mask or a 3DGS training mask, not both. Hence opt-in
+  - `--splat-mask-threshold` (default `0.9`) is the splat alpha at or above which a
+    pixel is marked inactive. High on purpose: below full coverage the frame is a
+    blend of the splat with the layers under it, and preserving such a pixel
+    preserves the synthetic half too
+  - `--splat-mask-grow PX` grows the inactive region, or shrinks it when negative —
+    the useful direction, pulling the boundary clear of the splat's antialiased edge
+  - A frame past `--splat-max-angle` carries no splat and comes out wholly reactive,
+    rather than carrying no mask: a sequence with gaps no longer lines up with the
+    frames it describes
+  - Needs `--splat-overlay` and a `*+splat` render mode; either missing is an error
+    rather than a silently uniform mask
+  - Config: `splat.inactive_mask`, `splat.inactive_mask_threshold`,
+    `splat.inactive_mask_grow`. API:
+    `OrbitPipeline.render_composite_all(inactive_mask=...)` and
+    `Renderer.render_composite(inactive_mask=...)`, taking a
+    `splat_renderer.InactiveMaskOptions`
 - **Environment backdrop** (`--background`): draws a world-fixed sphere or cube behind
   the render, so an orbit reads as the camera moving rather than the subject spinning on
   a turntable. Off by default.

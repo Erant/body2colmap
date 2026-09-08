@@ -841,6 +841,27 @@ subject coverage, exactly as the mesh silhouette is, so a mask derived from the
 composite has to include it. The skeleton stays out of alpha because it is an
 annotation, not geometry.
 
+### The inactive mask overwrites alpha, and does it in `_composite_splat()`
+`InactiveMaskOptions` (in `splat_renderer.py`, beside `ConfidenceOptions`)
+turns the frame's alpha into a conditioning mask: 0 where the splat covers,
+255 everywhere else. Two placement decisions:
+
+**It lives in `_composite_splat()`, after the blend.** That is the one function
+every path through `render_composite()` ends in, culled frames included — and a
+culled frame still needs its mask, saying the whole frame is reactive. Applying
+it in `render_composite_all()`'s loop instead would have missed
+`render_original_view()` and any single-frame caller, and applying it before the
+blend would have had the splat's own alpha union write over it.
+
+**It is the last word on alpha, on purpose.** Both other rules that touch alpha
+here — the opaque backdrop forcing 255, and the splat unioning its coverage in —
+are about alpha meaning *subject coverage*. The mask means something else, so it
+replaces rather than combines. This is also why it is opt-in: a run cannot emit
+both a conditioning mask and a silhouette training mask in one file.
+
+The mask is derived from the straight-alpha splat *layer*, not from the finished
+composite's alpha, which by then also carries the mesh silhouette.
+
 ### `attach_splat_overlay()` refuses an auto-oriented scene
 `auto_orient()` calls `scene.rotate_around_y()`, which rotates about the bbox
 centre and therefore moves the subject out of the original camera's frame. The

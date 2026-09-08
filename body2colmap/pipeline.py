@@ -11,7 +11,9 @@ This is the main API for users of the library.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Sequence, Tuple, Union
+from typing import (
+    TYPE_CHECKING, List, Dict, Any, Optional, Sequence, Tuple, Union
+)
 import numpy as np
 from numpy.typing import NDArray
 
@@ -41,6 +43,11 @@ from .utils import (
     compute_original_view_framing as _compute_original_view_framing,
     compute_warp_to_camera,
 )
+
+if TYPE_CHECKING:
+    # Annotations only. Splat support is optional at runtime, so every real
+    # use of this module is imported inside the method that needs it.
+    from .splat_renderer import InactiveMaskOptions
 
 
 #: Marks "the caller said nothing about a radius", which is distinct from an
@@ -1175,7 +1182,8 @@ class OrbitPipeline:
 
     def render_composite_all(
         self,
-        composite_modes: Dict[str, Dict[str, Any]]
+        composite_modes: Dict[str, Dict[str, Any]],
+        inactive_mask: Optional["InactiveMaskOptions"] = None,
     ) -> List[NDArray[np.uint8]]:
         """
         Render all frames with composite modes (e.g., mesh+skeleton).
@@ -1186,19 +1194,35 @@ class OrbitPipeline:
                     "mesh": {"color": (0.65, 0.74, 0.86), "bg_color": (1, 1, 1)},
                     "skeleton": {"joint_radius": 0.02, "use_openpose_colors": True}
                 }
+            inactive_mask: Replace each frame's alpha channel with a
+                conditioning mask marking the splat overlay as the region a
+                video model should preserve, and everything else as the region
+                it should generate. See
+                :class:`~body2colmap.splat_renderer.InactiveMaskOptions`. The
+                frames' RGB is unaffected; what is lost is the silhouette alpha
+                the composite otherwise carries.
 
         Returns:
             List of composite rendered images (one per camera)
 
         Raises:
             RuntimeError: If cameras haven't been set (call set_orbit_params first)
-            ValueError: If used with SplatScene (composites not supported)
+            ValueError: If used with SplatScene (composites not supported), or
+                if a mask is asked for with no splat overlay attached
         """
         if self.cameras is None:
             raise RuntimeError("Cameras not set. Call set_orbit_params() first.")
 
         if self._is_splat_scene():
             raise ValueError("Composite rendering not supported for SplatScene")
+
+        if inactive_mask is not None and not self.has_splat_overlay:
+            raise ValueError(
+                "An inactive mask marks the splat overlay, and none is "
+                "attached. Call attach_splat_overlay() first, or drop the "
+                "mask -- with no splat the mask would be uniformly reactive "
+                "and say nothing."
+            )
 
         # Create renderer if needed (mesh renderer for composites)
         renderer = self.renderer
@@ -1211,6 +1235,7 @@ class OrbitPipeline:
             image = renderer.render_composite(
                 camera, composite_modes,
                 splat_layer=splat_layer,
+                inactive_mask=inactive_mask,
             )
             images.append(image)
 

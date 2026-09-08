@@ -15,6 +15,7 @@ tests/
 ├── test_renderer.py      # Rendering (may need fixtures)
 ├── test_background.py    # Environment backdrop
 ├── test_fade.py          # Backdrop fade around the subject
+├── test_splat_mask.py    # Inactive/reactive mask over a splat overlay
 ├── test_exporter.py      # COLMAP export
 └── test_pipeline.py      # Integration tests
 ```
@@ -67,6 +68,15 @@ tests/
      let an area-average blur ship as if it removed the grid lines, when it
      only spread them out. A companion test pins that `target="blur"` still
      *fails* the exact comparison, so the two cannot converge unnoticed
+
+6. **splat_renderer.py** (`InactiveMaskOptions`)
+   - The **polarity**: 0 preserves, 255 regenerates. Inverted, the mask tells
+     the model to repaint the one real face in the frame and keep the
+     annotations — and it still looks like a mask
+   - A culled frame still yields a mask, and it is wholly reactive. A gap in
+     the sequence would silently misalign every frame after it
+   - `apply()` replaces alpha and leaves RGB alone: an inactive pixel is
+     marked, not erased
 
 ### MEDIUM PRIORITY
 

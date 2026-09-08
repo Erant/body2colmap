@@ -4,7 +4,9 @@ Renderer for Gaussian Splats, backed by ``brush-splat-render``.
 This module provides :class:`SplatRenderer`, which shells out to the
 ``brush-splat-render`` binary from the brush repository. It takes Camera
 objects (same interface as the mesh :class:`~body2colmap.renderer.Renderer`)
-and produces RGBA images.
+and produces RGBA images. :class:`InactiveMaskOptions` lives here too: it reads
+a rendered splat layer and turns it into the conditioning mask a downstream
+video model takes.
 
 Why a subprocess rather than a Python rasterizer:
     The previous implementation called ``gsplat.rasterization`` on torch CUDA
@@ -61,7 +63,21 @@ BINARY_ENV_VAR = "BRUSH_SPLAT_RENDER"
 #: of it is still on the RenderFault, for a caller that wants to keep it.
 _ERROR_TAIL_LINES = 60
 
-__all__ = ["ConfidenceOptions", "RenderFault", "SplatRenderer", "resolve_binary"]
+__all__ = [
+    "ConfidenceOptions",
+    "InactiveMaskOptions",
+    "RenderFault",
+    "SplatRenderer",
+    "INACTIVE",
+    "REACTIVE",
+    "resolve_binary",
+]
+
+#: Mask value for a pixel a conditioned video model should regenerate.
+REACTIVE = 255
+
+#: Mask value for a pixel it should carry through unchanged.
+INACTIVE = 0
 
 
 def resolve_binary(explicit: Optional[str] = None) -> str:
@@ -194,6 +210,131 @@ class RenderFault:
         """The expected files that do exist, in render order."""
         absent = set(self.missing)
         return [path for path in self.expected if path not in absent]
+
+
+@dataclass
+class InactiveMaskOptions:
+    """
+    Options for the conditioning mask that marks a splat overlay inactive.
+
+    A video model conditioned on these frames (Wan 2.2 VACE) takes a mask
+    alongside them, splitting the frame in two: the **reactive** region it is
+    to generate, and the **inactive** region it is to carry through unchanged.
+    The convention is 255 (:data:`REACTIVE`) for the first and 0
+    (:data:`INACTIVE`) for the second.
+
+    The splat is the one part of a ``*+splat`` composite that is real
+    photographic content -- the same face, from the same photo, that the rest
+    of the frame only annotates. Marking it inactive is what keeps the model
+    from repainting it, and it is the whole reason the overlay carries
+    identity at all.
+
+    The mask **replaces the frame's alpha channel**, which is the form the
+    downstream expects: a conditioning frame carries its own mask on disk, so
+    an inactive region is simply a region written at alpha 0. RGB is untouched
+    -- the splat's pixels are still there, they are just marked as the part of
+    the frame that is already real. What it displaces is the composite's usual
+    alpha, the subject silhouette, so this is opt-in: a run that wants the
+    silhouette as a 3DGS training mask cannot also have the conditioning mask
+    in the same file.
+
+    The mask covers the splat *as composited*, not as rasterized, so it is
+    built from the same straight-alpha layer
+    :meth:`SplatRenderer.render_many` hands to ``render_composite()``.
+
+    Attributes:
+        threshold: Splat alpha, 0-1, at or above which a pixel counts as
+            covered. High by default: below full coverage the composite is a
+            *blend* of the splat with the synthetic layers under it, and
+            freezing such a pixel freezes the synthetic half along with the
+            real one. Lowering it trades a soft rim of blended pixels for a
+            larger preserved area.
+        grow: Grow the inactive region by this many pixels, or shrink it when
+            negative. 0 takes the thresholded coverage as-is. Shrinking is the
+            useful direction: it pulls the boundary clear of the splat's
+            antialiased edge, at the cost of letting the model repaint a pixel
+            or two of real content.
+    """
+
+    threshold: float = 0.9
+    grow: int = 0
+
+    def __post_init__(self):
+        if not 0.0 < self.threshold <= 1.0:
+            raise ValueError(
+                f"inactive-mask threshold must be in (0, 1], got "
+                f"{self.threshold}. It is a fraction of splat alpha, not an "
+                "8-bit level."
+            )
+
+    def build(
+        self,
+        layer: Optional[NDArray[np.uint8]],
+        size: Tuple[int, int],
+    ) -> NDArray[np.uint8]:
+        """
+        Build one frame's mask.
+
+        Args:
+            layer: The frame's RGBA splat layer with **straight** alpha, or
+                ``None`` for a frame where the splat was culled. A culled
+                frame yields an all-reactive mask rather than no mask at all,
+                so the sequence stays aligned frame-for-frame with the frames
+                it accompanies -- a mask video with holes in it is not a mask
+                video.
+            size: ``(width, height)`` of the frame.
+
+        Returns:
+            8-bit single-channel mask, :data:`INACTIVE` where the splat covers
+            and :data:`REACTIVE` everywhere else.
+
+        Raises:
+            ValueError: If ``layer`` is not the given size.
+        """
+        width, height = size
+        mask = np.full((height, width), REACTIVE, dtype=np.uint8)
+        if layer is None:
+            return mask
+
+        if layer.shape[:2] != (height, width):
+            raise ValueError(
+                f"splat layer is {layer.shape[1]}x{layer.shape[0]} but the "
+                f"frame is {width}x{height}"
+            )
+
+        covered = layer[:, :, 3] >= self.threshold * 255.0
+
+        if self.grow:
+            radius = abs(self.grow)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+            )
+            morph = cv2.dilate if self.grow > 0 else cv2.erode
+            covered = morph(covered.astype(np.uint8), kernel) > 0
+
+        mask[covered] = INACTIVE
+        return mask
+
+    def apply(
+        self,
+        image: NDArray[np.uint8],
+        layer: Optional[NDArray[np.uint8]],
+    ) -> NDArray[np.uint8]:
+        """
+        Write the mask into a finished frame's alpha channel, in place.
+
+        Args:
+            image: RGBA composite the splat has already been blended into.
+                Its RGB is left exactly as it is; only alpha changes.
+            layer: The frame's splat layer, or ``None`` on a culled frame --
+                which leaves the frame wholly reactive.
+
+        Returns:
+            ``image``.
+        """
+        height, width = image.shape[:2]
+        image[:, :, 3] = self.build(layer, (width, height))
+        return image
 
 
 @dataclass

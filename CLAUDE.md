@@ -444,6 +444,36 @@ an **overlay** on top of the skeleton. The two cannot co-occur — a `SplatScene
 has no mesh or skeleton to composite against — and `attach_splat_overlay()`
 raises if you try.
 
+### Key Design: The Mask Rides In the Alpha Channel
+`--splat-inactive-mask` replaces a `*+splat` frame's alpha with the
+inactive/reactive mask a conditioned video model takes: **0 over the splat**
+("already real, keep it"), **255 elsewhere** ("synthetic, generate it"). RGB is
+untouched.
+
+It is in the alpha channel rather than a second image sequence because that is
+where the downstream already looks: b2crunner's `wan22_vace_denoise` reads
+`control_masks` as 1.0 "denoise this" / 0.0 "a real photograph, keep it", and
+on disk a frame carries that as its own alpha — an injected anchor frame is a
+frame written at alpha 0. Emitting a parallel `masks/` directory would have
+been a second convention for the same fact.
+
+The cost is that alpha stops meaning subject coverage, which is why it is
+opt-in and why one run cannot produce both this and a 3DGS training mask. It is
+applied in `_composite_splat()`, last and on every path, so it overrides the
+opaque-backdrop rule and the splat's own alpha union alike.
+
+Three details that are not free choices:
+
+- **The threshold is high (0.9).** Below full coverage a pixel is a *blend* of
+  the splat with the skeleton and backdrop under it. Freezing it freezes the
+  synthetic half too, so partial coverage stays reactive by default.
+- **A culled frame is wholly reactive, not unmasked.** Past `max_angle_deg`
+  there is no splat, and a mask sequence with gaps in it no longer lines up
+  with the frames it describes.
+- **`grow` is signed.** Negative shrinks the inactive region off the splat's
+  antialiased edge, which is the direction worth reaching for; one knob rather
+  than a dilate flag and an erode flag.
+
 ### Validation
 The gate is masktest's own: render the anchored splat from the original camera
 and compare against the photograph. The **best-fit integer shift over a ±4 px

@@ -10,11 +10,16 @@ since pyrender uses OpenGL convention matching our world coords).
 """
 
 import numpy as np
-from typing import Optional, Tuple, Dict, Any, List
+from typing import TYPE_CHECKING, Optional, Tuple, Dict, Any, List
 from numpy.typing import NDArray
 
 from .scene import Scene
 from .camera import Camera
+
+if TYPE_CHECKING:
+    # Annotations only. Splat support is optional at runtime; the layer and
+    # its mask options both arrive from the pipeline already built.
+    from .splat_renderer import InactiveMaskOptions
 
 
 def _flat_color_rgba8(color: Tuple[float, float, float]) -> NDArray[np.uint8]:
@@ -1066,7 +1071,8 @@ class Renderer:
         self,
         camera: Camera,
         modes: Dict[str, Any],
-        splat_layer: Optional[NDArray[np.uint8]] = None
+        splat_layer: Optional[NDArray[np.uint8]] = None,
+        inactive_mask: Optional["InactiveMaskOptions"] = None,
     ) -> NDArray[np.uint8]:
         """
         Render composite of multiple modes (e.g., mesh + skeleton overlay).
@@ -1091,6 +1097,12 @@ class Renderer:
                 renders a whole camera list per invocation, so the pipeline
                 batches every frame's layer up front and hands them down one at
                 a time. ``None`` for a frame where the splat is culled.
+            inactive_mask: Replace the finished frame's alpha with a
+                conditioning mask marking the splat as the region a video model
+                should preserve — see
+                :class:`~body2colmap.splat_renderer.InactiveMaskOptions`. It is
+                applied last, so it overrides every other rule about what alpha
+                means here.
 
         Returns:
             RGBA image with composited modes
@@ -1103,7 +1115,8 @@ class Renderer:
             3. splat (overlay)
 
             Alpha is the base layer's, unioned with the splat's where present —
-            unless an opaque background has already forced it to 255.
+            unless an opaque background has already forced it to 255, or
+            ``inactive_mask`` has replaced it outright.
         """
         # Render base layer
         base_image = None
@@ -1181,7 +1194,7 @@ class Renderer:
                 bg_color=skel_opts.get("bg_color"),
             )
             base_image = self.composite_over_background(base_image, camera)
-            return self._composite_splat(base_image, splat_layer)
+            return self._composite_splat(base_image, splat_layer, inactive_mask)
 
         # Overlay skeleton if requested
         if "skeleton" in modes and self.scene.skeleton_joints is not None:
@@ -1215,12 +1228,13 @@ class Renderer:
 
             # Keep base layer's alpha (skeleton doesn't affect masking)
 
-        return self._composite_splat(base_image, splat_layer)
+        return self._composite_splat(base_image, splat_layer, inactive_mask)
 
     @staticmethod
     def _composite_splat(
         base_image: NDArray[np.uint8],
-        splat_layer: Optional[NDArray[np.uint8]]
+        splat_layer: Optional[NDArray[np.uint8]],
+        inactive_mask: Optional["InactiveMaskOptions"] = None,
     ) -> NDArray[np.uint8]:
         """
         Alpha-blend a straight-alpha splat layer on top of a finished composite.
@@ -1231,9 +1245,17 @@ class Renderer:
         overlay unions alpha into the skeleton render. The skeleton stays out of
         alpha because it is an annotation, not geometry.
 
+        ``inactive_mask`` opts out of all of that: alpha stops describing
+        coverage and becomes the conditioning mask instead. It is applied here,
+        after the blend and on every path through ``render_composite()``,
+        including the culled frames where there is no layer to blend — those
+        still need a mask, saying the whole frame is reactive.
+
         Args:
             base_image: RGBA composite to draw onto. Modified in place.
             splat_layer: RGBA with straight alpha, or None to do nothing.
+            inactive_mask: Replace alpha with a conditioning mask over the
+                splat. None leaves alpha meaning coverage.
 
         Returns:
             ``base_image``.
@@ -1242,6 +1264,8 @@ class Renderer:
             ValueError: If the two layers disagree on size.
         """
         if splat_layer is None:
+            if inactive_mask is not None:
+                inactive_mask.apply(base_image, None)
             return base_image
 
         if splat_layer.shape[:2] != base_image.shape[:2]:
@@ -1256,6 +1280,9 @@ class Renderer:
             base_image[:, :, :3] * (1.0 - alpha)
         ).astype(np.uint8)
         base_image[:, :, 3] = np.maximum(base_image[:, :, 3], splat_layer[:, :, 3])
+
+        if inactive_mask is not None:
+            inactive_mask.apply(base_image, splat_layer)
 
         return base_image
 
