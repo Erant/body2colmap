@@ -433,6 +433,7 @@ class SplatRenderer:
         ply_path: Optional[str] = None,
         on_output: Optional[Callable[[str], None]] = None,
         on_fault: Optional[Callable[["RenderFault"], None]] = None,
+        sh_degree: Optional[int] = None,
     ):
         """
         Initialize renderer.
@@ -470,7 +471,15 @@ class SplatRenderer:
                 died anyway, at most once per invocation. An exception out of
                 it is logged and swallowed, so a broken hook cannot replace
                 the render's own error with its own.
+            sh_degree: Highest spherical-harmonic band the render evaluates,
+                0..3 -- ``--sh-degree``. None renders every band the ply
+                carries; 0 is the DC colour with no view dependence. The
+                binary clamps a value above the ply's own degree, so asking
+                for 3 of a degree-2 splat is not an error. Colour only: the
+                alpha is the same at every setting.
         """
+        if sh_degree is not None and not 0 <= int(sh_degree) <= 3:
+            raise ValueError(f"sh_degree must be in 0..3, got {sh_degree!r}")
         self.scene = scene
         self.width, self.height = render_size
         self.binary = resolve_binary(binary)
@@ -478,6 +487,7 @@ class SplatRenderer:
         self.verbose = verbose
         self.on_output = on_output
         self.on_fault = on_fault
+        self.sh_degree = None if sh_degree is None else int(sh_degree)
 
         #: Raw per-pixel confidence maps (uint8, HxW) from the most recent
         #: :meth:`render_many`, or None. Only populated with
@@ -695,6 +705,8 @@ class SplatRenderer:
                 "--output-dir", str(frames_dir),
                 "--background", "0,0,0",
             ]
+            if self.sh_degree is not None:
+                cmd += ["--sh-degree", str(self.sh_degree)]
             if self.confidence is not None:
                 cmd += self.confidence.to_args(bg_color)
 
