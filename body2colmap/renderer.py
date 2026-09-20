@@ -159,6 +159,113 @@ def _pyrender_rgba(
     )
 
 
+def relief_fill(
+    depth: NDArray[np.float32],
+    mask: NDArray[np.bool_],
+    center_depth: float,
+    depth_range: float,
+    levels: int,
+    far_color: Tuple[float, float, float],
+    near_color: Tuple[float, float, float],
+    smooth: float = 0.0,
+) -> NDArray[np.uint8]:
+    """
+    A per-pixel fill for an outline: the body model's depth, smoothed and
+    quantised, as a few grey levels between two colours.
+
+    A flat silhouette plus a 2-D skeleton is the same drawing seen from the
+    front and from behind, mirrored. This puts the one bit back that the
+    silhouette lacks — which surface is nearer the camera — at outline
+    strength rather than depth-map strength: the depth is blurred to body
+    scale first (no finger, no naked-body contour under the clothes), then
+    cut to `levels` steps over a fixed metric window, so the same surface is
+    the same grey in every frame of an orbit.
+
+    The fill is defined over the whole of `mask`, which may be wider than
+    the mesh (a matte with hair and clothing): pixels the mesh does not
+    cover take the depth of the nearest covered pixel before the smoothing,
+    so a coat hem sits at the depth of the leg behind it rather than at
+    some depth of its own.
+
+    Args:
+        depth: Metric depth along the view axis, shape (height, width),
+            0.0 where the mesh does not cover the pixel — the raw depth
+            buffer.
+        mask: Boolean coverage the fill is wanted over (the outline's).
+        center_depth: Depth at the middle of the window, in the same units
+            as `depth`. Pixels here get the middle level.
+        depth_range: Metres from the near end of the window to the far end.
+            Depth outside the window clamps to the end levels.
+        levels: Number of distinct greys, >= 2.
+        far_color: RGB (0-1) at the far end of the window.
+        near_color: RGB (0-1) at the near end.
+        smooth: Gaussian sigma, in pixels, applied to the depth before
+            quantising. 0 leaves the mesh's own relief.
+
+    Returns:
+        RGB image, shape (height, width, 3), dtype uint8. Meaningful only
+        where `mask` is True; elsewhere it holds `far_color`. Colours are
+        the ``int(c * 255)`` bytes of the two ends, interpolated with
+        rounding, so with `levels` no larger than the byte gap every level
+        is a distinct byte and the ends land exactly.
+
+    Raises:
+        ValueError: If `levels` < 2, `depth_range` <= 0, `smooth` < 0, or
+            the two arrays disagree in shape.
+    """
+    if levels < 2:
+        raise ValueError(f"relief needs at least 2 levels, got {levels}")
+    if depth_range <= 0:
+        raise ValueError(f"relief depth_range must be > 0, got {depth_range}")
+    if smooth < 0:
+        raise ValueError(f"relief smooth must be >= 0, got {smooth}")
+    depth = np.asarray(depth, dtype=np.float32)
+    mask = np.asarray(mask)
+    if depth.ndim != 2 or mask.shape != depth.shape or mask.dtype != np.bool_:
+        raise ValueError(
+            "relief depth and mask must be 2-D arrays of one shape, mask "
+            f"boolean: got depth {depth.shape}, mask {mask.shape} {mask.dtype}"
+        )
+    height, width = depth.shape
+    covered = depth > 0
+
+    if not covered.any():
+        far_rgb = np.array([int(c * 255) for c in far_color], dtype=np.uint8)
+        return np.broadcast_to(far_rgb, (height, width, 3)).copy()
+
+    # Every pixel of the mask outside the mesh takes its nearest mesh
+    # pixel's depth. (An outline drawn from the mesh itself has none.)
+    if (mask & ~covered).any():
+        from scipy.ndimage import distance_transform_edt
+
+        _, (rows, cols) = distance_transform_edt(~covered, return_indices=True)
+        filled = depth[rows, cols]
+    else:
+        filled = depth.copy()
+
+    if smooth > 0:
+        import cv2
+
+        # A normalised blur, restricted to the mask, so the silhouette's
+        # edge averages only the subject and not the empty frame around it.
+        weight = mask.astype(np.float32)
+        ksize = 2 * int(np.ceil(3.0 * smooth)) + 1
+        num = cv2.GaussianBlur(filled * weight, (ksize, ksize), smooth)
+        den = cv2.GaussianBlur(weight, (ksize, ksize), smooth)
+        filled = np.where(den > 1e-6, num / np.maximum(den, 1e-6), filled)
+
+    # Near = 1, far = 0, the window centred on center_depth.
+    t = 0.5 + (center_depth - filled) / depth_range
+    step = np.clip(np.floor(np.clip(t, 0.0, 1.0) * levels), 0, levels - 1)
+    frac = (step / (levels - 1)).astype(np.float32)[:, :, None]
+
+    far_rgb = np.array([int(c * 255) for c in far_color], dtype=np.float32)
+    near_rgb = np.array([int(c * 255) for c in near_color], dtype=np.float32)
+    rgb = np.rint(far_rgb + (near_rgb - far_rgb) * frac)
+    rgb = np.where(mask[:, :, None], rgb, far_rgb)
+    return rgb.astype(np.uint8)
+
+
 def outline_from_mask(
     mask: NDArray[np.bool_],
     fg_color: Tuple[float, float, float] = (0.0, 0.0, 0.0),
@@ -166,6 +273,7 @@ def outline_from_mask(
     style: str = "filled",
     thickness: int = 3,
     blur: int = 4,
+    fill: Optional[NDArray[np.uint8]] = None,
 ) -> NDArray[np.uint8]:
     """
     Draw a flat two-tone outline from a boolean coverage mask.
@@ -192,6 +300,10 @@ def outline_from_mask(
         thickness: Stroke width in pixels. Only used when style="stroke".
         blur: Blur radius in pixels, applied to color and alpha together.
             0 leaves hard two-tone edges.
+        fill: Optional RGB image, shape (height, width, 3), uint8, drawn
+            in place of the flat `fg_color` wherever the foreground is
+            drawn — :func:`relief_fill`'s output, say. Blurred with the
+            rest. The background and the alpha are unchanged by it.
 
     Returns:
         RGBA image, shape (height, width, 4), dtype uint8. Alpha is 255
@@ -200,7 +312,8 @@ def outline_from_mask(
 
     Raises:
         ValueError: If style is not "filled" or "stroke", if blur is
-            negative, or if the mask is not a 2-D boolean array.
+            negative, if the mask is not a 2-D boolean array, or if `fill`
+            is not an RGB uint8 image of the mask's size.
     """
     if style not in ("filled", "stroke"):
         raise ValueError(
@@ -246,8 +359,19 @@ def outline_from_mask(
     # keeps the outward half of a stroke from being clipped.
     alpha_mask = mask | fg_mask
 
+    if fill is not None:
+        fill = np.asarray(fill)
+        if fill.shape != (height, width, 3) or fill.dtype != np.uint8:
+            raise ValueError(
+                "Outline fill must be an RGB uint8 image of the mask's size "
+                f"({height}, {width}, 3), got shape {fill.shape} dtype {fill.dtype}"
+            )
+        fg = fill
+    else:
+        fg = fg_rgb
+
     image = np.empty((height, width, 4), dtype=np.uint8)
-    image[:, :, :3] = np.where(fg_mask[:, :, None], fg_rgb, bg_rgb)
+    image[:, :, :3] = np.where(fg_mask[:, :, None], fg, bg_rgb)
     image[:, :, 3] = alpha_mask.astype(np.uint8) * 255
 
     if blur > 0:
@@ -590,6 +714,7 @@ class Renderer:
         thickness: int = 3,
         blur: int = 4,
         mask: Optional[NDArray[np.bool_]] = None,
+        relief: Optional[Dict[str, Any]] = None,
     ) -> NDArray[np.uint8]:
         """
         Render the mesh as a flat two-tone outline.
@@ -621,6 +746,16 @@ class Renderer:
                 hard two-tone edges.
             mask: Optional boolean array, shape (height, width), True where
                 the subject covers the pixel. Replaces the mesh silhouette.
+            relief: Optional options for :func:`relief_fill`: the fill is
+                then the mesh's depth, smoothed and quantised, instead of
+                the flat `fg_color`. Keys: ``levels`` (default 16),
+                ``depth_range`` (metres, default 0.8), ``smooth`` (pixels,
+                default 0), ``near_color`` (default `fg_color`),
+                ``far_color`` (default `fg_color`), and ``center``, a world
+                point whose depth is the window's middle (default the
+                mesh's bounding-box centre). The mesh IS rasterized for
+                this, mask or no mask — the mask only says where the fill
+                is drawn. Filled style only.
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8.
@@ -646,6 +781,27 @@ class Renderer:
                     "Outline mask must match the render size: expected "
                     f"({self.height}, {self.width}), got {mask.shape}"
                 )
+        fill = None
+        if relief is not None:
+            if style != "filled":
+                raise ValueError("Outline relief is only defined for style='filled'")
+            depth = self._render_depth_buffer(camera)
+            center = relief.get("center")
+            if center is None:
+                center = self.scene.get_bbox_center()
+            center_cam = camera.get_w2c() @ np.append(np.asarray(center, dtype=np.float64), 1.0)
+            # The camera looks down -Z; the depth buffer is positive.
+            center_depth = float(-center_cam[2])
+            fill = relief_fill(
+                depth,
+                mask,
+                center_depth=center_depth,
+                depth_range=relief.get("depth_range", 0.8),
+                levels=relief.get("levels", 16),
+                far_color=relief.get("far_color", fg_color),
+                near_color=relief.get("near_color", fg_color),
+                smooth=relief.get("smooth", 0.0),
+            )
         return outline_from_mask(
             mask,
             fg_color=fg_color,
@@ -653,6 +809,7 @@ class Renderer:
             style=style,
             thickness=thickness,
             blur=blur,
+            fill=fill,
         )
 
     def render_skeleton(
@@ -674,6 +831,7 @@ class Renderer:
         pupil_color: Tuple[float, float, float] = None,
         pupil_scale: float = None,
         bg_color: Optional[Tuple[float, float, float]] = None,
+        occlusion_tolerance: Optional[float] = None,
     ) -> NDArray[np.uint8]:
         """
         Render 3D skeleton as spheres (joints) and cylinders (bones).
@@ -713,6 +871,17 @@ class Renderer:
                 in (0, 1]. 1.0 = a disc touching the upper and lower lid.
             bg_color: RGB color (0-1 range) for background. If None,
                 background remains transparent (alpha=0).
+            occlusion_tolerance: If set, in metres: a joint that lies
+                further than this behind the mesh's nearest surface at its
+                pixel is not drawn, and neither is any bone ending on it —
+                DWPose's rule for a keypoint its detector did not find, so
+                the drawing stays one it could have made. The joints sit
+                inside the body, a limb's radius or so behind its skin, so
+                the tolerance is what keeps a joint's own limb from hiding
+                it while the torso hides the arm behind it; something over
+                the thickest limb, around 0.15, does that for a body. None
+                draws every bone through everything, as before. The face
+                overlay is not tested (it has `face_max_angle` for that).
 
         Returns:
             RGBA image, shape (height, width, 4), dtype uint8
@@ -794,12 +963,27 @@ class Renderer:
             default_bone_color = bone_color if bone_color is not None else (0.0, 1.0, 0.0)
             bone_colors = {bone: default_bone_color for bone in bones}
 
+        # Which joints the body model lets the camera see. A bone is drawn
+        # when both its joints are, a dot when its joint is — DWPose's own
+        # rule for a keypoint its detector did not find.
+        visible = np.ones(len(skeleton_joints), dtype=bool)
+        if occlusion_tolerance is not None:
+            visible = self._joints_visible(
+                skeleton_joints, camera, occlusion_tolerance,
+                depth_scale=(
+                    skel_module.OCCLUSION_DEPTH_SCALE_BODY25
+                    if skeleton_format == "openpose_body25_hands" else None
+                ),
+            )
+
         # Add bones as cylinders FIRST (so joints render on top)
         if render_bones:
 
             for start_idx, end_idx in bones:
                 if start_idx >= len(skeleton_joints) or end_idx >= len(skeleton_joints):
                     continue  # Skip invalid bone indices
+                if not (visible[start_idx] and visible[end_idx]):
+                    continue
 
                 start_pos = skeleton_joints[start_idx]
                 end_pos = skeleton_joints[end_idx]
@@ -877,7 +1061,7 @@ class Renderer:
             # drawn at all — a dot left behind by a bone the style dropped
             # would read as a speck of noise, not as a keypoint.
             this_joint_color = joint_colors_list[joint_idx]
-            if this_joint_color is None:
+            if this_joint_color is None or not visible[joint_idx]:
                 continue
 
             sphere = trimesh.creation.icosphere(subdivisions=2, radius=joint_radius)
@@ -938,6 +1122,63 @@ class Renderer:
             skel_color[mask] = bg_rgba
 
         return skel_color
+
+    def _joints_visible(
+        self,
+        joints: NDArray[np.float32],
+        camera: Camera,
+        tolerance: float,
+        depth_scale: Optional[Dict[int, float]] = None,
+    ) -> NDArray[np.bool_]:
+        """
+        Which joints are not hidden behind the mesh, for `render_skeleton`.
+
+        A joint is hidden when the mesh's nearest surface at its pixel is
+        more than `tolerance` metres in front of it — times the joint's
+        entry in `depth_scale`, since a hip sits far deeper in its own
+        flesh than a wrist. Joints that project outside the frame, or onto
+        a pixel the mesh does not cover, are visible: there is nothing
+        there to hide them.
+
+        Args:
+            joints: World-space joint positions, shape (N, 3).
+            camera: The view.
+            tolerance: Metres a joint may sit behind the surface and still
+                count as seen — the depth of a joint inside its own limb.
+            depth_scale: Per-joint-index multiplier on `tolerance`
+                (:data:`~body2colmap.skeleton.OCCLUSION_DEPTH_SCALE_BODY25`
+                for BODY_25 joints); unlisted joints, or None, use 1.0.
+
+        Returns:
+            Boolean array, shape (N,), True where the joint is drawn.
+        """
+        if tolerance < 0:
+            raise ValueError(f"occlusion_tolerance must be >= 0, got {tolerance}")
+        joints = np.asarray(joints, dtype=np.float32)
+        visible = np.ones(len(joints), dtype=bool)
+        if len(joints) == 0:
+            return visible
+        mesh_depth = self._render_depth_buffer(camera)
+        w2c = camera.get_w2c()
+        cam = (w2c[:3, :3] @ joints.T).T + w2c[:3, 3]
+        depth = -cam[:, 2]  # the camera looks down -Z
+        pixels = camera.project(joints)
+        cols = np.floor(pixels[:, 0]).astype(int)
+        rows = np.floor(pixels[:, 1]).astype(int)
+        inside = (
+            (depth > 0)
+            & (cols >= 0) & (cols < self.width)
+            & (rows >= 0) & (rows < self.height)
+        )
+        surface = np.zeros(len(joints), dtype=np.float32)
+        surface[inside] = mesh_depth[rows[inside], cols[inside]]
+        scale = np.ones(len(joints), dtype=np.float32)
+        for index, factor in (depth_scale or {}).items():
+            if index < len(joints):
+                scale[index] = factor
+        hidden = inside & (surface > 0) & (depth > surface + tolerance * scale)
+        visible[hidden] = False
+        return visible
 
     def _render_face(
         self,
@@ -1168,8 +1409,11 @@ class Renderer:
                   Recognized base layers: "mesh", "depth", "outline"
                   (checked in that order). Recognized overlays: "skeleton",
                   "face". An "outline" entry may carry ``"mask"``, a boolean
-                  (height, width) array that replaces the mesh silhouette —
-                  see :meth:`render_outline`.
+                  (height, width) array that replaces the mesh silhouette,
+                  and ``"relief"``, the options that fill it with the mesh's
+                  quantised depth — see :meth:`render_outline`. A "skeleton"
+                  entry may carry ``"occlusion_tolerance"`` — see
+                  :meth:`render_skeleton`.
             splat_layer: Optional pre-rendered RGBA Gaussian-splat layer with
                 **straight** alpha, composited last (on top of everything).
                 It is passed in already rendered rather than named in ``modes``
@@ -1227,6 +1471,7 @@ class Renderer:
                 thickness=outline_opts.get("thickness", 3),
                 blur=outline_opts.get("blur", 4),
                 mask=outline_opts.get("mask"),
+                relief=outline_opts.get("relief"),
             )
 
         if base_image is not None:
@@ -1275,6 +1520,7 @@ class Renderer:
                 pupil_color=pupil_color,
                 pupil_scale=pupil_scale,
                 bg_color=skel_opts.get("bg_color"),
+                occlusion_tolerance=skel_opts.get("occlusion_tolerance"),
             )
             base_image = self.composite_over_background(base_image, camera)
             return self._composite_splat(base_image, splat_layer, inactive_mask)
@@ -1299,6 +1545,7 @@ class Renderer:
                 eye_color=eye_color,
                 pupil_color=pupil_color,
                 pupil_scale=pupil_scale,
+                occlusion_tolerance=skel_opts.get("occlusion_tolerance"),
             )
 
             # Composite skeleton over base using alpha blending

@@ -899,6 +899,24 @@ DWPOSE_UNDRAWN_BODY25_JOINTS = frozenset({
     22, 23, 24,  # RBigToe, RSmallToe, RHeel
 })
 
+# How far inside the body each BODY_25 joint sits, relative to a limb joint,
+# for the occlusion test in Renderer.render_skeleton. A joint is hidden when
+# the mesh surface at its pixel is further in front of it than the
+# tolerance, and the tolerance has to clear the joint's OWN flesh: measured
+# on a SAM-3D-Body fit, the hips are 14-22 cm inside the pelvis from every
+# side, the neck 27 cm behind the near deltoid in profile (where a 2-D
+# detector still finds it), the shoulders up to 18 cm, and limb joints
+# 3-9 cm — while a joint behind ANOTHER part is 37-57 cm back. Hand
+# keypoints (25+) and anything unlisted count as limb joints (1.0).
+OCCLUSION_DEPTH_SCALE_BODY25 = {
+    1: 2.5,                   # Neck
+    2: 1.5, 5: 1.5,           # RShoulder, LShoulder
+    8: 2.0, 9: 2.0, 12: 2.0,  # MidHip, RHip, LHip
+    0: 0.5,                   # Nose
+    15: 0.5, 16: 0.5,         # REye, LEye
+    17: 0.5, 18: 0.5,         # REar, LEar
+}
+
 
 def _dwpose_hand_bone_colors() -> Dict[Tuple[int, int], Tuple[float, float, float]]:
     """Colour every hand bone the way ``draw_handpose`` colours its edges.
