@@ -78,6 +78,35 @@ class ColmapExporter:
         if self.points_3d is not None:
             self._export_points3d(output_dir / "points3D.txt")
 
+    def _camera_table(self) -> Tuple[List[Tuple[str, int, int, Tuple[float, ...]]], List[int]]:
+        """
+        The distinct intrinsics among the cameras, and each image's camera id.
+
+        Cameras whose model, size and parameters agree (to the 6 decimals
+        cameras.txt is written at) share one CAMERA_ID; ids are 1-based in
+        first-seen order. An orbit at one focal length therefore exports
+        exactly as it always did -- one camera line, CAMERA_ID 1 on every
+        image -- and a set mixing focal lengths (a telephoto stretch of an
+        orbit, say) gets one line per lens instead of having every image
+        silently re-read through the first camera's.
+
+        Returns:
+            (table, ids): table[i] = (model, width, height, params) for
+            CAMERA_ID i + 1; ids[j] = the CAMERA_ID of image j.
+        """
+        table: List[Tuple[str, int, int, Tuple[float, ...]]] = []
+        index = {}
+        ids: List[int] = []
+        for cam in self.cameras:
+            model, params = cam.get_colmap_intrinsics()
+            key = (model, int(cam.width), int(cam.height),
+                   tuple(round(float(p), 6) for p in params))
+            if key not in index:
+                table.append(key)
+                index[key] = len(table)
+            ids.append(index[key])
+        return table, ids
+
     def _export_cameras(self, filepath: Path) -> None:
         """
         Export cameras.txt file.
@@ -87,23 +116,20 @@ class ColmapExporter:
 
         For PINHOLE model: PARAMS = fx fy cx cy
 
-        Note:
-            We assume all cameras share the same intrinsics (single camera ID).
-            This is typical for orbit rendering.
+        One line per distinct set of intrinsics (see `_camera_table`); an
+        orbit rendered through one lens writes a single line.
         """
-        # Use intrinsics from first camera (assume all same)
-        cam = self.cameras[0]
+        table, _ = self._camera_table()
 
         with open(filepath, 'w') as f:
             # Write header
             f.write("# Camera list with one line of data per camera:\n")
             f.write("# CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
-            f.write("# Number of cameras: 1\n")
+            f.write(f"# Number of cameras: {len(table)}\n")
 
-            # Write camera
-            model, params = cam.get_colmap_intrinsics()
-            params_str = " ".join(f"{p:.6f}" for p in params)
-            f.write(f"1 {model} {cam.width} {cam.height} {params_str}\n")
+            for camera_id, (model, width, height, params) in enumerate(table, start=1):
+                params_str = " ".join(f"{p:.6f}" for p in params)
+                f.write(f"{camera_id} {model} {width} {height} {params_str}\n")
 
     def _export_images(self, filepath: Path) -> None:
         """
@@ -127,8 +153,11 @@ class ColmapExporter:
             f.write("# POINTS2D[] as (X, Y, POINT3D_ID)\n")
             f.write(f"# Number of images: {len(self.cameras)}\n")
 
+            _, camera_ids = self._camera_table()
+
             # Write each image
-            for image_id, (camera, name) in enumerate(zip(self.cameras, self.image_names), start=1):
+            for image_id, (camera, name, camera_id) in enumerate(
+                    zip(self.cameras, self.image_names, camera_ids), start=1):
                 # Get extrinsics in COLMAP format (OpenCV convention)
                 quat_wxyz, t_w2c = camera.get_colmap_extrinsics()
 
@@ -137,7 +166,7 @@ class ColmapExporter:
                     f"{image_id} "
                     f"{quat_wxyz[0]:.8f} {quat_wxyz[1]:.8f} {quat_wxyz[2]:.8f} {quat_wxyz[3]:.8f} "
                     f"{t_w2c[0]:.8f} {t_w2c[1]:.8f} {t_w2c[2]:.8f} "
-                    f"1 {name}\n"
+                    f"{camera_id} {name}\n"
                 )
 
                 # Write empty points2D line
